@@ -13,7 +13,7 @@ on:
       enable_upx:
         description: 'Enable UPX compression (true/false)'
         required: false
-        default: 'false'
+        default: 'true'
 
 permissions:
   contents: write
@@ -89,7 +89,7 @@ jobs:
             VERSION="${{ github.event.inputs.version || 'dev' }}"
           fi
           BUILDTIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          ENABLE_UPX_RAW="${{ github.event.inputs.enable_upx || 'false' }}"
+          ENABLE_UPX_RAW="${{ github.event.inputs.enable_upx || 'true' }}"
           case "${ENABLE_UPX_RAW}" in
             true|1|yes|on) ENABLE_UPX=1 ;;
             *) ENABLE_UPX=0 ;;
