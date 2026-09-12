@@ -227,7 +227,7 @@ const airplaneHint = computed(() => {
         <div class="policy-setting-row">
           <span>
             <strong>前置代理</strong>
-            <small>指定这张卡走哪条。不指定就按国家，多条时随机；改完会自动重连</small>
+            <small>指定这张卡走哪条。不指定就按国家，多条时优先选 UDP 正常的；改完会自动重连</small>
           </span>
           <div class="policy-field-control">
             <el-select

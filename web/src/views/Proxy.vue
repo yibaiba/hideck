@@ -494,7 +494,7 @@ async function doUpsertCountryRule() {
       enabled: true
     })
     if (!result.ok) throw new Error(result.error.message || '保存规则失败')
-    ElMessage.success('国家规则已保存。同一国家绑多条时，开 VoWiFi 会随机选节点')
+    ElMessage.success('国家规则已保存。同一国家绑多条时，开 VoWiFi 会优先选 UDP 正常的节点')
     selectedCountryCode.value = ''
     await fetchUpstream()
   } catch (e: unknown) {

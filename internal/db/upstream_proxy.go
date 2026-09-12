@@ -24,7 +24,7 @@ type UpstreamProxy struct {
 }
 
 // UpstreamProxyCountryRule 将 SIM home country 路由到一条前置代理。
-// 同一国家可以绑多条，开 VoWiFi 时从启用节点里随机选。
+// 同一国家可以绑多条，开 VoWiFi 时从启用节点里选；多条时优先 UDP 正常的再随机。
 type UpstreamProxyCountryRule struct {
 	CountryCode     string    `gorm:"primaryKey;size:8" json:"country_code"`
 	UpstreamProxyID string    `gorm:"primaryKey;size:64" json:"upstream_proxy_id"`

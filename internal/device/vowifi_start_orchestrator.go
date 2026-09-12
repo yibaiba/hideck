@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/iniwex5/vowifi-go/engine/ipsec"
@@ -299,6 +300,7 @@ func (p *Pool) prepareVoWiFiStartContext(deviceID, traceID, runtimeEPDGOverride 
 		"applied", prepared.IMSIdentity.Applied)
 
 	proxy, errProxy := resolveVoWiFiCountryProxy(voWiFiProxyResolveRequest{
+		Ctx:      p.Context(),
 		HomeMCC:  startProfile.MCC,
 		TraceID:  traceID,
 		DeviceID: deviceID,
@@ -426,6 +428,7 @@ func (p *Pool) prepareCellularStartContext(
 	startCtx.SIM = runtimehost.NewReaderSIMAdapter(akaProvider)
 
 	countryProxy, errProxy := resolveVoWiFiCountryProxy(voWiFiProxyResolveRequest{
+		Ctx:      p.Context(),
 		HomeMCC:  startProfile.MCC,
 		TraceID:  traceID,
 		DeviceID: deviceID,
@@ -533,6 +536,7 @@ func enterVoWiFiRFOff(ctx context.Context, w *Worker, traceID string) error {
 }
 
 type voWiFiProxyResolveRequest struct {
+	Ctx      context.Context
 	HomeMCC  string
 	TraceID  string
 	DeviceID string
@@ -551,7 +555,7 @@ func resolveVoWiFiCountryProxy(req voWiFiProxyResolveRequest) (*runtimehost.Prox
 	if err != nil {
 		return nil, fmt.Errorf("读取 VoWiFi 国家前置代理配置失败: %w", err)
 	}
-	proxy := db.PickUpstreamProxy(proxies)
+	proxy := pickCountryPoolProxy(req.Ctx, proxies)
 	if proxy == nil {
 		logger.Info("VoWiFi 国家前置代理未命中，使用直连",
 			"trace_id", req.TraceID,
@@ -631,6 +635,82 @@ func proxyConfigFromDB(proxy *db.UpstreamProxy) *runtimehost.ProxyConfig {
 		Password: proxy.Password,
 		Enabled:  proxy.Enabled,
 	}
+}
+
+type socks5ProxyProber func(context.Context, db.UpstreamProxy) (upstreamproxy.ProbeResult, error)
+
+func probeSOCKS5Proxy(ctx context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
+	return upstreamproxy.ProbeSOCKS5(ctx, upstreamproxy.ProbeConfig{
+		ProxyAddr: proxy.Addr,
+		Username:  proxy.Username,
+		Password:  proxy.Password,
+		Timeout:   5 * time.Second,
+	})
+}
+
+func pickCountryPoolProxy(ctx context.Context, proxies []db.UpstreamProxy) *db.UpstreamProxy {
+	return pickCountryPoolProxyWith(ctx, proxies, probeSOCKS5Proxy)
+}
+
+func pickCountryPoolProxyWith(ctx context.Context, proxies []db.UpstreamProxy, probe socks5ProxyProber) *db.UpstreamProxy {
+	if len(proxies) <= 1 || probe == nil {
+		return db.PickUpstreamProxy(proxies)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	type outcome struct {
+		proxy db.UpstreamProxy
+		res   upstreamproxy.ProbeResult
+	}
+	results := make([]outcome, len(proxies))
+	var wg sync.WaitGroup
+	for i, proxy := range proxies {
+		wg.Add(1)
+		go func(i int, proxy db.UpstreamProxy) {
+			defer wg.Done()
+			res, _ := probe(ctx, proxy)
+			results[i] = outcome{proxy: proxy, res: res}
+		}(i, proxy)
+	}
+	wg.Wait()
+
+	udpOK := make([]db.UpstreamProxy, 0, len(results))
+	assocOK := make([]db.UpstreamProxy, 0, len(results))
+	skipped := make([]string, 0)
+	for _, item := range results {
+		switch {
+		case item.res.OK():
+			udpOK = append(udpOK, item.proxy)
+		case item.res.UDPAssociationOK():
+			assocOK = append(assocOK, item.proxy)
+			skipped = append(skipped, item.proxy.ID)
+		default:
+			skipped = append(skipped, item.proxy.ID)
+		}
+	}
+	switch {
+	case len(udpOK) > 0:
+		if len(skipped) > 0 {
+			logger.Info("国家前置代理池跳过公共 DNS UDP 异常节点",
+				"kept", proxyIDs(udpOK),
+				"skipped", skipped)
+		}
+		return db.PickUpstreamProxy(udpOK)
+	case len(assocOK) > 0:
+		return db.PickUpstreamProxy(assocOK)
+	default:
+		return db.PickUpstreamProxy(proxies)
+	}
+}
+
+func proxyIDs(proxies []db.UpstreamProxy) []string {
+	out := make([]string, 0, len(proxies))
+	for _, proxy := range proxies {
+		out = append(out, proxy.ID)
+	}
+	return out
 }
 
 func (p *Pool) beforeVoWiFiStart(deviceID string, modemIface runtimehost.Modem, proxyCfg *runtimehost.ProxyConfig) func(context.Context, runtimehost.SessionConfig) error {

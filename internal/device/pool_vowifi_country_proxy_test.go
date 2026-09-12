@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,6 +116,82 @@ func TestResolveVoWiFiCountryProxyCardDirect(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("card direct=%+v, want nil", got)
+	}
+}
+
+func TestPickCountryPoolProxySkipsUDPUnhealthyWhenHealthyPeerExists(t *testing.T) {
+	proxies := []db.UpstreamProxy{
+		{ID: "gb-bad", Addr: "sichuan.example:2260", Enabled: true},
+		{ID: "gb-ok", Addr: "127.0.0.1:7890", Enabled: true},
+	}
+	probe := func(_ context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
+		if proxy.ID == "gb-ok" {
+			return upstreamproxy.ProbeResult{
+				Reachable: true, HandshakeOK: true, UDPAssociateOK: true, UDPRelayOK: true,
+			}, nil
+		}
+		return upstreamproxy.ProbeResult{
+			Reachable: true, HandshakeOK: true, UDPAssociateOK: true, UDPRelayOK: false,
+		}, errors.New("udp relay failed")
+	}
+	for i := 0; i < 20; i++ {
+		got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
+		if got == nil || got.ID != "gb-ok" {
+			t.Fatalf("pick=%+v, want gb-ok when a UDP-healthy peer exists", got)
+		}
+	}
+}
+
+func TestPickCountryPoolProxyRandomizesAmongUDPHealthyPeers(t *testing.T) {
+	proxies := []db.UpstreamProxy{
+		{ID: "gb-a", Addr: "127.0.0.1:1081", Enabled: true},
+		{ID: "gb-b", Addr: "127.0.0.1:1082", Enabled: true},
+	}
+	probe := func(_ context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
+		return upstreamproxy.ProbeResult{
+			Reachable: true, HandshakeOK: true, UDPAssociateOK: true, UDPRelayOK: true,
+		}, nil
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
+		if got == nil {
+			t.Fatal("pick returned nil")
+		}
+		seen[got.ID] = true
+	}
+	if !seen["gb-a"] || !seen["gb-b"] {
+		t.Fatalf("healthy pool should still randomize, got %v", seen)
+	}
+}
+
+func TestPickCountryPoolProxyFallsBackWhenUDPFailsOnEveryNode(t *testing.T) {
+	proxies := []db.UpstreamProxy{
+		{ID: "gb-a", Addr: "127.0.0.1:1081", Enabled: true},
+		{ID: "gb-b", Addr: "127.0.0.1:1082", Enabled: true},
+	}
+	probe := func(_ context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
+		return upstreamproxy.ProbeResult{
+			Reachable: true, HandshakeOK: true, UDPAssociateOK: true, UDPRelayOK: false,
+		}, errors.New("udp relay failed")
+	}
+	got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
+	if got == nil || (got.ID != "gb-a" && got.ID != "gb-b") {
+		t.Fatalf("all-UDP-fail pool should still pick a node, got %+v", got)
+	}
+}
+
+func TestPickCountryPoolProxySingleNodeKeepsUDPUnhealthy(t *testing.T) {
+	proxies := []db.UpstreamProxy{
+		{ID: "gb-only", Addr: "127.0.0.1:1081", Enabled: true},
+	}
+	probe := func(_ context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
+		t.Fatal("single-node country pick must not probe")
+		return upstreamproxy.ProbeResult{}, errors.New("unused")
+	}
+	got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
+	if got == nil || got.ID != "gb-only" {
+		t.Fatalf("single node=%+v, want gb-only", got)
 	}
 }
 
