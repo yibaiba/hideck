@@ -136,8 +136,8 @@ func TestPickCountryPoolProxySkipsUDPUnhealthyWhenHealthyPeerExists(t *testing.T
 	}
 	for i := 0; i < 20; i++ {
 		got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
-		if got == nil || got.ID != "gb-ok" {
-			t.Fatalf("pick=%+v, want gb-ok when a UDP-healthy peer exists", got)
+		if got.Proxy == nil || got.Proxy.ID != "gb-ok" || got.Tier != countryPoolTierUDP {
+			t.Fatalf("pick=%+v, want gb-ok udp when a UDP-healthy peer exists", got)
 		}
 	}
 }
@@ -155,10 +155,10 @@ func TestPickCountryPoolProxyRandomizesAmongUDPHealthyPeers(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 40; i++ {
 		got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
-		if got == nil {
+		if got.Proxy == nil {
 			t.Fatal("pick returned nil")
 		}
-		seen[got.ID] = true
+		seen[got.Proxy.ID] = true
 	}
 	if !seen["gb-a"] || !seen["gb-b"] {
 		t.Fatalf("healthy pool should still randomize, got %v", seen)
@@ -176,8 +176,74 @@ func TestPickCountryPoolProxyFallsBackWhenUDPFailsOnEveryNode(t *testing.T) {
 		}, errors.New("udp relay failed")
 	}
 	got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
-	if got == nil || (got.ID != "gb-a" && got.ID != "gb-b") {
-		t.Fatalf("all-UDP-fail pool should still pick a node, got %+v", got)
+	if got.Proxy == nil || (got.Proxy.ID != "gb-a" && got.Proxy.ID != "gb-b") || got.Tier != countryPoolTierAssociate {
+		t.Fatalf("all-UDP-fail pool should still pick an associate node, got %+v", got)
+	}
+}
+
+func TestPickCountryPoolProxyDoesNotWaitForSlowUDPFailure(t *testing.T) {
+	proxies := []db.UpstreamProxy{
+		{ID: "gb-bad", Addr: "127.0.0.1:1081", Enabled: true},
+		{ID: "gb-ok", Addr: "127.0.0.1:1082", Enabled: true},
+	}
+	probe := func(ctx context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
+		if proxy.ID == "gb-ok" {
+			return upstreamproxy.ProbeResult{
+				Reachable: true, HandshakeOK: true, UDPAssociateOK: true, UDPRelayOK: true,
+			}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return upstreamproxy.ProbeResult{Stage: "cancelled"}, ctx.Err()
+		case <-time.After(5 * time.Second):
+			t.Error("slow UDP-fail probe was not cancelled")
+			return upstreamproxy.ProbeResult{
+				Reachable: true, HandshakeOK: true, UDPAssociateOK: true, UDPRelayOK: false,
+			}, errors.New("udp relay failed")
+		}
+	}
+	started := time.Now()
+	got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
+	elapsed := time.Since(started)
+	if got.Proxy == nil || got.Proxy.ID != "gb-ok" || got.Tier != countryPoolTierUDP {
+		t.Fatalf("pick=%+v, want gb-ok udp", got)
+	}
+	if elapsed > time.Second+countryPoolPickGrace {
+		t.Fatalf("pick waited %s, want <= 1s after first UDP-healthy peer", elapsed)
+	}
+}
+
+func TestResolveCellularIMSCountryProxySkipsWhenInterfaceOnline(t *testing.T) {
+	openDeviceTestDB(t)
+	loadDeviceCountryTableFixture(t)
+	iccid := "8944109999999999999"
+	if err := db.UpsertCardPolicy(db.CardPolicy{
+		ICCID: iccid, VowifiUpstreamProxyID: "missing-node", Source: "user",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveCellularIMSCountryProxy(true, "wwan0", voWiFiProxyResolveRequest{
+		HomeMCC: "310", TraceID: "trace-1", DeviceID: "dev-1", ICCID: iccid,
+	})
+	if err != nil || got != nil {
+		t.Fatalf("online cellular bind should skip country proxy resolve, got %+v err=%v", got, err)
+	}
+}
+
+func TestResolveCellularIMSCountryProxyStillResolvesWhenOffline(t *testing.T) {
+	openDeviceTestDB(t)
+	loadDeviceCountryTableFixture(t)
+	iccid := "8944108888888888888"
+	if err := db.UpsertCardPolicy(db.CardPolicy{
+		ICCID: iccid, VowifiUpstreamProxyID: "missing-node", Source: "user",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveCellularIMSCountryProxy(false, "wwan0", voWiFiProxyResolveRequest{
+		HomeMCC: "310", TraceID: "trace-1", DeviceID: "dev-1", ICCID: iccid,
+	})
+	if err == nil || got != nil {
+		t.Fatalf("offline cellular should still resolve country/card proxy, got %+v err=%v", got, err)
 	}
 }
 
@@ -190,7 +256,7 @@ func TestPickCountryPoolProxySingleNodeKeepsUDPUnhealthy(t *testing.T) {
 		return upstreamproxy.ProbeResult{}, errors.New("unused")
 	}
 	got := pickCountryPoolProxyWith(context.Background(), proxies, probe)
-	if got == nil || got.ID != "gb-only" {
+	if got.Proxy == nil || got.Proxy.ID != "gb-only" || got.Tier != countryPoolTierSingle {
 		t.Fatalf("single node=%+v, want gb-only", got)
 	}
 }

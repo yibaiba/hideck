@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/iniwex5/vowifi-go/engine/ipsec"
@@ -427,7 +426,7 @@ func (p *Pool) prepareCellularStartContext(
 	}
 	startCtx.SIM = runtimehost.NewReaderSIMAdapter(akaProvider)
 
-	countryProxy, errProxy := resolveVoWiFiCountryProxy(voWiFiProxyResolveRequest{
+	countryProxy, errProxy := resolveCellularIMSCountryProxy(hasInternet, ifaceName, voWiFiProxyResolveRequest{
 		Ctx:      p.Context(),
 		HomeMCC:  startProfile.MCC,
 		TraceID:  traceID,
@@ -555,8 +554,8 @@ func resolveVoWiFiCountryProxy(req voWiFiProxyResolveRequest) (*runtimehost.Prox
 	if err != nil {
 		return nil, fmt.Errorf("读取 VoWiFi 国家前置代理配置失败: %w", err)
 	}
-	proxy := pickCountryPoolProxy(req.Ctx, proxies)
-	if proxy == nil {
+	pick := pickCountryPoolProxy(req.Ctx, proxies)
+	if pick.Proxy == nil {
 		logger.Info("VoWiFi 国家前置代理未命中，使用直连",
 			"trace_id", req.TraceID,
 			"device", req.DeviceID,
@@ -575,10 +574,19 @@ func resolveVoWiFiCountryProxy(req voWiFiProxyResolveRequest) (*runtimehost.Prox
 		"device", req.DeviceID,
 		"home_mcc", strings.TrimSpace(req.HomeMCC),
 		"proxy_country_code", countryCode,
-		"upstream_proxy_id", proxy.ID,
+		"upstream_proxy_id", pick.Proxy.ID,
 		"proxy_pool_size", len(proxies),
-		"proxy_route", route)
-	return proxyConfigFromDB(proxy), nil
+		"proxy_route", route,
+		"proxy_pick_tier", pick.Tier,
+		"skipped_proxies", formatCountryPoolSkips(pick.Skipped))
+	return proxyConfigFromDB(pick.Proxy), nil
+}
+
+func resolveCellularIMSCountryProxy(hasInternet bool, iface string, req voWiFiProxyResolveRequest) (*runtimehost.ProxyConfig, error) {
+	if cellularIMSUsesBoundInterface(hasInternet, iface) {
+		return nil, nil
+	}
+	return resolveVoWiFiCountryProxy(req)
 }
 
 func resolveCardVoWiFiUpstreamProxy(iccid, traceID, deviceID string) (*runtimehost.ProxyConfig, bool, error) {
@@ -637,78 +645,173 @@ func proxyConfigFromDB(proxy *db.UpstreamProxy) *runtimehost.ProxyConfig {
 	}
 }
 
+const (
+	countryPoolPickTimeout = 2 * time.Second
+	countryPoolPickGrace   = 400 * time.Millisecond
+
+	countryPoolTierUDP       = "udp"
+	countryPoolTierAssociate = "associate"
+	countryPoolTierAny       = "any"
+	countryPoolTierSingle    = "single"
+)
+
 type socks5ProxyProber func(context.Context, db.UpstreamProxy) (upstreamproxy.ProbeResult, error)
 
-func probeSOCKS5Proxy(ctx context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
+type countryPoolSkip struct {
+	ID     string
+	Stage  string
+	Reason string
+}
+
+type countryPoolPickResult struct {
+	Proxy   *db.UpstreamProxy
+	Tier    string
+	Skipped []countryPoolSkip
+}
+
+type countryPoolProbeOutcome struct {
+	proxy db.UpstreamProxy
+	res   upstreamproxy.ProbeResult
+}
+
+func probeSOCKS5ProxyForPick(ctx context.Context, proxy db.UpstreamProxy) (upstreamproxy.ProbeResult, error) {
 	return upstreamproxy.ProbeSOCKS5(ctx, upstreamproxy.ProbeConfig{
 		ProxyAddr: proxy.Addr,
 		Username:  proxy.Username,
 		Password:  proxy.Password,
-		Timeout:   5 * time.Second,
+		Timeout:   countryPoolPickTimeout,
 	})
 }
 
-func pickCountryPoolProxy(ctx context.Context, proxies []db.UpstreamProxy) *db.UpstreamProxy {
-	return pickCountryPoolProxyWith(ctx, proxies, probeSOCKS5Proxy)
+func pickCountryPoolProxy(ctx context.Context, proxies []db.UpstreamProxy) countryPoolPickResult {
+	return pickCountryPoolProxyWith(ctx, proxies, probeSOCKS5ProxyForPick)
 }
 
-func pickCountryPoolProxyWith(ctx context.Context, proxies []db.UpstreamProxy, probe socks5ProxyProber) *db.UpstreamProxy {
-	if len(proxies) <= 1 || probe == nil {
-		return db.PickUpstreamProxy(proxies)
+func pickCountryPoolProxyWith(ctx context.Context, proxies []db.UpstreamProxy, probe socks5ProxyProber) countryPoolPickResult {
+	if len(proxies) == 0 {
+		return countryPoolPickResult{}
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	if len(proxies) == 1 || probe == nil {
+		return countryPoolPickResult{Proxy: db.PickUpstreamProxy(proxies), Tier: countryPoolTierSingle}
+	}
+	parent := ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	pickCtx, cancel := context.WithTimeout(parent, countryPoolPickTimeout)
+	defer cancel()
+
+	ch := make(chan countryPoolProbeOutcome, len(proxies))
+	for _, proxy := range proxies {
+		proxy := proxy
+		go func() {
+			res, _ := probe(pickCtx, proxy)
+			ch <- countryPoolProbeOutcome{proxy: proxy, res: res}
+		}()
 	}
 
-	type outcome struct {
-		proxy db.UpstreamProxy
-		res   upstreamproxy.ProbeResult
+	collected := make([]countryPoolProbeOutcome, 0, len(proxies))
+	pending := len(proxies)
+	var grace *time.Timer
+	stopGrace := func() {
+		if grace != nil {
+			grace.Stop()
+		}
 	}
-	results := make([]outcome, len(proxies))
-	var wg sync.WaitGroup
-	for i, proxy := range proxies {
-		wg.Add(1)
-		go func(i int, proxy db.UpstreamProxy) {
-			defer wg.Done()
-			res, _ := probe(ctx, proxy)
-			results[i] = outcome{proxy: proxy, res: res}
-		}(i, proxy)
-	}
-	wg.Wait()
+	defer stopGrace()
 
-	udpOK := make([]db.UpstreamProxy, 0, len(results))
-	assocOK := make([]db.UpstreamProxy, 0, len(results))
-	skipped := make([]string, 0)
-	for _, item := range results {
+	for pending > 0 {
+		var graceC <-chan time.Time
+		if grace != nil {
+			graceC = grace.C
+		}
+		select {
+		case item := <-ch:
+			collected = append(collected, item)
+			pending--
+			if item.res.OK() && grace == nil {
+				grace = time.NewTimer(countryPoolPickGrace)
+			}
+		case <-graceC:
+			cancel()
+			collected = append(collected, drainCountryPoolOutcomes(ch)...)
+			pending = 0
+		case <-pickCtx.Done():
+			collected = append(collected, drainCountryPoolOutcomes(ch)...)
+			pending = 0
+		}
+	}
+	return classifyCountryPoolPick(proxies, collected)
+}
+
+func drainCountryPoolOutcomes(ch <-chan countryPoolProbeOutcome) []countryPoolProbeOutcome {
+	out := make([]countryPoolProbeOutcome, 0)
+	for {
+		select {
+		case item := <-ch:
+			out = append(out, item)
+		default:
+			return out
+		}
+	}
+}
+
+func classifyCountryPoolPick(proxies []db.UpstreamProxy, collected []countryPoolProbeOutcome) countryPoolPickResult {
+	byID := make(map[string]countryPoolProbeOutcome, len(collected))
+	for _, item := range collected {
+		byID[item.proxy.ID] = item
+	}
+	udpOK := make([]db.UpstreamProxy, 0, len(proxies))
+	assocOK := make([]db.UpstreamProxy, 0, len(proxies))
+	skipped := make([]countryPoolSkip, 0)
+	for _, proxy := range proxies {
+		item, ok := byID[proxy.ID]
+		if !ok {
+			skipped = append(skipped, countryPoolSkip{
+				ID: proxy.ID, Stage: "cancelled", Reason: "已有 UDP 正常节点，停止等待",
+			})
+			continue
+		}
 		switch {
 		case item.res.OK():
-			udpOK = append(udpOK, item.proxy)
+			udpOK = append(udpOK, proxy)
 		case item.res.UDPAssociationOK():
-			assocOK = append(assocOK, item.proxy)
-			skipped = append(skipped, item.proxy.ID)
+			assocOK = append(assocOK, proxy)
+			skipped = append(skipped, countryPoolSkip{
+				ID: proxy.ID, Stage: item.res.Stage, Reason: item.res.FailureSummary(),
+			})
 		default:
-			skipped = append(skipped, item.proxy.ID)
+			skipped = append(skipped, countryPoolSkip{
+				ID: proxy.ID, Stage: item.res.Stage, Reason: item.res.FailureSummary(),
+			})
 		}
 	}
+	result := countryPoolPickResult{Skipped: skipped}
 	switch {
 	case len(udpOK) > 0:
-		if len(skipped) > 0 {
-			logger.Info("国家前置代理池跳过公共 DNS UDP 异常节点",
-				"kept", proxyIDs(udpOK),
-				"skipped", skipped)
-		}
-		return db.PickUpstreamProxy(udpOK)
+		result.Proxy = db.PickUpstreamProxy(udpOK)
+		result.Tier = countryPoolTierUDP
 	case len(assocOK) > 0:
-		return db.PickUpstreamProxy(assocOK)
+		result.Proxy = db.PickUpstreamProxy(assocOK)
+		result.Tier = countryPoolTierAssociate
 	default:
-		return db.PickUpstreamProxy(proxies)
+		result.Proxy = db.PickUpstreamProxy(proxies)
+		result.Tier = countryPoolTierAny
 	}
+	return result
 }
 
-func proxyIDs(proxies []db.UpstreamProxy) []string {
-	out := make([]string, 0, len(proxies))
-	for _, proxy := range proxies {
-		out = append(out, proxy.ID)
+func formatCountryPoolSkips(skips []countryPoolSkip) []string {
+	out := make([]string, 0, len(skips))
+	for _, skip := range skips {
+		part := skip.ID
+		if skip.Stage != "" {
+			part += ":" + skip.Stage
+		}
+		if skip.Reason != "" {
+			part += ":" + skip.Reason
+		}
+		out = append(out, part)
 	}
 	return out
 }

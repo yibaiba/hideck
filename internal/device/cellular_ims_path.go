@@ -27,10 +27,14 @@ func classifyCellularIMSError(err error) error {
 	return err
 }
 
+func cellularIMSUsesBoundInterface(hasInternet bool, iface string) bool {
+	return hasInternet && strings.TrimSpace(iface) != ""
+}
+
 func selectCellularIMSTransport(hasInternet bool, iface string, proxy *runtimehost.ProxyConfig) (cellularIMSTransport, error) {
 	iface = strings.TrimSpace(iface)
 	proxyReady := proxy != nil && proxy.Enabled && strings.TrimSpace(proxy.Addr) != ""
-	if hasInternet && iface != "" {
+	if cellularIMSUsesBoundInterface(hasInternet, iface) {
 		return cellularIMSTransport{BindInterface: iface}, nil
 	}
 	if proxyReady {

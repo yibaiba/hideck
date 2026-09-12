@@ -8,6 +8,18 @@ import (
 	"github.com/iniwex5/vowifi-go/runtimehost"
 )
 
+func TestCellularIMSUsesBoundInterface(t *testing.T) {
+	if !cellularIMSUsesBoundInterface(true, "wwan0") {
+		t.Fatal("online iface should bind")
+	}
+	if cellularIMSUsesBoundInterface(true, "  ") {
+		t.Fatal("blank iface should not bind")
+	}
+	if cellularIMSUsesBoundInterface(false, "wwan0") {
+		t.Fatal("offline cellular should not bind")
+	}
+}
+
 func TestSelectCellularIMSTransportPrefersInterfaceWhenOnline(t *testing.T) {
 	got, err := selectCellularIMSTransport(true, "wwan0", &runtimehost.ProxyConfig{
 		Enabled: true, Addr: "127.0.0.1:1080",
