@@ -1248,6 +1248,33 @@ func TestQMIBackendGetServingSystemFallbackWhenRegisteredButOperatorEmpty(t *tes
 	}
 }
 
+func TestQMIBackendGetServingSystemIgnoresLeftoverPLMNWhenNotRegistered(t *testing.T) {
+	src := &qmiBackendSendSourceStub{
+		servingSeq: []*qmi.ServingSystem{
+			{
+				RegistrationState: qmi.RegStateNotRegistered,
+				RadioInterface:    0x08,
+				MCC:               460,
+				MNC:               1,
+			},
+		},
+	}
+	backend, err := NewQMIBackend("/dev/null", src)
+	if err != nil {
+		t.Fatalf("NewQMIBackend failed: %v", err)
+	}
+	ss, err := backend.GetServingSystem(context.Background())
+	if err != nil {
+		t.Fatalf("GetServingSystem failed: %v", err)
+	}
+	if ss.RegStatus != 0 {
+		t.Fatalf("RegStatus=%d want 0", ss.RegStatus)
+	}
+	if ss.Operator != "" || ss.NetworkMode != "" {
+		t.Fatalf("airplane leftover camp must not be current serving: %+v", ss)
+	}
+}
+
 func TestQMIBackendGetServingSystemAddsLTEDuplexWithoutChangingMode(t *testing.T) {
 	src := &qmiBackendSendSourceStub{
 		servingSeq: []*qmi.ServingSystem{

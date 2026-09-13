@@ -25,6 +25,15 @@ func TestResolveServingOperatorNameFromPLMN(t *testing.T) {
 	}
 }
 
+func TestServingRegistrationCurrent(t *testing.T) {
+	if ServingRegistrationCurrent(0) || ServingRegistrationCurrent(2) || ServingRegistrationCurrent(3) || ServingRegistrationCurrent(4) {
+		t.Fatal("unregistered/searching must not count as a live camp")
+	}
+	if !ServingRegistrationCurrent(1) || !ServingRegistrationCurrent(5) {
+		t.Fatal("home and roaming must count as a live camp")
+	}
+}
+
 func TestLookupServingOperatorNameFromPLMN(t *testing.T) {
 	tests := []struct {
 		name string

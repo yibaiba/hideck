@@ -424,13 +424,15 @@ func (q *QMIBackend) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 		ss.RegStatusText = "未知"
 	}
 
-	// PLMN
+	// PLMN. Airplane / RF-off still reports the last MCC/MNC with "not registered".
+	// That is leftover, not a live camp — do not show it as the current operator.
 	ss.MCC = serving.MCC
 	ss.MNC = serving.MNC
-	if serving.MCC > 0 {
+	servingLive := modem.ServingRegistrationCurrent(ss.RegStatus)
+	if servingLive && serving.MCC > 0 {
 		ss.Operator = qmiOperatorDisplay(serving.MCC, serving.MNC)
 	}
-	if (ss.RegStatus == 1 || ss.RegStatus == 5) && strings.TrimSpace(ss.Operator) == "" && !operatorRetried {
+	if servingLive && strings.TrimSpace(ss.Operator) == "" && !operatorRetried {
 		logger.Debug("QMI serving 命中已注册但运营商为空，触发一次回源",
 			"reg_status", ss.RegStatus,
 			"mcc", ss.MCC,
@@ -445,6 +447,10 @@ func (q *QMIBackend) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 				ss.Operator = qmiOperatorDisplay(serving.MCC, serving.MNC)
 			}
 		}
+	}
+
+	if !servingLive {
+		return ss, nil
 	}
 
 	// 网络模式映射 (基于 QmiNasRadioInterface 标准)

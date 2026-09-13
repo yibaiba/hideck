@@ -107,14 +107,16 @@ func (b *MBIMBackend) GetServingSystem(ctx context.Context) (*ServingSystem, err
 		return nil, err
 	}
 	ss := &ServingSystem{
-		Operator: mbimOperatorDisplay(rs.ProviderName, rs.MCC, rs.MNC),
-		MCC:      atou16(rs.MCC),
-		MNC:      atou16(rs.MNC),
+		MCC: atou16(rs.MCC),
+		MNC: atou16(rs.MNC),
 	}
 	ss.RegStatus, ss.RegStatusText = mapMBIMRegisterState(rs.RegisterState)
-	if ps, err := b.source.PacketService(ctx); err == nil {
-		ss.PSAttached = ps.State == 2
-		ss.NetworkMode = mbimDataClassToNetworkMode(ps.HighestClass)
+	if modem.ServingRegistrationCurrent(ss.RegStatus) {
+		ss.Operator = mbimOperatorDisplay(rs.ProviderName, rs.MCC, rs.MNC)
+		if ps, err := b.source.PacketService(ctx); err == nil {
+			ss.PSAttached = ps.State == 2
+			ss.NetworkMode = mbimDataClassToNetworkMode(ps.HighestClass)
+		}
 	}
 	return ss, nil
 }

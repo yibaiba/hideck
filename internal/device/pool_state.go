@@ -369,7 +369,6 @@ func (w *Worker) mergeRuntimeStateLocked(status modem.DeviceStatus, healthy bool
 		w.state.Identity.IMEI = strings.TrimSpace(status.IMEI)
 	}
 	w.state.Runtime.Firmware = status.Firmware
-	w.state.Runtime.Operator = status.Operator
 	w.state.Runtime.SimInserted = status.SimInserted
 	if status.SignalDBM != 0 {
 		w.state.Runtime.SignalDBM = status.SignalDBM
@@ -398,6 +397,11 @@ func (w *Worker) mergeRuntimeStateLocked(status modem.DeviceStatus, healthy bool
 		w.state.Runtime.RegStatus = status.RegStatus
 		w.state.Runtime.RegStatusText = status.RegStatusText
 		w.state.Runtime.PSAttached = status.PSAttached
+	}
+	if modem.ServingRegistrationCurrent(w.state.Runtime.RegStatus) {
+		w.state.Runtime.Operator = status.Operator
+	} else {
+		w.state.Runtime.Operator = ""
 	}
 	w.state.Runtime.LAC = status.LAC
 	w.state.Runtime.CellID = status.CellID

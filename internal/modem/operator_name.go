@@ -48,6 +48,12 @@ func normalizeOperatorCode(code string) string {
 	return strings.Trim(code, "\"")
 }
 
+// ServingRegistrationCurrent is a live camp (home or roaming), not leftover NAS/COPS
+// PLMN from airplane / RF-off / searching.
+func ServingRegistrationCurrent(regStatus int) bool {
+	return regStatus == 1 || regStatus == 5
+}
+
 // LookupServingOperatorNameFromPLMN returns the mapped serving-network display name when the PLMN is known.
 func LookupServingOperatorNameFromPLMN(plmn string) (string, bool) {
 	plmn = normalizeOperatorCode(plmn)

@@ -638,7 +638,7 @@ func (s *Server) handleListDevices(c *gin.Context) {
 			PublicIP:         w.GetCachedIP(),
 			PublicIPv6:       w.GetCachedIPv6(),
 			Healthy:          w.GetCachedHealthy(), // 健康状态读缓存
-			Operator:         status.Operator,
+			Operator:         device.DisplayOperatorName(status, s.pool.IsVoWiFiActive(w.ID)),
 			SignalDBM:        status.SignalDBM,
 			NetworkMode:      status.NetworkMode,
 			NetworkDuplex:    status.NetworkDuplex,

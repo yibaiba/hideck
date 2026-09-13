@@ -625,6 +625,29 @@ func TestMergeRuntimeStatePreservesRadioFieldsOnPartialRefresh(t *testing.T) {
 	}
 }
 
+func TestMergeRuntimeStateClearsServingOperatorWhenNotRegistered(t *testing.T) {
+	worker := &Worker{ID: "dev-qmi"}
+	worker.state.Runtime.Operator = "中国联通"
+	worker.state.Runtime.NetworkMode = "LTE"
+	worker.state.Runtime.RegStatus = 1
+	worker.state.Runtime.RegStatusText = "已注册(本地)"
+
+	worker.mergeRuntimeStateLocked(modem.DeviceStatus{
+		Operator:      "中国联通",
+		NetworkMode:   "LTE",
+		RegStatus:     0,
+		RegStatusText: "未注册",
+	}, true)
+
+	status := worker.ProjectDeviceStatus()
+	if status.Operator != "" {
+		t.Fatalf("Operator=%q want empty after RF-off leftover PLMN", status.Operator)
+	}
+	if status.RegStatusText != "未注册" {
+		t.Fatalf("RegStatusText=%q want 未注册", status.RegStatusText)
+	}
+}
+
 func TestMergeRuntimeStateClearsPlaceholderSignalDBM(t *testing.T) {
 	worker := &Worker{ID: "dev-qmi"}
 	worker.state.Runtime.SignalDBM = -125

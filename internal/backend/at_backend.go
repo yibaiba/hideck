@@ -94,17 +94,16 @@ func (a *ATBackend) GetServingSystem(ctx context.Context) (*ServingSystem, error
 		ss.CellID = cellID
 	}
 
-	// AT+COPS? → 运营商
-	if operator, err := a.modem.QueryOperator(); err == nil {
-		ss.Operator = operator
-	}
-
-	// AT+QNWINFO → 网络模式 / 双工方式 / 频段 / 信道
-	if mode, duplex, band, channel, err := a.modem.QueryNetworkRadio(); err == nil {
-		ss.NetworkMode = mode
-		ss.NetworkDuplex = duplex
-		ss.RadioBand = band
-		ss.RadioChannel = channel
+	if modem.ServingRegistrationCurrent(ss.RegStatus) {
+		if operator, err := a.modem.QueryOperator(); err == nil {
+			ss.Operator = operator
+		}
+		if mode, duplex, band, channel, err := a.modem.QueryNetworkRadio(); err == nil {
+			ss.NetworkMode = mode
+			ss.NetworkDuplex = duplex
+			ss.RadioBand = band
+			ss.RadioChannel = channel
+		}
 	}
 
 	return ss, nil
