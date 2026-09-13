@@ -107,6 +107,9 @@ func readATRadioSnapshotOnce(q ATRadioQuerier, out *ATRadioSnapshot) {
 			out.RegStatusText = v
 		}
 	}
+	if out.RegStatus != nil && !modem.ServingRegistrationCurrent(*out.RegStatus) {
+		return
+	}
 	if cell, err := q.QueryServingCellLTEInfo(); err == nil {
 		if cell.RSRP != 0 {
 			out.SignalRSRP = ptrInt(cell.RSRP)

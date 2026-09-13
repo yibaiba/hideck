@@ -1248,6 +1248,37 @@ func TestQMIBackendGetServingSystemFallbackWhenRegisteredButOperatorEmpty(t *tes
 	}
 }
 
+func TestQMIBackendGetServingSystemRetryRechecksRegistration(t *testing.T) {
+	src := &qmiBackendSendSourceStub{
+		servingSeq: []*qmi.ServingSystem{
+			{
+				RegistrationState: qmi.RegStateRegistered,
+				PSAttached:        true,
+				RadioInterface:    0x08,
+				MCC:               0,
+				MNC:               0,
+			},
+			{
+				RegistrationState: qmi.RegStateNotRegistered,
+				RadioInterface:    0x08,
+				MCC:               460,
+				MNC:               1,
+			},
+		},
+	}
+	backend, err := NewQMIBackend("/dev/null", src)
+	if err != nil {
+		t.Fatalf("NewQMIBackend failed: %v", err)
+	}
+	ss, err := backend.GetServingSystem(context.Background())
+	if err != nil {
+		t.Fatalf("GetServingSystem failed: %v", err)
+	}
+	if ss.RegStatus != 0 || ss.Operator != "" || ss.NetworkMode != "" {
+		t.Fatalf("retry that lands on RF-off leftover must not stay camped: %+v", ss)
+	}
+}
+
 func TestQMIBackendGetServingSystemIgnoresLeftoverPLMNWhenNotRegistered(t *testing.T) {
 	src := &qmiBackendSendSourceStub{
 		servingSeq: []*qmi.ServingSystem{

@@ -60,8 +60,8 @@ func TestReadATRadioSnapshotUsesEachAvailableField(t *testing.T) {
 	q := &atRadioSnapshotTestQuerier{
 		csqRSSI:   22,
 		csqDBM:    -75,
-		regStatus: 2,
-		regText:   "搜索中",
+		regStatus: 1,
+		regText:   "已注册(本地)",
 		cell: modem.ServingCellLTEInfo{
 			RSRP:    -104,
 			RSRQ:    -8,
@@ -91,8 +91,28 @@ func TestReadATRadioSnapshotUsesEachAvailableField(t *testing.T) {
 	if s.RadioBand == nil || *s.RadioBand != "LTE BAND 8" || s.RadioChannel == nil || *s.RadioChannel != 3740 {
 		t.Fatalf("radio fields missing: %+v", s)
 	}
-	if s.RegStatus == nil || *s.RegStatus != 2 || s.RegStatusText == nil || *s.RegStatusText != "搜索中" {
+	if s.RegStatus == nil || *s.RegStatus != 1 || s.RegStatusText == nil || *s.RegStatusText != "已注册(本地)" {
 		t.Fatalf("registration fields missing: %+v", s)
+	}
+}
+
+func TestReadATRadioSnapshotSkipsServingRadioWhenNotRegistered(t *testing.T) {
+	q := &atRadioSnapshotTestQuerier{
+		csqDBM:    -75,
+		regStatus: 0,
+		regText:   "未注册",
+		cell: modem.ServingCellLTEInfo{
+			RSRP: -104, Band: "LTE BAND 8", Channel: 3740,
+		},
+		mode:     "LTE",
+		operator: "中国联通",
+	}
+	s := ReadATRadioSnapshot(context.Background(), q, ATRadioReadOptions{Attempts: 1})
+	if s.SignalDBM == nil || *s.SignalDBM != -75 {
+		t.Fatalf("SignalDBM=%v want -75", s.SignalDBM)
+	}
+	if s.Operator != nil || s.NetworkMode != nil || s.RadioBand != nil {
+		t.Fatalf("RF-off leftover serving radio must stay unset: %+v", s)
 	}
 }
 

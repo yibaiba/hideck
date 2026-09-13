@@ -643,6 +643,9 @@ func TestMergeRuntimeStateClearsServingOperatorWhenNotRegistered(t *testing.T) {
 	if status.Operator != "" {
 		t.Fatalf("Operator=%q want empty after RF-off leftover PLMN", status.Operator)
 	}
+	if status.NetworkMode != "" || status.RadioBand != "" || status.RadioChannel != 0 {
+		t.Fatalf("RF-off leftover RAT still current: %+v", status)
+	}
 	if status.RegStatusText != "未注册" {
 		t.Fatalf("RegStatusText=%q want 未注册", status.RegStatusText)
 	}

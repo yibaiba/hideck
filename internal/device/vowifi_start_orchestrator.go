@@ -763,13 +763,9 @@ func classifyCountryPoolPick(proxies []db.UpstreamProxy, collected []countryPool
 	}
 	udpOK := make([]db.UpstreamProxy, 0, len(proxies))
 	assocOK := make([]db.UpstreamProxy, 0, len(proxies))
-	skipped := make([]countryPoolSkip, 0)
 	for _, proxy := range proxies {
 		item, ok := byID[proxy.ID]
 		if !ok {
-			skipped = append(skipped, countryPoolSkip{
-				ID: proxy.ID, Stage: "cancelled", Reason: "已有 UDP 正常节点，停止等待",
-			})
 			continue
 		}
 		switch {
@@ -777,16 +773,9 @@ func classifyCountryPoolPick(proxies []db.UpstreamProxy, collected []countryPool
 			udpOK = append(udpOK, proxy)
 		case item.res.UDPAssociationOK():
 			assocOK = append(assocOK, proxy)
-			skipped = append(skipped, countryPoolSkip{
-				ID: proxy.ID, Stage: item.res.Stage, Reason: item.res.FailureSummary(),
-			})
-		default:
-			skipped = append(skipped, countryPoolSkip{
-				ID: proxy.ID, Stage: item.res.Stage, Reason: item.res.FailureSummary(),
-			})
 		}
 	}
-	result := countryPoolPickResult{Skipped: skipped}
+	result := countryPoolPickResult{}
 	switch {
 	case len(udpOK) > 0:
 		result.Proxy = db.PickUpstreamProxy(udpOK)
@@ -798,6 +787,34 @@ func classifyCountryPoolPick(proxies []db.UpstreamProxy, collected []countryPool
 		result.Proxy = db.PickUpstreamProxy(proxies)
 		result.Tier = countryPoolTierAny
 	}
+	chosen := ""
+	if result.Proxy != nil {
+		chosen = result.Proxy.ID
+	}
+	uncollectedReason := "探测超时"
+	if len(udpOK) > 0 {
+		uncollectedReason = "已有 UDP 正常节点，停止等待"
+	}
+	skipped := make([]countryPoolSkip, 0)
+	for _, proxy := range proxies {
+		if proxy.ID == chosen {
+			continue
+		}
+		item, ok := byID[proxy.ID]
+		if !ok {
+			skipped = append(skipped, countryPoolSkip{
+				ID: proxy.ID, Stage: "cancelled", Reason: uncollectedReason,
+			})
+			continue
+		}
+		if item.res.OK() {
+			continue
+		}
+		skipped = append(skipped, countryPoolSkip{
+			ID: proxy.ID, Stage: item.res.Stage, Reason: item.res.FailureSummary(),
+		})
+	}
+	result.Skipped = skipped
 	return result
 }
 

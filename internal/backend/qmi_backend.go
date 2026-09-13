@@ -400,38 +400,9 @@ func (q *QMIBackend) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 		}
 	}
 
-	// 映射 QMI RegistrationState → AT-style regStatus
-	switch serving.RegistrationState {
-	case qmi.RegStateNotRegistered:
-		ss.RegStatus = 0
-		ss.RegStatusText = "未注册"
-	case qmi.RegStateRegistered:
-		ss.RegStatus = 1
-		ss.RegStatusText = "已注册(本地)"
-		ss.PSAttached = serving.PSAttached
-	case qmi.RegStateRoaming:
-		ss.RegStatus = 5
-		ss.RegStatusText = "已注册(漫游)"
-		ss.PSAttached = serving.PSAttached
-	case qmi.RegStateSearching:
-		ss.RegStatus = 2
-		ss.RegStatusText = "搜索中"
-	case qmi.RegStateDenied:
-		ss.RegStatus = 3
-		ss.RegStatusText = "注册被拒"
-	default:
-		ss.RegStatus = 4
-		ss.RegStatusText = "未知"
-	}
-
-	// PLMN. Airplane / RF-off still reports the last MCC/MNC with "not registered".
-	// That is leftover, not a live camp — do not show it as the current operator.
-	ss.MCC = serving.MCC
-	ss.MNC = serving.MNC
+	applyQMIServingRegistration(ss, serving)
+	applyQMIServingPLMN(ss, serving)
 	servingLive := modem.ServingRegistrationCurrent(ss.RegStatus)
-	if servingLive && serving.MCC > 0 {
-		ss.Operator = qmiOperatorDisplay(serving.MCC, serving.MNC)
-	}
 	if servingLive && strings.TrimSpace(ss.Operator) == "" && !operatorRetried {
 		logger.Debug("QMI serving 命中已注册但运营商为空，触发一次回源",
 			"reg_status", ss.RegStatus,
@@ -441,11 +412,9 @@ func (q *QMIBackend) GetServingSystem(ctx context.Context) (*ServingSystem, erro
 		operatorRetried = true
 		if live, liveErr := q.source.GetServingSystem(ctx); liveErr == nil && live != nil {
 			serving = live
-			ss.MCC = serving.MCC
-			ss.MNC = serving.MNC
-			if serving.MCC > 0 {
-				ss.Operator = qmiOperatorDisplay(serving.MCC, serving.MNC)
-			}
+			applyQMIServingRegistration(ss, serving)
+			applyQMIServingPLMN(ss, serving)
+			servingLive = modem.ServingRegistrationCurrent(ss.RegStatus)
 		}
 	}
 
@@ -520,6 +489,47 @@ func qmiRadioBandAndChannel(info *qmi.RFBandInfo) (string, uint32) {
 		}
 	}
 	return "", 0
+}
+
+func applyQMIServingRegistration(ss *ServingSystem, serving *qmi.ServingSystem) {
+	if ss == nil || serving == nil {
+		return
+	}
+	ss.PSAttached = false
+	switch serving.RegistrationState {
+	case qmi.RegStateNotRegistered:
+		ss.RegStatus = 0
+		ss.RegStatusText = "未注册"
+	case qmi.RegStateRegistered:
+		ss.RegStatus = 1
+		ss.RegStatusText = "已注册(本地)"
+		ss.PSAttached = serving.PSAttached
+	case qmi.RegStateRoaming:
+		ss.RegStatus = 5
+		ss.RegStatusText = "已注册(漫游)"
+		ss.PSAttached = serving.PSAttached
+	case qmi.RegStateSearching:
+		ss.RegStatus = 2
+		ss.RegStatusText = "搜索中"
+	case qmi.RegStateDenied:
+		ss.RegStatus = 3
+		ss.RegStatusText = "注册被拒"
+	default:
+		ss.RegStatus = 4
+		ss.RegStatusText = "未知"
+	}
+}
+
+func applyQMIServingPLMN(ss *ServingSystem, serving *qmi.ServingSystem) {
+	if ss == nil || serving == nil {
+		return
+	}
+	ss.MCC = serving.MCC
+	ss.MNC = serving.MNC
+	ss.Operator = ""
+	if modem.ServingRegistrationCurrent(ss.RegStatus) && serving.MCC > 0 {
+		ss.Operator = qmiOperatorDisplay(serving.MCC, serving.MNC)
+	}
 }
 
 func qmiOperatorDisplay(mcc, mnc uint16) string {

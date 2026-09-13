@@ -177,7 +177,8 @@ func (m *Manager) handleCmdStatus(cmdCtx CommandContext, args []string) string {
 	if strings.TrimSpace(privateIP) == "" {
 		privateIP = "N/A"
 	}
-	operator := strings.TrimSpace(status.Operator)
+	isVoWiFiActive := m.pool.IsVoWiFiActive(worker.ID)
+	operator := device.DisplayOperatorName(status, isVoWiFiActive)
 	if operator == "" {
 		operator = "未知网络"
 	}
@@ -209,7 +210,6 @@ func (m *Manager) handleCmdStatus(cmdCtx CommandContext, args []string) string {
 	if worker.IsDeviceHealthy() {
 		healthText = "正常"
 	}
-	isVoWiFiActive := m.pool.IsVoWiFiActive(worker.ID)
 	voWiFiState, hasVoWiFiState := m.pool.GetVoWiFiRuntimeState(worker.ID)
 	lastReason := "--"
 	if strings.TrimSpace(voWiFiState.LastReason) != "" {

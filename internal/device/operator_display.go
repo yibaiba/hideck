@@ -12,9 +12,7 @@ func isUnknownOperatorName(name string) bool {
 	return name == "" || strings.EqualFold(name, "unknown") || name == "未知网络"
 }
 
-// DisplayOperatorName is the operator shown next to VoWiFi/cellular in /list and dashboard cards.
-// VoWiFi uses SIM home identity, not the serving cell, so a UK VOXI card that still
-// reports a Chinese COPS PLMN does not show up as 中国联通 VoWiFi.
+// DisplayOperatorName: VoWiFi uses SIM home identity; cellular/VoLTE uses live serving name.
 func DisplayOperatorName(status modem.DeviceStatus, vowifiActive bool) string {
 	if vowifiActive {
 		return simHomeOperatorName(status)

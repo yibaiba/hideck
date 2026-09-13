@@ -407,11 +407,25 @@ func (w *Worker) mergeRuntimeStateLocked(status modem.DeviceStatus, healthy bool
 	w.state.Runtime.CellID = status.CellID
 	w.state.Runtime.APN = status.APN
 	w.state.Runtime.IMSStatus = status.IMSStatus
-	if strings.TrimSpace(status.NetworkMode) != "" {
-		w.state.Runtime.NetworkMode = status.NetworkMode
-	}
-	if strings.TrimSpace(status.NetworkDuplex) != "" {
-		w.state.Runtime.NetworkDuplex = status.NetworkDuplex
+	if modem.ServingRegistrationCurrent(w.state.Runtime.RegStatus) {
+		if strings.TrimSpace(status.NetworkMode) != "" {
+			w.state.Runtime.NetworkMode = status.NetworkMode
+		}
+		if strings.TrimSpace(status.NetworkDuplex) != "" {
+			w.state.Runtime.NetworkDuplex = status.NetworkDuplex
+		}
+	} else if w.state.Runtime.RegStatus == 0 {
+		w.state.Runtime.NetworkMode = ""
+		w.state.Runtime.NetworkDuplex = ""
+		w.state.Runtime.RadioBand = ""
+		w.state.Runtime.RadioChannel = 0
+	} else {
+		if strings.TrimSpace(status.NetworkMode) != "" {
+			w.state.Runtime.NetworkMode = status.NetworkMode
+		}
+		if strings.TrimSpace(status.NetworkDuplex) != "" {
+			w.state.Runtime.NetworkDuplex = status.NetworkDuplex
+		}
 	}
 	w.state.Runtime.USBNetMode = status.USBNetMode
 	w.state.Runtime.OperatingMode = status.OperatingMode
