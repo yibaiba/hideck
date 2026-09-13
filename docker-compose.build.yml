@@ -2,7 +2,7 @@ name: hideck-image-build
 
 services:
   hideck:
-    image: yibaiba/hideck:${HIDECK_VERSION:-2.1.21}
+    image: yibaiba/hideck:${HIDECK_VERSION:-2.1.22}
     build:
       context: .
       dockerfile: Dockerfile.release
@@ -11,7 +11,7 @@ services:
         - linux/amd64
         - linux/arm64
       args:
-        VERSION: v${HIDECK_VERSION:-2.1.21}
+        VERSION: v${HIDECK_VERSION:-2.1.22}
         REVISION: ${HIDECK_REVISION:?HIDECK_REVISION is required}
         BUILDTIME: ${HIDECK_BUILDTIME:?HIDECK_BUILDTIME is required}
       tags:

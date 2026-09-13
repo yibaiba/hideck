@@ -89,18 +89,18 @@ curl -fsSL https://raw.githubusercontent.com/yibaiba/hideck/main/deploy-binary.s
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yibaiba/hideck/main/deploy-binary.sh | \
   HIDECK_DIR=/opt/hideck \
-  HIDECK_VERSION=v2.1.21 \
+  HIDECK_VERSION=v2.1.22 \
   HIDECK_ARCH=linux_amd64 sh
 ```
 
 | 文件 | 平台 |
 | --- | --- |
-| `hideck_v2.1.21_linux_amd64` | x86_64，glibc + UPX |
-| `hideck_v2.1.21_linux_arm64` | ARM64 / 树莓派 OS 64 位，glibc + UPX |
-| `hideck_v2.1.21_linux_armv7` | 32 位 ARM，glibc + UPX |
-| `hideck_v2.1.21_openwrt_amd64` | OpenWrt x86_64，musl 静态，不压 UPX |
-| `hideck_v2.1.21_openwrt_arm64` | OpenWrt aarch64 |
-| `hideck_v2.1.21_openwrt_armv7` | OpenWrt 32 位 ARM |
+| `hideck_v2.1.22_linux_amd64` | x86_64，glibc + UPX |
+| `hideck_v2.1.22_linux_arm64` | ARM64 / 树莓派 OS 64 位，glibc + UPX |
+| `hideck_v2.1.22_linux_armv7` | 32 位 ARM，glibc + UPX |
+| `hideck_v2.1.22_openwrt_amd64` | OpenWrt x86_64，musl 静态，不压 UPX |
+| `hideck_v2.1.22_openwrt_arm64` | OpenWrt aarch64 |
+| `hideck_v2.1.22_openwrt_armv7` | OpenWrt 32 位 ARM |
 
 OpenWrt 只用 `openwrt_*`。见 [packaging/openwrt/README.md](../packaging/openwrt/README.md)。
 

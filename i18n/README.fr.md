@@ -89,18 +89,18 @@ curl -fsSL https://raw.githubusercontent.com/yibaiba/hideck/main/deploy-binary.s
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yibaiba/hideck/main/deploy-binary.sh | \
   HIDECK_DIR=/opt/hideck \
-  HIDECK_VERSION=v2.1.21 \
+  HIDECK_VERSION=v2.1.22 \
   HIDECK_ARCH=linux_amd64 sh
 ```
 
 | Fichier | Plateforme |
 | --- | --- |
-| `hideck_v2.1.21_linux_amd64` | x86_64, glibc + UPX |
-| `hideck_v2.1.21_linux_arm64` | ARM64 / Raspberry Pi OS 64 bits, glibc + UPX |
-| `hideck_v2.1.21_linux_armv7` | ARM 32 bits, glibc + UPX |
-| `hideck_v2.1.21_openwrt_amd64` | OpenWrt x86_64, musl statique, sans UPX |
-| `hideck_v2.1.21_openwrt_arm64` | OpenWrt aarch64 |
-| `hideck_v2.1.21_openwrt_armv7` | OpenWrt ARM 32 bits |
+| `hideck_v2.1.22_linux_amd64` | x86_64, glibc + UPX |
+| `hideck_v2.1.22_linux_arm64` | ARM64 / Raspberry Pi OS 64 bits, glibc + UPX |
+| `hideck_v2.1.22_linux_armv7` | ARM 32 bits, glibc + UPX |
+| `hideck_v2.1.22_openwrt_amd64` | OpenWrt x86_64, musl statique, sans UPX |
+| `hideck_v2.1.22_openwrt_arm64` | OpenWrt aarch64 |
+| `hideck_v2.1.22_openwrt_armv7` | OpenWrt ARM 32 bits |
 
 Sur OpenWrt, n’utilisez que `openwrt_*`. Voir [packaging/openwrt/README.md](../packaging/openwrt/README.md).
 
