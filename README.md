@@ -66,6 +66,9 @@ docker compose ps
 docker compose logs -f hideck
 ```
 
+For PC/SC USB smart-card readers, also configure the host service and optional
+Compose override described in [Docker PC/SC setup](DOCKERHUB.md#pcsc-smart-card-readers).
+
 ## Screenshots
 
 ![Login](docs/images/login.jpg)

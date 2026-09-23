@@ -1,0 +1,11 @@
+# Optional: use with docker-compose.yml after starting pcscd on the Linux host.
+# Mount the directory so a socket recreated by pcscd remains visible.
+services:
+  hideck:
+    volumes:
+      - type: bind
+        source: /run/pcscd
+        target: /run/pcscd
+        read_only: true
+        bind:
+          create_host_path: false

@@ -157,3 +157,54 @@ docker compose up -d
 ## 许可证提示
 
 本仓库是源码整合树，不是单一 MIT 许可项目。根项目来自 PolyForm Noncommercial 1.0.0，`third_party/vowifi-go` 为 AGPL-3.0，其它第三方源码按各自许可证授权。发布公开二进制或 Docker 镜像前，请先确认组合分发的许可证义务。
+
+## PC/SC smart-card readers
+
+HiDeck supports PC/SC readers without a cellular modem. The Docker images include
+only the PC/SC client library; the Linux host owns the USB reader through `pcscd`
+and its reader driver. Passing `/dev` alone does not expose this service.
+
+On Debian/Ubuntu, install and start the host dependencies:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y pcscd libccid pcsc-tools
+sudo systemctl enable --now pcscd.socket
+sudo systemctl start pcscd.service
+sudo pcsc_scan
+```
+
+Confirm that the reader and inserted card appear, then exit `pcsc_scan` with
+Ctrl-C. Some readers need a vendor driver instead of `libccid`. On other Linux
+distributions use the equivalent packages/service; the commands above assume
+systemd. Do not run a second `pcscd` in the container against the same reader.
+
+After the normal Docker installation, save `docker-compose.pcsc.yml` from this
+repository alongside your existing `docker-compose.yml`, then recreate HiDeck:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/yibaiba/hideck/main/docker-compose.pcsc.yml \
+  -o docker-compose.pcsc.yml
+test -S /run/pcscd/pcscd.comm
+docker compose -f docker-compose.yml -f docker-compose.pcsc.yml up -d
+```
+
+The override mounts `/run/pcscd` read-only. Unix socket connections still work;
+mounting the directory instead of the socket allows `pcscd` to recreate it after
+a restart. The directory must already exist (`create_host_path: false`); a missing
+host service should not silently create an empty directory. Ensure `pcscd` is
+started before HiDeck after a host reboot. If your distribution uses a different
+socket directory, adjust the bind source and check the client socket path.
+
+Use the same `-f` arguments for subsequent `pull`, `up`, and `logs` commands.
+Include any existing Caddy overrides as well. The one-click `deploy.sh` preserves
+existing files but does not automatically select this optional override; rerunning
+it alone will omit the PC/SC mount. A plain modem-only installation does not need
+this override or a running host `pcscd`.
+
+In HiDeck, discover/add the physical PC/SC reader, then read its EID/profile list.
+A blank eUICC may return no profiles. This verifies card access, not carrier
+activation or VoWiFi registration. If no reader appears, check host `pcsc_scan`,
+the bind mount, and host `pcscd` logs/access policy. Keep other SIM applications
+from holding the card during operations; do not disable host access controls as
+a workaround.

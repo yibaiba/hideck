@@ -21,6 +21,7 @@ RUN apt-get update \
       libopencore-amrnb0 \
       libopencore-amrwb0 \
       libqmi-utils \
+      libpcsclite1 \
       libvo-amrwbenc0 \
       psmisc \
       tzdata \
