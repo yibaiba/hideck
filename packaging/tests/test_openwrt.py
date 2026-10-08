@@ -32,20 +32,43 @@ class OpenWrtTests(unittest.TestCase):
         self.assertIn("CMAKE_BINARY_SUBDIR:=build", recipe)
 
     def test_sdk_downloads_use_http1_and_verify_before_extraction(self):
+        fetch = (PACKAGING / "fetch-sdk.sh").read_text()
+        start = fetch.index("curl --http1.1 -sS -fL -C -")
+        download = fetch[start:fetch.index('"$source"', start)]
+        for option in ("-fL", "-C -", "--proto =https", "--connect-timeout 20", "--speed-limit",
+                       "--speed-time", "--max-time"):
+            self.assertIn(option, download)
+        self.assertNotIn("--insecure", download)
+        self.assertNotIn(" -k", download)
+        self.assertIn("https://downloads.openwrt.org/releases/*/openwrt-sdk-*.tar.zst", fetch)
         sources = [ROOT / ".github/workflows/binary-release.yml",
                    PACKAGING / "Dockerfile.sdk"]
         for path in sources:
             with self.subTest(source=path.name):
                 source = path.read_text()
-                start = source.index("curl --http1.1")
-                download = source[start:].splitlines()[0]
-                for option in ("-fL", "--retry 3", "--connect-timeout 20", "--max-time 600"):
-                    self.assertIn(option, download)
-                self.assertNotIn("--insecure", download)
-                self.assertNotIn(" -k", download)
+                self.assertNotRegex(source, r"\bcurl\s+-")
+                start = source.index("fetch-")
                 verify = source.index("sha256sum -c -", start)
                 extract = source.index("tar --zstd -xf", start)
                 self.assertLess(verify, extract)
+
+    def test_fetch_sdk_keeps_verified_archive_and_rejects_bad_input(self):
+        with tempfile.TemporaryDirectory(prefix="hideck-fetch-sdk-") as directory:
+            archive = Path(directory) / "sdk.tar.zst"
+            archive.write_bytes(b"cached sdk")
+            digest = subprocess.run(["sha256sum", str(archive)], check=True, capture_output=True,
+                                    text=True).stdout.split()[0]
+            url = "https://downloads.openwrt.org/releases/24.10.8/targets/x86/64/openwrt-sdk-x.tar.zst"
+            script = str(PACKAGING / "fetch-sdk.sh")
+            result = subprocess.run(["sh", script, url, str(archive), digest],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("using verified archive", result.stdout)
+            for bad_url, bad_digest in (("https://example.com/openwrt-sdk-x.tar.zst", digest),
+                                        (url, "not-a-digest")):
+                result = subprocess.run(["sh", script, bad_url, str(archive), bad_digest],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
 
     def test_shell_scripts_parse(self):
         for script in PACKAGING.glob("*.sh"):

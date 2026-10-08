@@ -193,6 +193,12 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "buildtime=${BUILDTIME}" >> "${GITHUB_OUTPUT}"
 
+      - name: Cache pinned OpenWrt SDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openwrt-sdk-cache
+          key: openwrt-sdk-${{ matrix.sdk_id }}-${{ hashFiles('packaging/openwrt/sdk-matrix.json') }}
+
       - name: Install pinned OpenWrt musl toolchain
         env:
           SDK_ID: ${{ matrix.sdk_id }}
@@ -205,10 +211,10 @@ jobs:
           sdk=$(jq -r '.sdk' <<<"$entry")
           digest=$(jq -r '.sha256' <<<"$entry")
           url="https://downloads.openwrt.org/releases/${release}/targets/${target}/${sdk}"
-          archive="$RUNNER_TEMP/$sdk"
+          archive="$RUNNER_TEMP/openwrt-sdk-cache/$sdk"
           sdk_dir="$RUNNER_TEMP/openwrt-sdk"
-          # Avoid HTTP/2 stream resets observed during large SDK downloads.
-          curl --http1.1 -fL --retry 3 --connect-timeout 20 --max-time 600 "$url" -o "$archive"
+          mkdir -p "$(dirname "$archive")"
+          sh packaging/openwrt/fetch-sdk.sh "$url" "$archive" "$digest"
           printf '%s  %s\n' "$digest" "$archive" | sha256sum -c -
           mkdir -p "$sdk_dir"
           tar --zstd -xf "$archive" -C "$sdk_dir" --strip-components=1

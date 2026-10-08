@@ -9,11 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The caller supplies a pinned official SDK URL and its SHA-256, not "latest".
 ARG SDK_URL
 ARG SDK_SHA256
-# Use HTTP/1.1 for large SDK downloads; keep TLS and pinned digest verification.
-RUN case "$SDK_URL" in https://downloads.openwrt.org/releases/*/openwrt-sdk-*.tar.zst) ;; *) exit 1 ;; esac \
-    && test "${#SDK_SHA256}" = 64 \
-    && case "$SDK_SHA256" in *[!a-f0-9]*) exit 1 ;; esac \
-    && curl --http1.1 -fL --retry 3 --connect-timeout 20 --max-time 600 "$SDK_URL" -o /tmp/sdk.tar.zst \
+COPY packaging/openwrt/fetch-sdk.sh /usr/local/bin/fetch-openwrt-sdk
+# fetch-sdk.sh checks the official URL and digest and resumes interrupted transfers.
+# Three attempts fit the 900 second docker build timeout in openwrt-packages.yml.
+RUN SDK_FETCH_ATTEMPTS=3 sh /usr/local/bin/fetch-openwrt-sdk "$SDK_URL" /tmp/sdk.tar.zst "$SDK_SHA256" \
     && printf '%s  /tmp/sdk.tar.zst\n' "$SDK_SHA256" | sha256sum -c - \
     && mkdir /sdk && tar --zstd -xf /tmp/sdk.tar.zst -C /sdk --strip-components=1 \
     && rm /tmp/sdk.tar.zst
