@@ -23,6 +23,8 @@ jobs:
   packages:
     needs: matrix
     runs-on: ubuntu-latest
+    # See build-openwrt in binary-release.yml.
+    continue-on-error: true
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -70,6 +72,7 @@ jobs:
           tar -czf "artifacts/hideck_${HIDECK_VERSION}_openwrt-packages_${TARGET_ID}.tar.gz" -C output .
       - uses: actions/upload-artifact@v4
         with:
+          overwrite: true
           name: binaries-openwrt-packages-${{ matrix.id }}
           path: artifacts/*
           if-no-files-found: error
