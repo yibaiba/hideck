@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pion/rtp"
+
 	"github.com/yibaiba/hideck/internal/phone"
 )
 
@@ -16,6 +18,8 @@ const (
 	pcmuFrameSamples  = 160
 	pcmuFrameDuration = 20 * time.Millisecond
 	pcmJitterDepth    = 5
+	// Browser-to-modem playback only: halve amplitude (approximately -6 dB).
+	pcmPlaybackDivisor = 2
 )
 
 type PCMPort interface {
@@ -118,6 +122,9 @@ func (b *PCMBridge) downlink() {
 			continue
 		}
 		pcm := phone.DecodePCMU(payload)
+		for i := range pcm {
+			pcm[i] /= pcmPlaybackDivisor
+		}
 		if b.pcm == nil {
 			continue
 		}
@@ -166,18 +173,16 @@ func (b *PCMBridge) uplink() {
 }
 
 func rtpPCMUPayload(pkt []byte) ([]byte, bool) {
-	if len(pkt) < 12 {
+	if len(pkt) < 12 || pkt[0]>>6 != 2 {
 		return nil, false
 	}
-	cc := int(pkt[0] & 0x0f)
-	header := 12 + 4*cc
-	if len(pkt) < header {
+	// Browser RTP retains extensions (audio level, transport-wide sequence,
+	// etc.) and may contain padding. Only the decoded payload is audio.
+	var packet rtp.Packet
+	if packet.Unmarshal(pkt) != nil || packet.PayloadType != pcmuPayloadType || len(packet.Payload) == 0 {
 		return nil, false
 	}
-	if pkt[1]&0x7f != pcmuPayloadType {
-		return nil, false
-	}
-	return pkt[header:], true
+	return packet.Payload, true
 }
 
 func encodePCMURTP(seq uint16, ts uint32, payload []byte) []byte {

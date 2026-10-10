@@ -467,3 +467,31 @@ func TestAnswerRejectsIncomingCallWithUnavailableCodec(t *testing.T) {
 }
 
 const testPlainSDP = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=phone\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\n"
+
+func TestEarlyOutboundAnswerAttachesMediaBeforeDeduplicating(t *testing.T) {
+	gateway, store := newFakeVoiceGateway(), newMemoryCallStore()
+	gateway.beginSnapshot.State = "connected"
+	gateway.beginSnapshot.ClientSDP = testPlainSDP
+	gateway.activeSnapshots["dev-1"] = gateway.beginSnapshot
+	gateway.beginEvents = []voicehost.CallEvent{{Type: "CallAnswered", DeviceID: "dev-1", CallID: "outbound-1", Time: time.Now()}}
+	service := newPhoneTestService(t, gateway, store, time.Second)
+	addStubMedia(t, service, "media-1", "admin", "lease-1")
+	call, err := service.StartCall(StartCallRequest{Owner: "admin", DeviceID: "dev-1", Callee: "888", MediaID: "media-1", Lease: "lease-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Status != StatusConnected || call.AnsweredAt == nil {
+		t.Fatalf("early answer lost: %+v", call)
+	}
+	media := service.media.Get("media-1")
+	media.mu.RLock()
+	attached := media.attached
+	media.mu.RUnlock()
+	if !attached {
+		t.Fatal("early answer marked answered without media attachment")
+	}
+	gateway.emitEvent(gateway.beginEvents[0])
+	if active := service.Active("lease-1"); len(active) != 1 || active[0].Status != StatusConnected {
+		t.Fatalf("duplicate answer: %+v", active)
+	}
+}

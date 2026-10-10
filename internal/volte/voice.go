@@ -14,17 +14,19 @@ import (
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
+// QMI VOICE states are raw protocol values; the library does not remap them.
 const (
-	qmiCallIdle          qmi.VoiceCallState     = 0x00
-	qmiCallIncoming      qmi.VoiceCallState     = 0x01
-	qmiCallOriginating   qmi.VoiceCallState     = 0x02
-	qmiCallAlerting      qmi.VoiceCallState     = 0x03
-	qmiCallConversation  qmi.VoiceCallState     = 0x04
-	qmiCallHolding       qmi.VoiceCallState     = 0x05
-	qmiCallWaiting       qmi.VoiceCallState     = 0x06
-	qmiCallDisconnecting qmi.VoiceCallState     = 0x07
-	qmiCallEnd           qmi.VoiceCallState     = 0x08
-	qmiCallSetup         qmi.VoiceCallState     = 0x09
+	qmiCallIdle          qmi.VoiceCallState     = 0 // Legacy idle sentinel; not a protocol call state.
+	qmiCallOriginating   qmi.VoiceCallState     = 1
+	qmiCallIncoming      qmi.VoiceCallState     = 2
+	qmiCallConversation  qmi.VoiceCallState     = 3
+	qmiCallCCInProgress  qmi.VoiceCallState     = 4
+	qmiCallAlerting      qmi.VoiceCallState     = 5
+	qmiCallHolding       qmi.VoiceCallState     = 6
+	qmiCallWaiting       qmi.VoiceCallState     = 7
+	qmiCallDisconnecting qmi.VoiceCallState     = 8
+	qmiCallEnd           qmi.VoiceCallState     = 9
+	qmiCallSetup         qmi.VoiceCallState     = 10
 	qmiDirMO             qmi.VoiceCallDirection = 0x01
 	qmiDirMT             qmi.VoiceCallDirection = 0x02
 )
@@ -215,10 +217,19 @@ func (c *Controller) beginCall(ctx context.Context, request voicehost.BeginCallR
 	if err != nil {
 		return voicehost.CallSnapshot{}, err
 	}
+	// Indications can precede the dial response. Publish media and preserve their
+	// state while serialized with further indications.
+	c.mu.Lock()
+	sess := c.sess[deviceID]
+	c.mu.Unlock()
+	sess.events.Lock()
+	defer sess.events.Unlock()
 	now := time.Now()
 	id := ""
+	var previous nativeCall
 	if vs := c.sessionVoice(deviceID); vs != nil {
 		if prev, ok := vs.getByQMI(qmiID); ok && stateRank(prev.State) != rankTerminal {
+			previous = prev
 			id = prev.ID
 			if !prev.Start.IsZero() {
 				now = prev.Start
@@ -237,6 +248,9 @@ func (c *Controller) beginCall(ctx context.Context, request voicehost.BeginCallR
 		c.media.put(id, media)
 	}
 	nc := nativeCall{ID: id, QMI: qmiID, Direction: "outbound", Peer: request.Callee, State: "calling", Start: now, ClientSDP: sdp}
+	if previous.ID != "" {
+		nc.State, nc.Reason, nc.Codec, nc.Held = previous.State, previous.Reason, previous.Codec, previous.Held
+	}
 	c.storeCall(deviceID, nc)
 	c.mu.Lock()
 	vs := (*voiceSession)(nil)
@@ -244,16 +258,15 @@ func (c *Controller) beginCall(ctx context.Context, request voicehost.BeginCallR
 		vs = s.voice
 	}
 	c.mu.Unlock()
-	if vs != nil {
-		vs.markEmitted(id, rankKey("calling"))
+	if vs != nil && nc.State == "calling" && vs.markEmitted(id, rankKey("calling")) {
+		c.emitEvent(deviceID, voicehost.CallEvent{
+			Type: "CallRinging", DeviceID: deviceID, CallID: id, Callee: request.Callee,
+			Direction: "outbound", State: "calling", Time: now,
+			RecordingError: audioError(st),
+		})
 	}
-	c.emitEvent(deviceID, voicehost.CallEvent{
-		Type: "CallRinging", DeviceID: deviceID, CallID: id, Callee: request.Callee,
-		Direction: "outbound", State: "calling", Time: now,
-		RecordingError: audioError(st),
-	})
 	return voicehost.CallSnapshot{
-		CallID: id, DeviceID: deviceID, State: "calling", Direction: "outbound",
+		CallID: id, DeviceID: deviceID, State: nc.State, Direction: "outbound",
 		Peer: request.Callee, StartTime: now, ClientSDP: sdp,
 	}, nil
 }
@@ -590,7 +603,7 @@ const rankTerminal = 4
 
 func mapQMIState(state qmi.VoiceCallState) (string, string) {
 	switch state {
-	case qmiCallOriginating:
+	case qmiCallOriginating, qmiCallCCInProgress:
 		return "calling", "CallRinging"
 	case qmiCallIncoming, qmiCallAlerting, qmiCallSetup:
 		return "ringing", "CallRinging"
