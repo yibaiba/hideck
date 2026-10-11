@@ -144,12 +144,12 @@ func TestGetLTEDuplexModeFromBandInfo(t *testing.T) {
 	}{
 		{
 			name: "lte band 8 is fdd",
-			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 8}}},
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 127}}},
 			want: "FDD",
 		},
 		{
 			name: "lte band 41 is tdd",
-			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 41}}},
+			info: &RFBandInfo{Bands: []RFBandInfoEntry{{RadioInterface: 0x08, ActiveBandClass: 149}}},
 			want: "TDD",
 		},
 		{

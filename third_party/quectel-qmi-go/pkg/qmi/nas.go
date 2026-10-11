@@ -305,10 +305,11 @@ func GetLTEDuplexModeFromBandInfo(info *RFBandInfo) string {
 		return ""
 	}
 	for _, band := range info.Bands {
-		if band.RadioInterface != 0x08 {
+		number, known := band.LTEBandNumber()
+		if !known {
 			continue
 		}
-		if duplex := getLTEDuplexModeFromBand(band.ActiveBandClass); duplex != "" {
+		if duplex := getLTEDuplexModeFromBand(number); duplex != "" {
 			return duplex
 		}
 	}
@@ -326,7 +327,7 @@ func getLTEDuplexModeFromBand(band uint16) string {
 	switch band {
 	case 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 46, 47, 48, 50, 51, 53:
 		return "TDD"
-	case 1, 2, 3, 4, 5, 7, 8, 12, 13, 14, 17, 18, 19, 20, 25, 26, 27, 28, 30, 31, 65, 66, 67, 68, 70, 71:
+	case 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 30, 31, 65, 66, 67, 68, 70, 71:
 		return "FDD"
 	default:
 		return ""

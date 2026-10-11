@@ -480,7 +480,10 @@ func qmiRadioBandAndChannel(info *qmi.RFBandInfo) (string, uint32) {
 	}
 	for _, band := range info.Bands {
 		if band.RadioInterface == 0x08 {
-			return fmt.Sprintf("LTE BAND %d", band.ActiveBandClass), band.ActiveChannel
+			if number, known := band.LTEBandNumber(); known {
+				return fmt.Sprintf("LTE BAND %d", number), band.ActiveChannel
+			}
+			return fmt.Sprintf("LTE BAND CLASS %d（未识别）", band.ActiveBandClass), band.ActiveChannel
 		}
 	}
 	for _, band := range info.Bands {
