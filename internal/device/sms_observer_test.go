@@ -4,13 +4,15 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/yibaiba/hideck/internal/db"
 )
 
 type observerSMSStore struct {
 	err error
 }
 
-func (s observerSMSStore) LookupDeviceIdentity(string) (SMSIdentity, bool, error) {
+func (s observerSMSStore) LookupDeviceIdentity(db.SMSDeviceSelector) (SMSIdentity, bool, error) {
 	return SMSIdentity{}, false, nil
 }
 

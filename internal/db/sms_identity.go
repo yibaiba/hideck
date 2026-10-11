@@ -30,14 +30,30 @@ type SMSRecord struct {
 	Timestamp  time.Time
 }
 
+// SMSDeviceSelector pins a lookup to the physical modem when its IMEI is known.
+// DeviceID is only used for legacy bindings without a physical identity.
+type SMSDeviceSelector struct {
+	DeviceID string
+	IMEI     string
+}
+
 func LookupDeviceSMSIdentity(deviceID string) (SMSIdentity, bool, error) {
-	deviceID = strings.TrimSpace(deviceID)
-	if DB == nil || deviceID == "" {
+	return LookupSMSIdentityForDevice(SMSDeviceSelector{DeviceID: deviceID})
+}
+
+func LookupSMSIdentityForDevice(selector SMSDeviceSelector) (SMSIdentity, bool, error) {
+	deviceID := strings.TrimSpace(selector.DeviceID)
+	imei := strings.TrimSpace(selector.IMEI)
+	if DB == nil || (deviceID == "" && imei == "") {
 		return SMSIdentity{}, false, nil
 	}
 
+	query := DB.Where("alias = ? OR imei = ?", deviceID, deviceID)
+	if imei != "" {
+		query = DB.Where("imei = ?", imei)
+	}
 	var devices []Device
-	if err := DB.Where("alias = ? OR imei = ?", deviceID, deviceID).Limit(2).Find(&devices).Error; err != nil {
+	if err := query.Select("iccid").Find(&devices).Error; err != nil {
 		return SMSIdentity{}, false, err
 	}
 	identity, found, err := uniqueBoundSMSIdentity(devices)

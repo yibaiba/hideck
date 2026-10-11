@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yibaiba/hideck/internal/backend"
+	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/db"
 )
 
@@ -29,17 +31,18 @@ type inboundSMSRecord struct {
 type smsIdentityCandidate struct {
 	identity SMSIdentity
 	present  bool
+	imei     string
 }
 
 type smsIdentityStore interface {
-	LookupDeviceIdentity(deviceID string) (SMSIdentity, bool, error)
+	LookupDeviceIdentity(selector db.SMSDeviceSelector) (SMSIdentity, bool, error)
 	SaveReceived(identity SMSIdentity, message inboundSMSRecord) error
 }
 
 type databaseSMSIdentityStore struct{}
 
-func (databaseSMSIdentityStore) LookupDeviceIdentity(deviceID string) (SMSIdentity, bool, error) {
-	identity, found, err := db.LookupDeviceSMSIdentity(deviceID)
+func (databaseSMSIdentityStore) LookupDeviceIdentity(selector db.SMSDeviceSelector) (SMSIdentity, bool, error) {
+	identity, found, err := db.LookupSMSIdentityForDevice(selector)
 	return SMSIdentity{ICCID: identity.ICCID, IMSI: identity.IMSI}, found, err
 }
 
@@ -65,16 +68,18 @@ func (p *Pool) resolveSMSIdentity(deviceID string, requireIMSI bool) (SMSIdentit
 	if p == nil || deviceID == "" {
 		return SMSIdentity{}, ErrSMSIdentityUnknown
 	}
-	runtimeIdentity, runtimePresent, err := p.runtimeSMSIdentity(deviceID)
+	runtime, err := p.runtimeSMSIdentity(deviceID)
 	if err != nil {
 		return SMSIdentity{}, err
 	}
-	storedIdentity, storedPresent, err := p.smsIdentityRepository().LookupDeviceIdentity(deviceID)
+	storedIdentity, storedPresent, err := p.smsIdentityRepository().LookupDeviceIdentity(db.SMSDeviceSelector{
+		DeviceID: deviceID, IMEI: runtime.imei,
+	})
 	if err != nil {
 		return SMSIdentity{}, fmt.Errorf("读取设备短信身份失败: %w", err)
 	}
 	identity, err := mergeSMSIdentities(
-		smsIdentityCandidate{identity: runtimeIdentity, present: runtimePresent},
+		runtime,
 		smsIdentityCandidate{identity: storedIdentity, present: storedPresent},
 	)
 	if err != nil {
@@ -86,22 +91,37 @@ func (p *Pool) resolveSMSIdentity(deviceID string, requireIMSI bool) (SMSIdentit
 	return identity, nil
 }
 
-func (p *Pool) runtimeSMSIdentity(deviceID string) (SMSIdentity, bool, error) {
+func (p *Pool) runtimeSMSIdentity(deviceID string) (smsIdentityCandidate, error) {
 	worker := p.GetWorker(deviceID)
 	if worker == nil {
-		return SMSIdentity{}, false, nil
+		cfg, err := config.GetDeviceByID(deviceID)
+		if err != nil {
+			return smsIdentityCandidate{}, err
+		}
+		if cfg != nil && resolvedBackendMode(*cfg) != backend.BackendPCSC {
+			return smsIdentityCandidate{imei: strings.TrimSpace(cfg.ModemIMEI)}, nil
+		}
+		return smsIdentityCandidate{}, nil
 	}
 	worker.cacheMu.RLock()
 	defer worker.cacheMu.RUnlock()
 	phase := worker.state.Identity.Phase
 	if phase == simIdentityPhaseTransitioning || phase == simIdentityPhaseDegraded {
-		return SMSIdentity{}, false, fmt.Errorf("%w: device=%s phase=%s", ErrSMSIdentityTransitioning, deviceID, phase)
+		return smsIdentityCandidate{}, fmt.Errorf("%w: device=%s phase=%s", ErrSMSIdentityTransitioning, deviceID, phase)
 	}
 	identity := normalizeSMSIdentity(SMSIdentity{
 		ICCID: worker.state.Identity.ICCID,
 		IMSI:  worker.state.Identity.IMSI,
 	})
-	return identity, identity.ICCID != "" || identity.IMSI != "", nil
+	imei := strings.TrimSpace(worker.state.Identity.IMEI)
+	if resolvedBackendMode(worker.Config) == backend.BackendPCSC || (worker.Backend != nil && worker.Backend.Mode() == backend.BackendPCSC) {
+		imei = ""
+	}
+	return smsIdentityCandidate{
+		identity: identity,
+		present:  identity.ICCID != "" || identity.IMSI != "",
+		imei:     imei,
+	}, nil
 }
 
 func mergeSMSIdentities(runtime, stored smsIdentityCandidate) (SMSIdentity, error) {

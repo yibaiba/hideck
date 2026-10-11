@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/db"
 	"github.com/yibaiba/hideck/internal/device"
@@ -114,9 +115,18 @@ func (s *Server) resolveSMSWorkerByICCID(iccid string) (*device.Worker, int, str
 }
 
 func smsWorkerMayOwnICCID(worker *device.Worker, iccid string) bool {
-	runtimeICCID := db.CanonicalICCID(worker.CurrentICCID())
-	storedICCID := db.CanonicalICCID(db.CurrentICCIDForDevice(worker.ID))
-	return runtimeICCID == iccid || storedICCID == iccid
+	status := worker.ProjectDeviceStatus()
+	if db.CanonicalICCID(status.ICCID) == iccid {
+		return true
+	}
+	if backend.NormalizeBackendMode(worker.Config.DeviceBackend) == backend.BackendPCSC || (worker.Backend != nil && worker.Backend.Mode() == backend.BackendPCSC) {
+		status.IMEI = ""
+	}
+	stored, found, err := db.LookupSMSIdentityForDevice(db.SMSDeviceSelector{
+		DeviceID: worker.ID, IMEI: status.IMEI,
+	})
+	// An ambiguous historical alias cannot prove ownership of the requested card.
+	return err == nil && found && db.CanonicalICCID(stored.ICCID) == iccid
 }
 
 func countSMSSelectors(deviceID, imsi, iccid string) int {
