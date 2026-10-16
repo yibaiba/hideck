@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yibaiba/hideck/internal/phone"
+	"github.com/yibaiba/hideck/pkg/logger"
 )
 
 const (
@@ -85,6 +86,13 @@ func (b *PCMBridge) Close() error {
 			_ = b.pcm.Close()
 		}
 		b.workers.Wait()
+		// 挂断即打模组侧统计：toPCM/overflow 才是"音频是否真的进了模组"的
+		// 证据，phone 包的 to_modem 只是回环 UDP 写成功计数，不等于送达模组。
+		logger.Info("VoLTE 模组音频统计",
+			"to_modem", b.toPCM.Load(), "from_modem", b.fromPCM.Load(),
+			"silent", b.silent.Load(), "lost", b.lost.Load(), "overflow", b.overflow.Load(),
+			"alsa_xrun", alsaPlayXRUN.Load(), "alsa_recovered", alsaPlayRecovered.Load(),
+			"alsa_unrecovered", alsaPlayUnrecovered.Load())
 	})
 	return err
 }
@@ -92,6 +100,8 @@ func (b *PCMBridge) Close() error {
 func (b *PCMBridge) downlink() {
 	defer b.workers.Done()
 	buf := make([]byte, 2048)
+	var overflowLogged bool
+	var lastOverflowLog time.Time
 	for {
 		select {
 		case <-b.closed:
@@ -123,6 +133,15 @@ func (b *PCMBridge) downlink() {
 		}
 		if err := b.pcm.WriteFrame(pcm); err != nil {
 			b.overflow.Add(1)
+			// 首次失败就报警，之后每 5s 最多一条，附带模组侧真实计数。
+			if !overflowLogged || time.Since(lastOverflowLog) >= 5*time.Second {
+				overflowLogged = true
+				lastOverflowLog = time.Now()
+				logger.Warn("VoLTE 上行音频写入模组失败",
+					"to_modem", b.toPCM.Load(), "overflow", b.overflow.Load(),
+					"alsa_xrun", alsaPlayXRUN.Load(), "alsa_recovered", alsaPlayRecovered.Load(),
+					"alsa_unrecovered", alsaPlayUnrecovered.Load(), "err", err)
+			}
 			continue
 		}
 		b.toPCM.Add(1)

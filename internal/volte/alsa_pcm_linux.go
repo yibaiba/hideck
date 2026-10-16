@@ -3,9 +3,11 @@
 package volte
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -17,6 +19,20 @@ const (
 	alsaIoctlHWParams = 0xc2604111
 	alsaIoctlPrepare  = 0x4140
 	alsaIoctlDrop     = 0x4143
+)
+
+// 播放缓冲从 4 帧（80ms）放大到 8 帧（160ms）。
+// EC25 语音 UAC 只支持 8000Hz/单声道，浏览器 RTP 有天然抖动，
+// 缓冲越厚越不容易欠载；internal/modemvoice/audio 的播放队列用的
+// 就是 200ms 级别的缓冲经验值。
+const alsaPlayBufferFrames = 8
+
+// alsaPlayXRUN / alsaPlayRecovered / alsaPlayUnrecovered 供
+// PCMBridge 带进日志，避免"模组侧静音但无人知晓"。
+var (
+	alsaPlayXRUN         atomic.Uint64
+	alsaPlayRecovered    atomic.Uint64
+	alsaPlayUnrecovered  atomic.Uint64
 )
 
 type alsaStream struct {
@@ -70,7 +86,7 @@ func configureALSA(f *os.File) error {
 	constrainALSAInterval(&params, alsaParamChannels, 1)
 	constrainALSAInterval(&params, alsaParamRate, uint32(pcmuClockRate))
 	constrainALSAInterval(&params, alsaParamPeriodSz, uint32(pcmuFrameSamples))
-	constrainALSAInterval(&params, alsaParamBufferSz, uint32(pcmuFrameSamples*4))
+	constrainALSAInterval(&params, alsaParamBufferSz, uint32(pcmuFrameSamples*alsaPlayBufferFrames))
 	if err := ioctl(f, alsaIoctlHWRefine, unsafe.Pointer(&params[0])); err != nil {
 		return err
 	}
@@ -123,8 +139,44 @@ func (p *alsaPCM) WriteFrame(samples []int16) error {
 		buf[i*2] = byte(v)
 		buf[i*2+1] = byte(v >> 8)
 	}
-	_, err := play.Write(buf)
-	return err
+	// ALSA 阻塞写失败几乎只有一种原因：XRUN。流已启动但缓冲区被抽空，
+	// write() 返回 -EPIPE，此后不做 PREPARE 恢复的话，后续每一帧都会失败，
+	// 对方全程静默；capture 是独立数据流不受影响，表现就是
+	// "我听得到对方、对方听不到我"。
+	// 这里恢复一次：DROP 丢弃残留 → PREPARE 重启流 → 补一帧静音把空缓冲
+	// 垫起来 → 重写本帧。思路与 internal/modemvoice/audio 的播放队列一致。
+	for attempt := 0; ; attempt++ {
+		_, err := play.Write(buf)
+		if err == nil {
+			if attempt > 0 {
+				alsaPlayRecovered.Add(1)
+			}
+			return nil
+		}
+		if attempt > 0 || !isALSAXrun(err) {
+			alsaPlayUnrecovered.Add(1)
+			return err
+		}
+		alsaPlayXRUN.Add(1)
+		if ioctl(play, alsaIoctlDrop, nil) != nil || ioctl(play, alsaIoctlPrepare, nil) != nil {
+			alsaPlayUnrecovered.Add(1)
+			return err
+		}
+		// 补一帧静音，避免恢复瞬间缓冲仍空、下一帧再次欠载。
+		// 注意：这里只算"恢复动作发起成功"，recovered 统一由下面重写
+		// 成功时计数，否则一次恢复会被算成两次。
+		if _, perr := play.Write(make([]byte, pcmuFrameSamples*2)); perr != nil {
+			alsaPlayUnrecovered.Add(1)
+			return err
+		}
+	}
+}
+
+// isALSAXrun 判断写播放流失败是否为欠载。注意 os.File.Write 会把
+// errno 包进 *fs.PathError（"write /dev/snd/pcmC3D0p: broken pipe"），
+// 必须用 errors.Is 解包，直接类型断言 unix.Errno 会漏掉全部 XRUN。
+func isALSAXrun(err error) bool {
+	return errors.Is(err, unix.EPIPE) || errors.Is(err, unix.ESTRPIPE)
 }
 
 func (p *alsaPCM) captureFile() *os.File {
