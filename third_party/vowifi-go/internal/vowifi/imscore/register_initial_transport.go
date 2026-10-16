@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	vowifidns "github.com/iniwex5/vowifi-go/internal/vowifi/dns"
+	"github.com/iniwex5/vowifi-go/internal/vowifi/logging"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/sipkit"
 )
 
@@ -46,6 +47,33 @@ func (s *Service) openInitialRegistrationTransport(
 		return nil
 	}
 	return wrapRegisterTransportFailures(failures)
+}
+
+// maxUDPRequestBytes is the RFC 3261 18.1.1 limit for a request when the path
+// MTU is unknown. Above it the request must use a congestion-controlled
+// transport such as TCP.
+const maxUDPRequestBytes = 1300
+
+// moveLargeRegisterToTCP switches an auto-transport REGISTER that is still on
+// unprotected UDP to TCP when the request is over the RFC 3261 limit. A UDP
+// REGISTER that size is fragmented, and Globe PH drops the fragments without
+// an answer or ICMP. If TCP cannot be opened the request stays on UDP, as
+// 18.1.1 allows after a refused connection.
+func (s *Service) moveLargeRegisterToTCP(ctx context.Context, session *registerSession, size int) bool {
+	if size <= maxUDPRequestBytes || !isAutoRegisterTransport(s.cfg.Transport) ||
+		registerUsesProtectedTransport(session) || s.usesExternalRegistrationTransport() ||
+		s.currentRegistrationTransport() != "udp" {
+		return false
+	}
+	candidates := registerTransportCandidates(s.cfg.Transport)
+	if _, err := s.replaceInitialRegistrationTransport(ctx, candidates, indexOfRegisterTransport(candidates, "tcp")); err != nil {
+		logging.Info("IMS REGISTER exceeds the UDP size limit but TCP is unavailable; sending over UDP",
+			"device", s.DeviceID(), "cseq", session.cseq, "bytes", size, "limit", maxUDPRequestBytes, "err", err)
+		return false
+	}
+	logging.Info("IMS REGISTER exceeds the UDP size limit; sending over TCP",
+		"device", s.DeviceID(), "cseq", session.cseq, "bytes", size, "limit", maxUDPRequestBytes)
+	return true
 }
 
 func isAutoRegisterTransport(configured string) bool {

@@ -151,13 +151,12 @@ func TestRegisterPreservesIPSecReservationsAcrossInitialTransportFallback(t *tes
 	if err := svc.Register(ctx); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// The sec-agree REGISTER is over the RFC 3261 UDP limit, so auto moves it
+	// to TCP before sending; the switch must keep the IPsec reservations.
 	select {
 	case request := <-udpSeen:
-		if !strings.HasPrefix(sipHeaderValue(request, "Via"), "SIP/2.0/UDP ") {
-			t.Fatalf("initial REGISTER did not start on UDP: %q", sipHeaderValue(request, "Via"))
-		}
-	case <-ctx.Done():
-		t.Fatal("initial UDP REGISTER was not observed")
+		t.Fatalf("oversized initial REGISTER went over UDP: %q", sipHeaderValue(request, "Via"))
+	default:
 	}
 	select {
 	case err := <-serverResult:

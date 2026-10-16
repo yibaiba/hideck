@@ -252,6 +252,8 @@ func (s *Service) runRegisterFlow(ctx context.Context) (time.Duration, error) {
 		if s.usesExternalRegistrationTransport() || !shouldRetryNextRegisterTransport(result, err) {
 			return 0, &registerAttemptError{result: result, err: err}
 		}
+		// The attempt may have moved to TCP for size; continue from where it is.
+		transportIndex = indexOfRegisterTransport(candidates, s.currentRegistrationTransport())
 		next, switchErr := s.replaceInitialRegistrationTransport(ctx, candidates, transportIndex+1)
 		if switchErr != nil {
 			attemptErr := &registerAttemptError{result: result, err: err}
@@ -529,6 +531,10 @@ func (s *Service) applyRegisterMinExpires(seconds uint32) {
 func (s *Service) exchangeRegister(ctx context.Context, session *registerSession, authorization string) (*sipResponse, error) {
 	s.recordRegisterSession(session)
 	request := s.buildRegister(session, authorization)
+	if s.moveLargeRegisterToTCP(ctx, session, len(request)) {
+		// Via and Contact carry the transport.
+		request = s.buildRegister(session, authorization)
+	}
 	s.logIMSRegistrationAttempt(session, request)
 	logging.Debug("IMS REGISTER outbound", "device", s.DeviceID(), "cseq", session.cseq,
 		"authenticated", strings.TrimSpace(authorization) != "",
