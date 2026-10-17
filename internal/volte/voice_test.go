@@ -50,7 +50,7 @@ func TestUnsupportedUACSkipsQPCMVAndKeepsVoLTE(t *testing.T) {
 	}
 }
 
-func TestQPCMVFailureIsExposedAsSilentAudio(t *testing.T) {
+func TestQPCMVFailureIsExposedWithoutDisablingAudio(t *testing.T) {
 	host := newFakeModem()
 	host.IMS, host.VoLTE = 1, 1
 	host.USB[len(host.USB)-1] = "1"
@@ -64,8 +64,11 @@ func TestQPCMVFailureIsExposedAsSilentAudio(t *testing.T) {
 	if !st.QPCMVFailed {
 		t.Fatalf("QPCMVFailed=%v want true", st.QPCMVFailed)
 	}
-	if !ctl.alsaUnavailable("wwan1") {
-		t.Fatal("QPCMV failure must skip opening ALSA")
+	// QPCMV 只是"把语音路由到 USB 声卡"的保险：命令失败要体现在状态里，
+	// 但不能因此禁用声卡音频——那会让 callPCM 直接返回 nullPCM，整通电话
+	// 彻底无音频，比"路由可能没设上"严重得多。
+	if ctl.alsaUnavailable("wwan1") {
+		t.Fatal("QPCMV failure must not disable ALSA")
 	}
 	if got := audioError(st); !strings.Contains(got, "QPCMV") {
 		t.Fatalf("audioError=%q", got)

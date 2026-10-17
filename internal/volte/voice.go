@@ -218,6 +218,11 @@ func (c *Controller) beginCall(ctx context.Context, request voicehost.BeginCallR
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 拨号前把语音路由重新指到 USB 声卡：模组重启（USB 重新枚举）会丢掉
+	// AT+QPCMV 的设置，而进程里的会话闸门不会跟着复位，症状是声卡能打开、
+	// 下行有声、上行每帧写 EPIPE（对方完全听不到）。
+	// 必须在 VOICEDial 之前——放到通话建立中间会打断 QMI 语音状态机。
+	c.armVoicePCM(deviceID)
 	qmiID, err := c.host.VOICEDial(ctx, deviceID, request.Callee)
 	if err != nil {
 		return voicehost.CallSnapshot{}, err
@@ -506,6 +511,14 @@ func (c *Controller) handleVoiceInfo(deviceID string, vs *voiceSession, info *qm
 		if !existed && vs.ignoreReusedQMISlot(item.ID, peer, dir, now) {
 			continue
 		}
+		if !existed || prev.State != state {
+			// QMI 状态是这条链路上唯一能回答"对方到底接了没有"的证据。
+			// 此前整条路径不打任何状态日志，通话停在哪一步只能靠猜（是没接、
+			// 状态没上报、还是映射错位）。只在变化时打，一通电话通常 3~5 条。
+			logger.Info("VoLTE 通话状态", "device", deviceID, "qmi_id", item.ID,
+				"raw", uint8(item.State), "state", state, "event", eventType,
+				"direction", dir, "peer", peer)
+		}
 		id := prev.ID
 		if !existed {
 			id = newPersistentCallID(deviceID, item.ID)
@@ -704,7 +717,10 @@ func audioError(st Status) string {
 	return "VoLTE 音频不可用：未检测到 UAC 声卡"
 }
 
-const alsaOpenBudget = 800 * time.Millisecond
+// alsaOpenBudget 覆盖"端点激活（最坏 2×1.2s）+ 打开正式流"。这个预算一旦
+// 超时，callPCM 会把 alsaUnavailable 永久置位，后续所有通话都无音频，
+// 所以必须留足余量。
+const alsaOpenBudget = 3 * time.Second
 
 func openALSAPCMBounded(device string, budget time.Duration) (PCMPort, error) {
 	if budget <= 0 {

@@ -64,7 +64,7 @@ func NewMediaManager(options MediaOptions) (*MediaManager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("phone: listen WebRTC UDP mux on %s: %w", address, err)
 	}
-	mux := webrtc.NewICEUDPMux(nil, connection)
+	mux := &physicalMux{UDPMux: webrtc.NewICEUDPMux(nil, connection), allowed: physicalInterfaceIPs()}
 	api, err := newWebRTCAPI(mux, options.PublicHost)
 	if err != nil {
 		_ = mux.Close()
@@ -76,6 +76,83 @@ func NewMediaManager(options MediaOptions) (*MediaManager, error) {
 		newRealtimeCodec: options.NewRealtimeCodec,
 		onState:          options.OnState, sessions: make(map[string]*MediaSession),
 	}, nil
+}
+
+// physicalMux 把 UDPMux 上报的监听地址收敛到物理网卡。
+//
+// pion 在监听未指定地址（:7580）时会自己枚举全部网卡，docker 网桥
+// （172.x）、模组 wwan（10.126.x）都会变成 host 候选。answer 侧按访问地址
+// 裁剪只影响发给浏览器的 SDP，管不到 ICE 内部的候选集——实测 ICE 曾把
+// local candidate 选成 10.126.126.2（wwan）和 172.17.0.1（docker），媒体
+// 随后 rollover、上行音视频都断掉。
+type physicalMux struct {
+	ice.UDPMux
+	allowed map[string]struct{}
+}
+
+func (m *physicalMux) GetListenAddresses() []net.Addr {
+	addrs := m.UDPMux.GetListenAddresses()
+	if len(m.allowed) == 0 {
+		return addrs
+	}
+	kept := make([]net.Addr, 0, len(addrs))
+	for _, addr := range addrs {
+		host, _, err := net.SplitHostPort(addr.String())
+		if err != nil {
+			continue
+		}
+		if ip, ok := normalizeIPAddress(host); ok {
+			if _, allowed := m.allowed[ip]; allowed {
+				kept = append(kept, addr)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		// 过滤后一个都不剩（比如容器里没有物理网卡）时退回原始列表：
+		// 宁可多宣告候选，也不能让 ICE 无候选可用。
+		return addrs
+	}
+	return kept
+}
+
+// physicalInterfaceIPs 收集物理网卡上的全部地址（IPv4 与 IPv6 都保留，
+// 公网 IPv6 接入依赖它们），跳过 docker/veth/wwan 等虚拟接口。
+func physicalInterfaceIPs() map[string]struct{} {
+	out := make(map[string]struct{})
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		name := strings.ToLower(iface.Name)
+		virtual := false
+		for _, prefix := range []string{"docker", "br-", "veth", "tun", "tap", "wg", "wwan", "cni"} {
+			if strings.HasPrefix(name, prefix) {
+				virtual = true
+				break
+			}
+		}
+		if virtual {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if normalized, ok := normalizeIPAddress(ipNet.IP.String()); ok {
+				out[normalized] = struct{}{}
+			}
+		}
+	}
+	return out
 }
 
 func newWebRTCAPI(mux ice.UDPMux, publicHost string) (*webrtc.API, error) {
@@ -261,3 +338,4 @@ func randomToken(bytes int) (string, error) {
 	}
 	return hex.EncodeToString(buffer), nil
 }
+

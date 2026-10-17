@@ -3,15 +3,21 @@
 package volte
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/yibaiba/hideck/pkg/logger"
 )
 
 const (
@@ -51,6 +57,9 @@ func openALSAPCM(device string) (PCMPort, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 先激活再打开正式流：模组冷启动（重启/USB 重新枚举）后 USB 等时端点
+	// 停在 idle，此时直接实时写会从第二帧起全部 -EPIPE，上行全程静默。
+	activatePlaybackEndpoint(device)
 	play, err := openALSAStream(fmt.Sprintf("/dev/snd/pcmC%dD%dp", card, pcmDev), true)
 	if err != nil {
 		return nil, err
@@ -106,6 +115,62 @@ func ioctl(f *os.File, req uint, arg unsafe.Pointer) error {
 		return errno
 	}
 	return nil
+}
+
+// alsaPlayWarmupFrames 是端点激活时写入的静音量，4 帧 = 80ms。
+const alsaPlayWarmupFrames = 4
+
+// alsaPlayWarmupTimeout 限制单次端点激活的等待时间。实测空闲时 aplay 只要
+// 275ms，但上一通刚结束时设备还没释放，aplay 会卡在等设备；给 1.2s 余量，
+// 同时靠 alsaPlayWarmupAttempts 重试，避免一上来就判死。
+const alsaPlayWarmupTimeout = 1200 * time.Millisecond
+
+// alsaPlayWarmupAttempts 是激活重试次数：第一次可能撞上上一通的设备释放窗口。
+const alsaPlayWarmupAttempts = 2
+
+// activatePlaybackEndpoint 用 aplay 跑一次完整的 open → write → drain →
+// close 周期，把模组冷启动后停在 idle 的 USB 等时端点拉到 streaming。
+//
+// 为什么不用自己写 raw ioctl：实测只做 HW_PARAMS + PREPARE + 写满缓冲 +
+// DRAIN 仍然救不回来（随后实时写每帧 -EPIPE、alsa_recovered 恒为 0），而
+// 手动执行一次 aplay 后同一通路立刻正常（to_modem 由 1 变 394、XRUN 只
+// 剩首帧一次）。差别在 aplay 还会设置 sw_params（start_threshold 等）并在
+// 退出时 hw_free —— 这些细节不值得在业务代码里对着内核协议猜，直接复用
+// 模组直拨路线已经在用的那条命令。
+func activatePlaybackEndpoint(device string) {
+	aplay, err := exec.LookPath("aplay")
+	if err != nil {
+		logger.Warn("VoLTE 声卡端点激活跳过：未找到 aplay", "device", device)
+		return
+	}
+	start := time.Now()
+	var lastErr error
+	var lastOut string
+	for attempt := 1; attempt <= alsaPlayWarmupAttempts; attempt++ {
+		err, out := runPlaybackWarmup(aplay, device)
+		if err == nil {
+			logger.Info("VoLTE 声卡端点已激活", "device", device,
+				"attempt", attempt, "ms", time.Since(start).Milliseconds())
+			return
+		}
+		lastErr, lastOut = err, out
+		if attempt < alsaPlayWarmupAttempts {
+			// 上一通的设备句柄可能还没释放，稍等再试。
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+	logger.Warn("VoLTE 声卡端点激活失败，本次通话可能没有上行",
+		"device", device, "err", lastErr, "out", lastOut)
+}
+
+func runPlaybackWarmup(aplay, device string) (error, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), alsaPlayWarmupTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, aplay, "-D", device, "-f", "S16_LE",
+		"-r", "8000", "-c", "1", "-q")
+	cmd.Stdin = bytes.NewReader(make([]byte, pcmuFrameSamples*2*alsaPlayWarmupFrames))
+	out, err := cmd.CombinedOutput()
+	return err, strings.TrimSpace(string(out))
 }
 
 func (p *alsaPCM) ReadFrame() ([]int16, error) {
