@@ -228,6 +228,8 @@ func (s *Service) runRegisterFlow(ctx context.Context) (time.Duration, error) {
 	}
 	candidates := registerTransportCandidates(s.cfg.Transport)
 	transportIndex := indexOfRegisterTransport(candidates, s.currentRegistrationTransport())
+	s.largeRegisterMovedToTCP.Store(false)
+	s.largeRegisterTCPFailed.Store(false)
 	minExpiresRetried := false
 	useProxyRetried := false
 	for {
@@ -243,6 +245,9 @@ func (s *Service) runRegisterFlow(ctx context.Context) (time.Duration, error) {
 		if result.statusCode == 305 && result.useProxy != "" && !useProxyRetried {
 			s.applyRegisterUseProxy(result.useProxy)
 			s.resetRegistrationTransportForRegistrarRetry()
+			// The proxy gets a fresh transport choice, including the size switch.
+			s.largeRegisterMovedToTCP.Store(false)
+			s.largeRegisterTCPFailed.Store(false)
 			if transportErr := s.ensureRegistrationTransport(ctx); transportErr != nil {
 				return 0, &registerAttemptError{result: result, err: transportErr}
 			}
@@ -252,8 +257,20 @@ func (s *Service) runRegisterFlow(ctx context.Context) (time.Duration, error) {
 		if s.usesExternalRegistrationTransport() || !shouldRetryNextRegisterTransport(result, err) {
 			return 0, &registerAttemptError{result: result, err: err}
 		}
-		// The attempt may have moved to TCP for size; continue from where it is.
-		transportIndex = indexOfRegisterTransport(candidates, s.currentRegistrationTransport())
+		if s.largeRegisterMovedToTCP.Swap(false) {
+			// The UDP transport the size check skipped is still untried.
+			s.largeRegisterTCPFailed.Store(true)
+			logging.Info("IMS REGISTER over TCP failed after the size switch; retrying over UDP",
+				"device", s.DeviceID(), "status", result.statusCode, "err", err)
+			// Offer only UDP: if it cannot open, the failed TCP must not be reopened.
+			if _, switchErr := s.replaceInitialRegistrationTransport(ctx, []string{"udp"}, 0); switchErr != nil {
+				attemptErr := &registerAttemptError{result: result, err: err}
+				return 0, errors.Join(attemptErr, switchErr)
+			}
+			// TCP has been tried; UDP is the last transport left.
+			transportIndex = len(candidates) - 1
+			continue
+		}
 		next, switchErr := s.replaceInitialRegistrationTransport(ctx, candidates, transportIndex+1)
 		if switchErr != nil {
 			attemptErr := &registerAttemptError{result: result, err: err}

@@ -65,7 +65,7 @@ const largeRegisterTCPDialTimeout = 5 * time.Second
 func (s *Service) moveLargeRegisterToTCP(ctx context.Context, session *registerSession, size int) bool {
 	if size <= maxUDPRequestBytes || !isAutoRegisterTransport(s.cfg.Transport) ||
 		registerUsesProtectedTransport(session) || s.usesExternalRegistrationTransport() ||
-		s.currentRegistrationTransport() != "udp" {
+		s.currentRegistrationTransport() != "udp" || s.largeRegisterTCPFailed.Load() {
 		return false
 	}
 	candidates := registerTransportCandidates(s.cfg.Transport)
@@ -84,6 +84,7 @@ func (s *Service) moveLargeRegisterToTCP(ctx context.Context, session *registerS
 	}
 	logging.Info("IMS REGISTER exceeds the UDP size limit; sending over TCP",
 		"device", s.DeviceID(), "cseq", session.cseq, "bytes", size, "limit", maxUDPRequestBytes)
+	s.largeRegisterMovedToTCP.Store(true)
 	return true
 }
 
