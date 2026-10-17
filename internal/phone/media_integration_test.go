@@ -33,7 +33,7 @@ func testWebRTCBridge(t *testing.T, imsCodec string, imsPayloadType uint8) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	answer, err := manager.Create(context.Background(), "admin", offer)
+	answer, err := manager.Create(context.Background(), "admin", offer, "")
 	if err != nil {
 		t.Fatal(err)
 	}

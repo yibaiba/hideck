@@ -129,7 +129,7 @@ func (s *Server) handlePhoneMedia(c *gin.Context) {
 	if !decodePhoneJSON(c, &request) {
 		return
 	}
-	answer, err := s.phone.CreateMedia(c.Request.Context(), s.auth.Username, request.SDP)
+	answer, err := s.phone.CreateMedia(c.Request.Context(), s.auth.Username, request.SDP, c.Request.Host)
 	if err != nil {
 		s.respondPhoneError(c, err)
 		return

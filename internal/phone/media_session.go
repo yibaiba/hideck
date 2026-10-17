@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +23,10 @@ type mediaSessionOptions struct {
 	RealtimeCodecs          []string
 	NewRealtimeCodec        RealtimeCodecFactory
 	OnState                 func(string, webrtc.PeerConnectionState)
+	// AccessHost 是浏览器访问管理页时用的 Host（IP 或域名，含端口）。
+	// 媒体候选按它裁剪：局域网访问只宣告 LAN 地址，公网 IPv6 访问只宣告
+	// 该 IPv6，域名则用解析结果。零值表示不裁剪。
+	AccessHost string
 }
 
 type MediaSession struct {
@@ -41,6 +47,7 @@ type MediaSession struct {
 	silentWorker     sync.WaitGroup
 	silentStarted    bool
 	receiveOnly      bool
+	accessHost       string
 	fromIMS          atomic.Uint64
 	toIMS            atomic.Uint64
 	lost             atomic.Uint64
@@ -67,7 +74,7 @@ func newMediaSession(ctx context.Context, options mediaSessionOptions) (*MediaSe
 		ID: options.ID, Lease: options.Lease, Owner: options.Owner,
 		peer: peer, rtpConn: connection, onState: options.OnState,
 		realtimeCodecs:   append([]string(nil), options.RealtimeCodecs...),
-		newRealtimeCodec: options.NewRealtimeCodec, receiveOnly: receiveOnly,
+		newRealtimeCodec: options.NewRealtimeCodec, receiveOnly: receiveOnly, accessHost: options.AccessHost,
 		closed: make(chan struct{}),
 	}
 	answer, err := session.negotiate(ctx, options.Offer)
@@ -128,7 +135,20 @@ func (s *MediaSession) negotiate(ctx context.Context, offer string) (string, err
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	return s.peer.LocalDescription().SDP, nil
+	sdp := s.peer.LocalDescription().SDP
+	// 候选按浏览器实际访问的地址裁剪：多网卡/多地址族同时宣告会让 ICE 先
+	// 检查不可达的地址（实测公网 IPv6 对把同网段通话拖到 9 秒才连通）。
+	if allowed := resolveAccessHosts(ctx, s.accessHost); len(allowed) > 0 {
+		if pruned, kept := pruneAnswerCandidates(sdp, allowed); kept > 0 {
+			sdp = pruned
+			logger.Info("浏览器媒体候选裁剪", "media_id", s.ID, "access_host", s.accessHost,
+				"allowed", allowed, "kept", kept)
+		} else {
+			logger.Warn("访问地址不在本机候选内，保留全部候选", "media_id", s.ID,
+				"access_host", s.accessHost, "allowed", allowed)
+		}
+	}
+	return sdp, nil
 }
 
 func (s *MediaSession) PlainSDP() string {
@@ -345,4 +365,90 @@ func drainRTCP(sender *webrtc.RTPSender, done <-chan struct{}) {
 		default:
 		}
 	}
+}
+
+// resolveAccessHosts 把浏览器访问用的 Host 变成允许宣告的 IP 列表：
+// 带端口的 Host 去掉端口；IP 字面量直接使用；域名按 A/AAAA 解析（2 秒超时）。
+func resolveAccessHosts(ctx context.Context, host string) []string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil
+	}
+	if trimmed, _, err := net.SplitHostPort(host); err == nil {
+		host = trimmed
+	}
+	host = strings.Trim(host, "[]")
+	if ip, ok := normalizeIPAddress(host); ok {
+		return []string{ip}
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	addresses, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(addresses))
+	result := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		normalized, ok := normalizeIPAddress(address.IP.String())
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[normalized]; duplicate {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result
+}
+
+// normalizeIPAddress 把 IP 规范化（IPv4-mapped IPv6 还原成 IPv4）。
+func normalizeIPAddress(value string) (string, bool) {
+	address, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil {
+		return "", false
+	}
+	return address.Unmap().String(), true
+}
+
+// pruneAnswerCandidates 只保留地址属于 allowed 的候选行，返回新 SDP 与
+// 保留的候选数；一条都留不下时返回 0，调用方应保留原始候选。
+func pruneAnswerCandidates(sdp string, allowed []string) (string, int) {
+	allow := make(map[string]struct{}, len(allowed))
+	for _, ip := range allowed {
+		if normalized, ok := normalizeIPAddress(ip); ok {
+			allow[normalized] = struct{}{}
+		}
+	}
+	if len(allow) == 0 {
+		return sdp, 0
+	}
+	lines := strings.Split(sdp, "\n")
+	kept := 0
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "a=candidate:") {
+			fields := strings.Fields(strings.TrimPrefix(trimmed, "a=candidate:"))
+			if len(fields) >= 6 {
+				if _, ok := allow[normalizeCandidateAddress(fields[4])]; !ok {
+					continue
+				}
+				kept++
+			}
+		}
+		out = append(out, line)
+	}
+	if kept == 0 {
+		return sdp, 0
+	}
+	return strings.Join(out, "\n"), kept
+}
+
+func normalizeCandidateAddress(value string) string {
+	if normalized, ok := normalizeIPAddress(value); ok {
+		return normalized
+	}
+	return strings.ToLower(strings.TrimSpace(value))
 }

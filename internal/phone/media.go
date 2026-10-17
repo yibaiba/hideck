@@ -145,7 +145,7 @@ func resolveWebRTCPublicIPs(host string, lookup publicIPLookup) ([]string, error
 	return result, nil
 }
 
-func (m *MediaManager) Create(ctx context.Context, owner, offer string) (MediaAnswer, error) {
+func (m *MediaManager) Create(ctx context.Context, owner, offer, accessHost string) (MediaAnswer, error) {
 	if m == nil || m.api == nil {
 		return MediaAnswer{}, errors.New("phone: media manager is unavailable")
 	}
@@ -158,7 +158,7 @@ func (m *MediaManager) Create(ctx context.Context, owner, offer string) (MediaAn
 		return MediaAnswer{}, err
 	}
 	session, answer, err := newMediaSession(ctx, mediaSessionOptions{
-		ID: mediaID, Lease: lease, Owner: owner, Offer: offer,
+		ID: mediaID, Lease: lease, Owner: owner, Offer: offer, AccessHost: accessHost,
 		API: m.api, ICEServers: m.iceServers, RealtimeCodecs: m.realtimeCodecs,
 		NewRealtimeCodec: m.newRealtimeCodec, OnState: m.onState,
 	})

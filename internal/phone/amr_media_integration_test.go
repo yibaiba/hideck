@@ -41,7 +41,7 @@ func testWebRTCAMRBridge(t *testing.T, imsCodec string, payloadType uint8, clock
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	answer, err := manager.Create(context.Background(), "admin", completeLocalOffer(t, browser))
+	answer, err := manager.Create(context.Background(), "admin", completeLocalOffer(t, browser), "")
 	if err != nil {
 		t.Fatal(err)
 	}

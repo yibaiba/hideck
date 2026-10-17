@@ -45,7 +45,7 @@ func testReceiveOnlyBridge(t *testing.T, config receiveOnlyTest) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	answer, err := manager.Create(context.Background(), "admin", completeLocalOffer(t, browser))
+	answer, err := manager.Create(context.Background(), "admin", completeLocalOffer(t, browser), "")
 	if err != nil {
 		t.Fatal(err)
 	}
