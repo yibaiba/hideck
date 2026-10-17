@@ -101,13 +101,85 @@ func (p *Pool) prepareModemVoice(ctx context.Context, id string) (*host.Resource
 	if err := port.check(ctx); err != nil {
 		return nil, err
 	}
-	firmware, err := port.ExecuteATContext(ctx, "AT+CGMR", 5*time.Second)
+	// 型号先行：ATI 一条指令同时给出厂商/型号/固件（Revision 行），认不出
+	// QDC507 就绝不进入 QDC 的 ADB/insmod 初始化流程。
+	identity, err := port.ExecuteATContext(ctx, "ATI", 5*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取模组型号失败: %w", err)
 	}
-	if !hasFirmware(firmware, "QDC507GLEFM21") {
-		return nil, errors.New("当前固件没有已验证的模组直拨音频适配器")
+	model, firmware := parseATI(identity)
+	logger.Info("模组直拨音频适配器", "device", id, "adapter", string(modemVoiceAdapter(identity)),
+		"model", model, "firmware", firmware)
+	switch modemVoiceAdapter(identity) {
+	case modemVoiceAdapterQDC507:
+		// QDC 流程按验证过的固件跑，ATI 的 Revision 行与 CGMR 同源，仍以
+		// CGMR 复核一次，避免把 ADB/insmod 序列跑到未验证固件上。
+		revision, err := port.ExecuteATContext(ctx, "AT+CGMR", 5*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("读取模组固件失败: %w", err)
+		}
+		if !hasFirmware(revision, qdc507VoiceFirmware) {
+			return nil, errors.New("QDC507 模组固件未验证，拒绝模组直拨初始化")
+		}
+		return prepareQDC507Voice(ctx, port)
+	case modemVoiceAdapterNative:
+		return prepareNativeVoice(ctx, port)
+	default:
+		return nil, errors.New("当前模组没有已验证的模组直拨音频适配器")
 	}
+}
+
+// modemVoiceAdapterKind 选择模组直拨的音频适配器。空值=拒绝初始化。
+type modemVoiceAdapterKind string
+
+const (
+	modemVoiceAdapterNone   modemVoiceAdapterKind = ""
+	modemVoiceAdapterQDC507 modemVoiceAdapterKind = "qdc507"
+	modemVoiceAdapterNative modemVoiceAdapterKind = "native"
+)
+
+// modemVoiceAdapter 只认 ATI：响应里出现 QDC507 才可能是 QDC 模组（其固件
+// 由调用方以 CGMR 严格复核）；其余一切型号（EC20 全固件版本、其他暴露原生
+// USB 声卡的模组）走原生声卡流程，由准备期声卡存在性检查兜底。
+func modemVoiceAdapter(identity string) modemVoiceAdapterKind {
+	if strings.Contains(strings.ToUpper(identity), "QDC507") {
+		return modemVoiceAdapterQDC507
+	}
+	return modemVoiceAdapterNative
+}
+
+// parseATI 解析 ATI 响应，例如：
+//
+//	Quectel
+//	EC20F
+//	Revision: EC20CEFAGR08A03M4G
+//	OK
+//
+// 型号取 Revision 行前的最后一条非空行（单行型号也兼容），固件取
+// Revision 值；没有 Revision 行时把全部非空行拼成型号。
+func parseATI(response string) (model, firmware string) {
+	var lines []string
+	for _, line := range strings.Split(strings.ReplaceAll(response, "\r", ""), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && trimmed != "OK" {
+			lines = append(lines, trimmed)
+		}
+	}
+	for i, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "revision:") {
+			firmware = strings.TrimSpace(line[len("revision:"):])
+			if i > 0 {
+				model = lines[i-1]
+			}
+			return model, firmware
+		}
+	}
+	return strings.Join(lines, " "), ""
+}
+
+// qdc507VoiceFirmware 是已验证的 QDC507 模组直拨音频适配器固件版本。
+const qdc507VoiceFirmware = "QDC507GLEFM21"
+
+func prepareQDC507Voice(ctx context.Context, port *modemVoicePort) (*host.Resources, error) {
 	adb, err := qdc507.FindADB()
 	if err != nil {
 		return nil, err

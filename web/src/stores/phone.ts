@@ -120,9 +120,42 @@ export const usePhoneStore = defineStore('phone', {
         phoneService.devices(), phoneService.active(this.lease), phoneService.history()
       ])
       this.devices = devices
-      this.calls = calls
+      this.mergeCalls(calls)
       this.endingCallIds = this.endingCallIds.filter((callId) => calls.some((call) => call.call_id === callId))
       this.history = history
+    },
+
+    // 把服务端的 active 快照合并进本地列表，而不是整体覆盖。
+    //
+    // 背景：refresh() 会在 SSE 断连重连（onOpen）时触发，与 SSE 事件流是两条
+    // 并发数据源、无顺序保证。若 HTTP 快照恰好落在 call_answered 之前返回，
+    // 整体覆盖会用一个还写着 ringing 的旧状态把前端已更新的 connected 顶回去，
+    // 通话卡片就永远停在"响铃中"（媒体与 DB 都正常，所以对方能听到声音、只是
+    // UI 不动）。这里按"状态只进不退"合并：本地已处于更靠后状态的通话，不被
+    // 远端较旧的状态覆盖。
+    mergeCalls(remote: PhoneCall[]) {
+      const rank: Record<string, number> = { calling: 0, ringing: 1, waiting: 1, connected: 2 }
+      const byId = new Map<string, PhoneCall>()
+      for (const call of this.calls) {
+        byId.set(call.call_id, normalizeCallOwnership(call, this.mediaId))
+      }
+      for (const incoming of remote) {
+        const normalized = normalizeCallOwnership(incoming, this.mediaId)
+        const existing = byId.get(normalized.call_id)
+        if (!existing) {
+          byId.set(normalized.call_id, normalized)
+          continue
+        }
+        const remoteRank = rank[normalized.status] ?? -1
+        const localRank = rank[existing.status] ?? -1
+        // 状态只进不退：远端更靠后才覆盖，否则保留本地。
+        if (remoteRank >= localRank) {
+          byId.set(normalized.call_id, normalized)
+        }
+      }
+      // active 快照里没有的通话 = 服务端已结束（terminal 不返回），删除。
+      const remoteIds = new Set(remote.map((call) => call.call_id))
+      this.calls = [...byId.values()].filter((call) => remoteIds.has(call.call_id))
     },
 
     async enableMedia() {

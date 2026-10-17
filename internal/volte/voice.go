@@ -14,17 +14,23 @@ import (
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
+// QMI VOICE_CALL_STATE 取值，顺序按 libqmi/3GPP 规范：
+// IDLE, ORIG, INCOMING, CONV, CC_IN_PROG, ALERTING, HOLD, WAITING,
+// DISCONNECTING, END, SETUP。
+// 注意 0x04 是 CC_IN_PROGRESS——"呼叫已发出、等待呼叫控制完成"的早媒体
+// 阶段（对方还在振铃、我们听到回铃音），**不是**接通。
 const (
 	qmiCallIdle          qmi.VoiceCallState     = 0x00
-	qmiCallIncoming      qmi.VoiceCallState     = 0x01
-	qmiCallOriginating   qmi.VoiceCallState     = 0x02
-	qmiCallAlerting      qmi.VoiceCallState     = 0x03
-	qmiCallConversation  qmi.VoiceCallState     = 0x04
-	qmiCallHolding       qmi.VoiceCallState     = 0x05
-	qmiCallWaiting       qmi.VoiceCallState     = 0x06
-	qmiCallDisconnecting qmi.VoiceCallState     = 0x07
-	qmiCallEnd           qmi.VoiceCallState     = 0x08
-	qmiCallSetup         qmi.VoiceCallState     = 0x09
+	qmiCallOriginating   qmi.VoiceCallState     = 0x01
+	qmiCallIncoming      qmi.VoiceCallState     = 0x02
+	qmiCallConversation  qmi.VoiceCallState     = 0x03
+	qmiCallCCInProgress  qmi.VoiceCallState     = 0x04
+	qmiCallAlerting      qmi.VoiceCallState     = 0x05
+	qmiCallHolding       qmi.VoiceCallState     = 0x06
+	qmiCallWaiting       qmi.VoiceCallState     = 0x07
+	qmiCallDisconnecting qmi.VoiceCallState     = 0x08
+	qmiCallEnd           qmi.VoiceCallState     = 0x09
+	qmiCallSetup         qmi.VoiceCallState     = 0x0a
 	qmiDirMO             qmi.VoiceCallDirection = 0x01
 	qmiDirMT             qmi.VoiceCallDirection = 0x02
 )
@@ -212,6 +218,11 @@ func (c *Controller) beginCall(ctx context.Context, request voicehost.BeginCallR
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 拨号前把语音路由重新指到 USB 声卡：模组重启（USB 重新枚举）会丢掉
+	// AT+QPCMV 的设置，而进程里的会话闸门不会跟着复位，症状是声卡能打开、
+	// 下行有声、上行每帧写 EPIPE（对方完全听不到）。
+	// 必须在 VOICEDial 之前——放到通话建立中间会打断 QMI 语音状态机。
+	c.armVoicePCM(deviceID)
 	qmiID, err := c.host.VOICEDial(ctx, deviceID, request.Callee)
 	if err != nil {
 		return voicehost.CallSnapshot{}, err
@@ -500,6 +511,14 @@ func (c *Controller) handleVoiceInfo(deviceID string, vs *voiceSession, info *qm
 		if !existed && vs.ignoreReusedQMISlot(item.ID, peer, dir, now) {
 			continue
 		}
+		if !existed || prev.State != state {
+			// QMI 状态是这条链路上唯一能回答"对方到底接了没有"的证据。
+			// 此前整条路径不打任何状态日志，通话停在哪一步只能靠猜（是没接、
+			// 状态没上报、还是映射错位）。只在变化时打，一通电话通常 3~5 条。
+			logger.Info("VoLTE 通话状态", "device", deviceID, "qmi_id", item.ID,
+				"raw", uint8(item.State), "state", state, "event", eventType,
+				"direction", dir, "peer", peer)
+		}
 		id := prev.ID
 		if !existed {
 			id = newPersistentCallID(deviceID, item.ID)
@@ -587,7 +606,9 @@ func mapQMIState(state qmi.VoiceCallState) (string, string) {
 	switch state {
 	case qmiCallOriginating:
 		return "calling", "CallRinging"
-	case qmiCallIncoming, qmiCallAlerting, qmiCallSetup:
+	// CC_IN_PROGRESS 是早媒体：对方仍在振铃，我们听到的是回铃音。
+	// 把它当"接通"会让录音从回铃阶段就开始，铃声被录进通话记录里。
+	case qmiCallIncoming, qmiCallAlerting, qmiCallSetup, qmiCallCCInProgress:
 		return "ringing", "CallRinging"
 	case qmiCallConversation, qmiCallHolding:
 		return "connected", "CallAnswered"
@@ -696,7 +717,10 @@ func audioError(st Status) string {
 	return "VoLTE 音频不可用：未检测到 UAC 声卡"
 }
 
-const alsaOpenBudget = 800 * time.Millisecond
+// alsaOpenBudget 覆盖"端点激活（最坏 2×1.2s）+ 打开正式流"。这个预算一旦
+// 超时，callPCM 会把 alsaUnavailable 永久置位，后续所有通话都无音频，
+// 所以必须留足余量。
+const alsaOpenBudget = 3 * time.Second
 
 func openALSAPCMBounded(device string, budget time.Duration) (PCMPort, error) {
 	if budget <= 0 {

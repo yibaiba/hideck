@@ -101,14 +101,14 @@ func buildICEServers(urls []string) []webrtc.ICEServer {
 	return servers
 }
 
-func (s *Service) CreateMedia(ctx context.Context, owner, offer string) (MediaAnswer, error) {
+func (s *Service) CreateMedia(ctx context.Context, owner, offer, accessHost string) (MediaAnswer, error) {
 	if strings.TrimSpace(owner) == "" {
 		return MediaAnswer{}, errors.New("phone: authenticated owner is required")
 	}
 	if strings.TrimSpace(offer) == "" {
 		return MediaAnswer{}, errors.New("phone: WebRTC SDP offer is required")
 	}
-	return s.media.Create(ctx, owner, offer)
+	return s.media.Create(ctx, owner, offer, accessHost)
 }
 
 func (s *Service) CancelMedia(owner, mediaID, lease string) error {

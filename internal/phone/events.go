@@ -1,6 +1,10 @@
 package phone
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/yibaiba/hideck/pkg/logger"
+)
 
 const (
 	eventBufferSize      = 256
@@ -27,6 +31,14 @@ func (hub *eventHub) publish(event Event) Event {
 	hub.events = append(hub.events, event)
 	if len(hub.events) > eventBufferSize {
 		hub.events = append([]Event(nil), hub.events[len(hub.events)-eventBufferSize:]...)
+	}
+	if event.Type == "call_answered" || event.Type == "call_ended" {
+		// 诊断：DB 已正确落接通/结束，但前端偶发停在"响铃中/通话中"。
+		// 记录发布瞬间的订阅者数，区分"SSE 已断（订阅者 0）"与"有订阅但
+		// 前端未消费"。
+		logger.Info("通话事件发布", "type", event.Type, "call_id", event.Call.CallID,
+			"event_id", event.ID, "subscribers", len(hub.subscribers),
+			"status", event.Call.Status)
 	}
 	for id, subscriber := range hub.subscribers {
 		select {

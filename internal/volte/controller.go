@@ -301,14 +301,32 @@ func (c *Controller) applyProvision(deviceID string, res Result) {
 	})
 }
 
+// ensureVoicePCM 在设备会话内只下发一次 QPCMV，用于 enable 阶段。
 func (c *Controller) ensureVoicePCM(deviceID string) {
+	c.applyVoicePCM(deviceID, false)
+}
+
+// armVoicePCM 在每次拨号前重新下发 QPCMV，必须在 VOICEDial 之前调用。
+//
+// 模组重启（USB 重新枚举）会把 USB 语音路由丢回内部音频通道，而本进程里的
+// qpcmvTried 仍是 true，于是再也不补发：声卡能打开、下行正常，但播放侧每帧
+// 写都 EPIPE（alsa_unrecovered 一路涨），对方完全听不到。切换一次 phone_mode
+// 能"修好"，正是因为会话被销毁、闸门被复位。
+//
+// 时机很关键：必须在 VOICEDial 之前发。放到通话建立中间（callPCM 那一步）会
+// 打断 QMI 语音状态机——实测通话停在 ringing，双方无声。
+func (c *Controller) armVoicePCM(deviceID string) {
+	c.applyVoicePCM(deviceID, true)
+}
+
+func (c *Controller) applyVoicePCM(deviceID string, force bool) {
 	if c == nil || c.host == nil {
 		return
 	}
 	deviceID = strings.TrimSpace(deviceID)
 	c.mu.Lock()
 	s := c.ensureLocked(deviceID)
-	if s.qpcmvTried {
+	if s.qpcmvTried && !force {
 		c.mu.Unlock()
 		return
 	}
@@ -332,12 +350,23 @@ func (c *Controller) ensureVoicePCM(deviceID string) {
 	s = c.ensureLocked(deviceID)
 	s.qpcmvOK = err == nil
 	s.status.QPCMVFailed = err != nil
-	if err != nil {
-		s.alsaUnavailable = true
-	}
 	c.mu.Unlock()
 	if err != nil {
-		logger.Warn("VoLTE 无法把通话 PCM 接到 USB 声卡，跳过打开 ALSA", "device", deviceID, "err", err)
+		// QPCMV 只是"把通话语音路由到 USB 声卡"的保险。命令失败（AT 通道被
+		// 占用、超时）不代表声卡不可用，绝不能因此把整通电话降级成无音频：
+		// 这里只保留状态位与告警，是否真的没声音交给端点激活和 XRUN 统计去
+		// 暴露。此前这条路径会置 alsaUnavailable → callPCM 直接返回 nullPCM。
+		logger.Warn("VoLTE 下发 QPCMV 失败，继续尝试打开声卡", "device", deviceID, "err", err)
+		return
+	}
+	if force {
+		// 模组重启后声卡可能已重新枚举：这次下发成功就让本会话重新尝试打开
+		// 音频，不要被之前那次失败永久锁死。
+		c.mu.Lock()
+		s = c.ensureLocked(deviceID)
+		s.alsaUnavailable = false
+		c.mu.Unlock()
+		logger.Info("VoLTE 拨号前重新下发 QPCMV", "device", deviceID)
 	}
 }
 
