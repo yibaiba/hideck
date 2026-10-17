@@ -14,17 +14,23 @@ import (
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
+// QMI VOICE_CALL_STATE 取值，顺序按 libqmi/3GPP 规范：
+// IDLE, ORIG, INCOMING, CONV, CC_IN_PROG, ALERTING, HOLD, WAITING,
+// DISCONNECTING, END, SETUP。
+// 注意 0x04 是 CC_IN_PROGRESS——"呼叫已发出、等待呼叫控制完成"的早媒体
+// 阶段（对方还在振铃、我们听到回铃音），**不是**接通。
 const (
 	qmiCallIdle          qmi.VoiceCallState     = 0x00
-	qmiCallIncoming      qmi.VoiceCallState     = 0x01
-	qmiCallOriginating   qmi.VoiceCallState     = 0x02
-	qmiCallAlerting      qmi.VoiceCallState     = 0x03
-	qmiCallConversation  qmi.VoiceCallState     = 0x04
-	qmiCallHolding       qmi.VoiceCallState     = 0x05
-	qmiCallWaiting       qmi.VoiceCallState     = 0x06
-	qmiCallDisconnecting qmi.VoiceCallState     = 0x07
-	qmiCallEnd           qmi.VoiceCallState     = 0x08
-	qmiCallSetup         qmi.VoiceCallState     = 0x09
+	qmiCallOriginating   qmi.VoiceCallState     = 0x01
+	qmiCallIncoming      qmi.VoiceCallState     = 0x02
+	qmiCallConversation  qmi.VoiceCallState     = 0x03
+	qmiCallCCInProgress  qmi.VoiceCallState     = 0x04
+	qmiCallAlerting      qmi.VoiceCallState     = 0x05
+	qmiCallHolding       qmi.VoiceCallState     = 0x06
+	qmiCallWaiting       qmi.VoiceCallState     = 0x07
+	qmiCallDisconnecting qmi.VoiceCallState     = 0x08
+	qmiCallEnd           qmi.VoiceCallState     = 0x09
+	qmiCallSetup         qmi.VoiceCallState     = 0x0a
 	qmiDirMO             qmi.VoiceCallDirection = 0x01
 	qmiDirMT             qmi.VoiceCallDirection = 0x02
 )
@@ -587,7 +593,9 @@ func mapQMIState(state qmi.VoiceCallState) (string, string) {
 	switch state {
 	case qmiCallOriginating:
 		return "calling", "CallRinging"
-	case qmiCallIncoming, qmiCallAlerting, qmiCallSetup:
+	// CC_IN_PROGRESS 是早媒体：对方仍在振铃，我们听到的是回铃音。
+	// 把它当"接通"会让录音从回铃阶段就开始，铃声被录进通话记录里。
+	case qmiCallIncoming, qmiCallAlerting, qmiCallSetup, qmiCallCCInProgress:
 		return "ringing", "CallRinging"
 	case qmiCallConversation, qmiCallHolding:
 		return "connected", "CallAnswered"
