@@ -178,6 +178,14 @@ func (p *Pool) stopNativeVoLTE(deviceID, reason string) {
 }
 
 func (p *Pool) StopSoftwareIMS(deviceID string) error {
+	return p.stopSoftwareIMS(deviceID, true)
+}
+
+// stopSoftwareIMS with restoreRadio=false leaves the radio as it is. Card policy
+// projection uses it: the teardown would otherwise bring the radio online from the
+// not-yet-projected config, and a multi-IMSI SIM (DITO, Lebara UK) that sees a
+// foreign network in that window switches to its roaming IMSI.
+func (p *Pool) stopSoftwareIMS(deviceID string, restoreRadio bool) error {
 	if p == nil {
 		return nil
 	}
@@ -185,7 +193,7 @@ func (p *Pool) StopSoftwareIMS(deviceID string) error {
 		p.voWiFiHost().InvalidateRuntime(deviceID, "native_phone")
 		return nil
 	}
-	return p.voWiFiHost().Disable(p.Context(), deviceID, "native_volte", true)
+	return p.voWiFiHost().Disable(p.Context(), deviceID, "native_volte", restoreRadio)
 }
 
 func (p *Pool) SetNativeIMS(ctx context.Context, deviceID string, enabled bool) error {

@@ -96,3 +96,82 @@ func TestNativePhoneModesRejectDelayedSoftwarePreparation(t *testing.T) {
 		})
 	}
 }
+
+// Card policy projection stops software IMS without restoring the radio; the
+// projected policy decides the radio right after. A restore here would turn the
+// radio on from the stale config for a moment.
+func TestPolicyKeepsRadioOffOnlyWhenTheProjectionTurnsItOff(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pol  cardpolicy.Policy
+		want bool
+	}{
+		{"wifi calling", cardpolicy.Policy{VoWiFiEnabled: true, PhoneMode: PhoneModeWiFi}, true},
+		{"airplane", cardpolicy.Policy{AirplaneEnabled: true, PhoneMode: PhoneModeCellular}, true},
+		// Restoring here also re-enables native IMS for the cellular phone.
+		{"cellular on demand", cardpolicy.Policy{VoWiFiEnabled: true, PhoneMode: PhoneModeCellular, DataStrategy: "on_demand"}, false},
+		{"native volte", cardpolicy.Policy{VoWiFiEnabled: true, PhoneMode: PhoneModeVoLTE}, false},
+		{"phone off", cardpolicy.Policy{PhoneMode: PhoneModeWiFi}, false},
+	} {
+		if got := policyKeepsRadioOff(tc.pol); got != tc.want {
+			t.Errorf("%s: policyKeepsRadioOff = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPolicyApplyRestoresRadioOnlyWhenTheNewPolicyKeepsItOn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pol  cardpolicy.Policy
+		want bool
+	}{
+		{"airplane", cardpolicy.Policy{AirplaneEnabled: true, PhoneMode: PhoneModeWiFi}, false},
+		{"cellular on demand", cardpolicy.Policy{VoWiFiEnabled: true, PhoneMode: PhoneModeCellular, DataStrategy: "on_demand"}, true},
+	} {
+		p, w := atTestPool(t)
+		w.Config.PhoneMode, w.Config.VoWiFiEnabled = PhoneModeWiFi, true
+		w.state.Identity.ICCID = "test-sim"
+		tc.pol.ICCID = "test-sim"
+		host := p.voWiFiHost()
+		host.BeginStart(w.ID)
+		var got *vowifihost.LifecycleCommand
+		host.SetLifecycleRunForTest(func(ctx context.Context, cmd vowifihost.LifecycleCommand) error {
+			if cmd.Kind == vowifihost.LifecycleCommandDisable {
+				got = &cmd
+			}
+			return nil
+		})
+		p.SetPolicyResolver(&stubPolicyResolver{pol: tc.pol})
+		p.resolveAndApplyPolicy(w, "test_projection")
+		if got == nil || got.RestoreRadio != tc.want {
+			t.Errorf("%s: disable command=%+v, want RestoreRadio=%v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPolicyProjectionStopsSoftwareIMSWithoutRestoringRadio(t *testing.T) {
+	for _, restore := range []bool{true, false} {
+		p, w := atTestPool(t)
+		host := p.voWiFiHost()
+		host.BeginStart(w.ID)
+		var got *vowifihost.LifecycleCommand
+		host.SetLifecycleRunForTest(func(ctx context.Context, cmd vowifihost.LifecycleCommand) error {
+			if cmd.Kind == vowifihost.LifecycleCommandDisable {
+				got = &cmd
+			}
+			return nil
+		})
+		var err error
+		if restore {
+			err = p.StopSoftwareIMS(w.ID)
+		} else {
+			err = p.stopSoftwareIMS(w.ID, false)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == nil || got.RestoreRadio != restore {
+			t.Fatalf("restore=%v disable command=%+v", restore, got)
+		}
+	}
+}

@@ -18,34 +18,35 @@ import (
 )
 
 type qmiBackendSendSourceStub struct {
-	lastFormat       uint8
-	lastPDU          []byte
-	sendCount        int
-	powerOffSlots    []uint8
-	powerOnSlots     []uint8
-	uimReadiness     qmimanager.UIMReadiness
-	uimReadinessErr  error
-	servingCalls     int
-	servingSeq       []*qmi.ServingSystem
-	servingErrAt     map[int]error
-	rfBandInfo       *qmi.RFBandInfo
-	cellLocation     *qmi.CellLocationInfo
-	getMSISDN        func(ctx context.Context) (string, error)
-	nasPrefs         []qmi.SystemSelectionPreference
-	deleteByTagCalls []string
-	euiccOpenCalls   int
-	scanResults      []qmi.NetworkScanResult
-	scanErr          error
-	incrementalInfo  *qmi.NASIncrementalNetworkScanInfo
-	incrementalTS    time.Time
-	incrementalOK    bool
-	getSysSelPref    *qmi.SystemSelectionPreference
-	initiateRegReqs  []qmi.NASInitiateNetworkRegisterRequest
-	snapshot         *qmimanager.DeviceSnapshot
-	simStatus        *qmi.SIMStatus
-	simStatusCalls   int
-	setModes         []qmi.OperatingMode
-	persistLowErr    error
+	lastFormat        uint8
+	lastPDU           []byte
+	sendCount         int
+	powerOffSlots     []uint8
+	powerOnSlots      []uint8
+	uimReadiness      qmimanager.UIMReadiness
+	uimReadinessErr   error
+	servingCalls      int
+	servingSeq        []*qmi.ServingSystem
+	servingErrAt      map[int]error
+	rfBandInfo        *qmi.RFBandInfo
+	cellLocation      *qmi.CellLocationInfo
+	getMSISDN         func(ctx context.Context) (string, error)
+	nasPrefs          []qmi.SystemSelectionPreference
+	deleteByTagCalls  []string
+	euiccOpenCalls    int
+	scanResults       []qmi.NetworkScanResult
+	scanErr           error
+	incrementalInfo   *qmi.NASIncrementalNetworkScanInfo
+	incrementalTS     time.Time
+	incrementalOK     bool
+	getSysSelPref     *qmi.SystemSelectionPreference
+	initiateRegReqs   []qmi.NASInitiateNetworkRegisterRequest
+	snapshot          *qmimanager.DeviceSnapshot
+	simStatus         *qmi.SIMStatus
+	simStatusCalls    int
+	setModes          []qmi.OperatingMode
+	persistLowErr     error
+	alreadyPersistLow bool
 }
 
 func (s *qmiBackendSendSourceStub) GetDeviceSerialNumbers(ctx context.Context) (*qmi.DeviceInfo, error) {
@@ -167,6 +168,9 @@ func (s *qmiBackendSendSourceStub) GetSysInfo(ctx context.Context) (*qmi.SysInfo
 }
 
 func (s *qmiBackendSendSourceStub) GetOperatingMode(ctx context.Context) (qmi.OperatingMode, error) {
+	if s.alreadyPersistLow {
+		return qmi.ModePersistLow, nil
+	}
 	return qmi.ModeOnline, nil
 }
 
@@ -252,8 +256,19 @@ func TestQMISetOperatingModeRFOffFallsBackToLowPower(t *testing.T) {
 	if err := (&QMIBackend{source: src}).SetOperatingMode(context.Background(), ModeRFOff); err != nil {
 		t.Fatal(err)
 	}
-	if len(src.setModes) != 2 || src.setModes[0] != qmi.ModePersistLow || src.setModes[1] != qmi.ModeLowPower {
-		t.Fatalf("PersistLow 失败应回退 LowPower: %+v", src.setModes)
+	want := []qmi.OperatingMode{qmi.ModePersistLow, qmi.ModePersistLow, qmi.ModeLowPower}
+	if len(src.setModes) != len(want) || src.setModes[0] != want[0] || src.setModes[1] != want[1] || src.setModes[2] != want[2] {
+		t.Fatalf("PersistLow 失败应重试一次再回退 LowPower: %+v", src.setModes)
+	}
+}
+
+func TestQMISetOperatingModeRFOffAcceptsModemAlreadyInPersistLow(t *testing.T) {
+	src := &qmiBackendSendSourceStub{persistLowErr: errors.New("no effect"), alreadyPersistLow: true}
+	if err := (&QMIBackend{source: src}).SetOperatingMode(context.Background(), ModeRFOff); err != nil {
+		t.Fatal(err)
+	}
+	if len(src.setModes) != 1 || src.setModes[0] != qmi.ModePersistLow {
+		t.Fatalf("已处于持久飞行时不应重试或回退 LowPower: %+v", src.setModes)
 	}
 }
 
@@ -1532,4 +1547,16 @@ func (s *qmiBackendUSSDNoWaitSourceStub) EnsureSIMProvisioned(ctx context.Contex
 
 func (s *qmiBackendSIMAuthChannelSourceStub) EnsureSIMProvisioned(ctx context.Context, opts qmimanager.EnsureSIMProvisionedOptions) (qmimanager.UIMReadiness, error) {
 	return qmimanager.UIMReadiness{}, nil
+}
+
+func TestQMISetOperatingModeRFOffStopsOnCancelWithoutLowPower(t *testing.T) {
+	src := &qmiBackendSendSourceStub{persistLowErr: errors.New("busy")}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := (&QMIBackend{source: src}).SetOperatingMode(ctx, ModeRFOff); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+	if len(src.setModes) != 1 || src.setModes[0] != qmi.ModePersistLow {
+		t.Fatalf("取消后不应重试或回退 LowPower: %+v", src.setModes)
+	}
 }

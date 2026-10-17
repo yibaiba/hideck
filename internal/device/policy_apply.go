@@ -4,6 +4,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/yibaiba/hideck/internal/cardpolicy"
+	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -82,7 +84,9 @@ func (p *Pool) resolveAndApplyPolicy(worker *Worker, reason string) policyApplyR
 	}
 	if worker.Config.PhoneMode != pol.PhoneMode || !pol.VoWiFiEnabled ||
 		(pol.PhoneMode == "cellular" && (pol.AirplaneEnabled || pol.DataStrategy != "always")) {
-		if err := p.StopSoftwareIMS(worker.ID); err != nil {
+		// A policy that keeps the radio off must not let the teardown bring it online first.
+		// Otherwise the teardown still restores the radio and native IMS.
+		if err := p.stopSoftwareIMS(worker.ID, !policyKeepsRadioOff(pol)); err != nil {
 			return policyApplyResult{ICCID: iccid, Reason: "software_ims_stop_failed", Err: err}
 		}
 	}
@@ -177,4 +181,13 @@ func (p *Pool) resolveAndApplyPolicy(worker *Worker, reason string) policyApplyR
 		return policyApplyResult{ICCID: iccid, Reason: "mbn_policy", Err: mbnErr}
 	}
 	return policyApplyResult{Applied: true, ICCID: iccid, Reason: reason}
+}
+
+// policyKeepsRadioOff reports whether projecting pol leaves the cellular radio off.
+func policyKeepsRadioOff(pol cardpolicy.Policy) bool {
+	return shouldSuppressCellularRadio(config.DeviceConfig{
+		AirplaneEnabled: pol.AirplaneEnabled,
+		VoWiFiEnabled:   pol.VoWiFiEnabled,
+		PhoneMode:       pol.PhoneMode,
+	})
 }

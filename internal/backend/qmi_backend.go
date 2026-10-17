@@ -925,12 +925,37 @@ func (q *QMIBackend) SetOperatingMode(ctx context.Context, mode OperatingMode) e
 	case ModeLowPower:
 		qmiMode = qmi.ModeLowPower
 	case ModeRFOff:
-		// 飞行模式应对齐 AT+CFUN=4 / DMS PersistLow。LowPower 会被部分模组自行拉回 Online。
-		if err := q.source.SetOperatingMode(ctx, qmi.ModePersistLow); err != nil {
-			logger.Warn("QMI PersistLow 飞行未被接受，回退 LowPower", "err", err)
-			return q.source.SetOperatingMode(ctx, qmi.ModeLowPower)
+		// 飞行模式应对齐 AT+CFUN=4 / DMS PersistLow。LowPower 会被部分模组自行拉回 Online，
+		// 也不跨重启：模组断电重启后射频打开，多 IMSI 卡看到国内网就会换成漫游 IMSI。
+		var err error
+		for attempt := 1; attempt <= 2; attempt++ {
+			if err = q.source.SetOperatingMode(ctx, qmi.ModePersistLow); err == nil {
+				if attempt > 1 {
+					logger.Info("QMI PersistLow 重试成功", "attempt", attempt)
+				}
+				return nil
+			}
+			// NoEffect or a lost response can still leave the modem in PersistLow.
+			cur, readErr := q.source.GetOperatingMode(ctx)
+			if readErr == nil && cur == qmi.ModePersistLow {
+				logger.Info("QMI PersistLow 返回错误，但模组已处于持久飞行", "attempt", attempt, "err", err)
+				return nil
+			}
+			if readErr != nil {
+				logger.Warn("QMI PersistLow 被拒，读回模式也失败", "attempt", attempt, "err", err, "read_err", readErr)
+			} else {
+				logger.Warn("QMI PersistLow 被拒", "attempt", attempt, "err", err, "mode_now", int(cur))
+			}
+			if attempt == 1 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Second):
+				}
+			}
 		}
-		return nil
+		logger.Warn("QMI PersistLow 飞行未被接受，回退 LowPower；模组重启后不会保持飞行", "err", err)
+		return q.source.SetOperatingMode(ctx, qmi.ModeLowPower)
 	default:
 		return fmt.Errorf("不支持的操作模式: %d", mode)
 	}
