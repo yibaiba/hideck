@@ -7,9 +7,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pion/rtp"
 	"github.com/yibaiba/hideck/internal/phone"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
+
+var firstPacketOnce atomic.Bool
 
 const (
 	pcmuPayloadType   = 0
@@ -184,19 +187,24 @@ func (b *PCMBridge) uplink() {
 	}
 }
 
+// rtpPCMUPayload 取出 PCMU 载荷。必须走完整 RTP 解析：Chrome 的音频包带
+// 头扩展（X 位，通常是 ssrc-audio-level / abs-send-time），早期手写版只跳过
+// 12 字节固定头，把 8 字节扩展当成 µ-law 音频送进模组——每 20ms 一簇满幅
+// 毛刺，对方听到的"电流声"就是它；而录音取的是已解析的 payload，所以录音
+// 永远干净，把排查方向一直带偏。padding（P 位）同理必须剥掉。
 func rtpPCMUPayload(pkt []byte) ([]byte, bool) {
-	if len(pkt) < 12 {
+	var packet rtp.Packet
+	if err := packet.Unmarshal(pkt); err != nil {
 		return nil, false
 	}
-	cc := int(pkt[0] & 0x0f)
-	header := 12 + 4*cc
-	if len(pkt) < header {
+	if packet.PayloadType != pcmuPayloadType || len(packet.Payload) == 0 {
 		return nil, false
 	}
-	if pkt[1]&0x7f != pcmuPayloadType {
-		return nil, false
+	if firstPacketOnce.CompareAndSwap(false, true) {
+		logger.Info("VoLTE 收到首个 RTP 包", "总长度", len(pkt), "载荷长度", len(packet.Payload),
+			"扩展", len(packet.Extensions) > 0, "填充", packet.Padding)
 	}
-	return pkt[header:], true
+	return packet.Payload, true
 }
 
 func encodePCMURTP(seq uint16, ts uint32, payload []byte) []byte {
