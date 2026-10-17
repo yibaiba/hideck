@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	vowifidns "github.com/iniwex5/vowifi-go/internal/vowifi/dns"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/logging"
@@ -54,6 +55,8 @@ func (s *Service) openInitialRegistrationTransport(
 // transport such as TCP.
 const maxUDPRequestBytes = 1300
 
+const largeRegisterTCPDialTimeout = 5 * time.Second
+
 // moveLargeRegisterToTCP switches an auto-transport REGISTER that is still on
 // unprotected UDP to TCP when the request is over the RFC 3261 limit. A UDP
 // REGISTER that size is fragmented, and Globe PH drops the fragments without
@@ -66,9 +69,17 @@ func (s *Service) moveLargeRegisterToTCP(ctx context.Context, session *registerS
 		return false
 	}
 	candidates := registerTransportCandidates(s.cfg.Transport)
-	if _, err := s.replaceInitialRegistrationTransport(ctx, candidates, indexOfRegisterTransport(candidates, "tcp")); err != nil {
+	// A dropped SYN must not use up the time the UDP attempt needs.
+	dialTimeout := largeRegisterTCPDialTimeout
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline)/2 < dialTimeout {
+		dialTimeout = time.Until(deadline) / 2
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	if _, err := s.replaceInitialRegistrationTransport(dialCtx, candidates, indexOfRegisterTransport(candidates, "tcp")); err != nil {
 		logging.Info("IMS REGISTER exceeds the UDP size limit but TCP is unavailable; sending over UDP",
-			"device", s.DeviceID(), "cseq", session.cseq, "bytes", size, "limit", maxUDPRequestBytes, "err", err)
+			"device", s.DeviceID(), "cseq", session.cseq, "bytes", size, "limit", maxUDPRequestBytes,
+			"dial_timeout", dialTimeout, "err", err)
 		return false
 	}
 	logging.Info("IMS REGISTER exceeds the UDP size limit; sending over TCP",
