@@ -8,25 +8,31 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
+	"github.com/yibaiba/hideck/pkg/logger"
 )
 
 const (
 	pcmPayloadType = 0
+
+	webRTCPublicHostLookupTimeout = 3 * time.Second
 )
 
 type MediaOptions struct {
 	UDPAddress       string
 	PublicHost       string
-	LookupIPAddr     func(context.Context, string) ([]net.IPAddr, error)
 	ICEServers       []webrtc.ICEServer
 	RealtimeCodecs   []string
 	NewRealtimeCodec RealtimeCodecFactory
 	OnState          func(mediaID string, state webrtc.PeerConnectionState)
+
+	LookupIPAddr func(context.Context, string) ([]net.IPAddr, error)
 }
 
 type MediaAnswer struct {
@@ -43,9 +49,8 @@ type MediaStats struct {
 
 type MediaManager struct {
 	api              *webrtc.API
-	publicHost       string
-	lookupIPAddr     publicIPLookup
 	mux              ice.UDPMux
+	publicHost       *webRTCPublicHost
 	iceServers       []webrtc.ICEServer
 	realtimeCodecs   []string
 	newRealtimeCodec RealtimeCodecFactory
@@ -55,15 +60,6 @@ type MediaManager struct {
 }
 
 func NewMediaManager(options MediaOptions) (*MediaManager, error) {
-	lookup := options.LookupIPAddr
-	if lookup == nil {
-		lookup = net.DefaultResolver.LookupIPAddr
-	}
-	publicHost := strings.TrimSpace(options.PublicHost)
-	publicIPs, err := resolveWebRTCPublicIPs(context.Background(), publicHost, lookup)
-	if err != nil {
-		return nil, err
-	}
 	address := options.UDPAddress
 	if address == "" {
 		address = ":7580"
@@ -77,14 +73,27 @@ func NewMediaManager(options MediaOptions) (*MediaManager, error) {
 		return nil, fmt.Errorf("phone: listen WebRTC UDP mux on %s: %w", address, err)
 	}
 	mux := webrtc.NewICEUDPMux(nil, connection)
+	publicHost := newWebRTCPublicHost(options.PublicHost, options.LookupIPAddr)
+	var publicIPs []string
+	if publicHost != nil {
+		// A host that does not resolve at startup is still a configuration
+		// error; startup keeps the resolver's own timeout, as before.
+		if publicIPs, err = publicHost.resolve(context.Background(), 0); err != nil {
+			_ = mux.Close()
+			return nil, err
+		}
+		logger.Info("WebRTC 公网地址", "host", publicHost.host, "ips", publicIPs)
+		if net.ParseIP(publicHost.host) != nil {
+			publicHost = nil // a literal never changes; the startup API serves every call
+		}
+	}
 	api, err := newWebRTCAPI(mux, publicIPs)
 	if err != nil {
 		_ = mux.Close()
 		return nil, err
 	}
 	return &MediaManager{
-		api: api, mux: mux, iceServers: options.ICEServers,
-		publicHost: publicHost, lookupIPAddr: lookup,
+		api: api, mux: mux, publicHost: publicHost, iceServers: options.ICEServers,
 		realtimeCodecs:   append([]string(nil), options.RealtimeCodecs...),
 		newRealtimeCodec: options.NewRealtimeCodec,
 		onState:          options.OnState, sessions: make(map[string]*MediaSession),
@@ -116,24 +125,79 @@ func newWebRTCAPI(mux ice.UDPMux, publicIPs []string) (*webrtc.API, error) {
 	return webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settings)), nil
 }
 
-type publicIPLookup func(context.Context, string) ([]net.IPAddr, error)
-
-func (m *MediaManager) sessionAPI(ctx context.Context) (*webrtc.API, error) {
-	if m.publicHost == "" || net.ParseIP(m.publicHost) != nil {
+// callAPI returns the API for one call. With webrtc_public_host set it is built
+// from a fresh lookup, so a dynamic-DNS name follows the WAN address after a
+// redial instead of keeping the address resolved at startup (hideck#93).
+func (m *MediaManager) callAPI(ctx context.Context) (*webrtc.API, error) {
+	if m.publicHost == nil {
 		return m.api, nil
 	}
-	publicIPs, err := resolveWebRTCPublicIPs(ctx, m.publicHost, m.lookupIPAddr)
+	publicIPs, err := m.publicHost.resolve(ctx, webRTCPublicHostLookupTimeout)
 	if err != nil {
 		return nil, err
 	}
-	// Each session owns its ICE rules; refreshing DNS must not mutate active peers.
 	return newWebRTCAPI(m.mux, publicIPs)
 }
 
-func resolveWebRTCPublicIPs(ctx context.Context, host string, lookup publicIPLookup) ([]string, error) {
+type publicIPLookup func(context.Context, string) ([]net.IPAddr, error)
+
+// webRTCPublicHost resolves server.webrtc_public_host and keeps the last good
+// answer for a lookup that fails mid-call-setup.
+type webRTCPublicHost struct {
+	host   string
+	lookup publicIPLookup
+	mu     sync.Mutex
+	last   []string
+}
+
+func newWebRTCPublicHost(value string, lookup publicIPLookup) *webRTCPublicHost {
+	host := strings.TrimSpace(value)
 	if host == "" {
-		return nil, nil
+		return nil
 	}
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+	return &webRTCPublicHost{host: host, lookup: lookup}
+}
+
+// resolve bounds the lookup by timeout when it is positive.
+func (h *webRTCPublicHost) resolve(ctx context.Context, timeout time.Duration) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lookupCtx, cancel := ctx, context.CancelFunc(func() {})
+	if timeout > 0 {
+		lookupCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+	publicIPs, err := resolveWebRTCPublicIPs(lookupCtx, h.host, h.lookup)
+	if err != nil && ctx.Err() != nil {
+		// The call setup itself was cancelled; that is not a DNS failure.
+		return nil, ctx.Err()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err != nil {
+		if h.last == nil {
+			return nil, err
+		}
+		logger.Warn("WebRTC 公网地址解析失败，沿用上次结果", "host", h.host, "ips", h.last, "err", err)
+		return h.last, nil
+	}
+	if h.last != nil && !sameIPSet(h.last, publicIPs) {
+		logger.Info("WebRTC 公网地址已变化", "host", h.host, "old", h.last, "new", publicIPs)
+	}
+	h.last = publicIPs
+	return publicIPs, nil
+}
+
+// sameIPSet ignores order, which round-robin DNS changes between lookups.
+func sameIPSet(a, b []string) bool {
+	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
+}
+
+func resolveWebRTCPublicIPs(ctx context.Context, host string, lookup publicIPLookup) ([]string, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		return []string{ip.String()}, nil
 	}
@@ -164,15 +228,15 @@ func (m *MediaManager) Create(ctx context.Context, owner, offer, accessHost stri
 	if m == nil || m.api == nil {
 		return MediaAnswer{}, errors.New("phone: media manager is unavailable")
 	}
-	api, err := m.sessionAPI(ctx)
-	if err != nil {
-		return MediaAnswer{}, err
-	}
 	mediaID, err := randomToken(16)
 	if err != nil {
 		return MediaAnswer{}, err
 	}
 	lease, err := randomToken(32)
+	if err != nil {
+		return MediaAnswer{}, err
+	}
+	api, err := m.callAPI(ctx)
 	if err != nil {
 		return MediaAnswer{}, err
 	}
