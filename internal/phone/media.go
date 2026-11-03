@@ -22,6 +22,7 @@ const (
 type MediaOptions struct {
 	UDPAddress       string
 	PublicHost       string
+	LookupIPAddr     func(context.Context, string) ([]net.IPAddr, error)
 	ICEServers       []webrtc.ICEServer
 	RealtimeCodecs   []string
 	NewRealtimeCodec RealtimeCodecFactory
@@ -42,6 +43,8 @@ type MediaStats struct {
 
 type MediaManager struct {
 	api              *webrtc.API
+	publicHost       string
+	lookupIPAddr     publicIPLookup
 	mux              ice.UDPMux
 	iceServers       []webrtc.ICEServer
 	realtimeCodecs   []string
@@ -52,6 +55,15 @@ type MediaManager struct {
 }
 
 func NewMediaManager(options MediaOptions) (*MediaManager, error) {
+	lookup := options.LookupIPAddr
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+	publicHost := strings.TrimSpace(options.PublicHost)
+	publicIPs, err := resolveWebRTCPublicIPs(context.Background(), publicHost, lookup)
+	if err != nil {
+		return nil, err
+	}
 	address := options.UDPAddress
 	if address == "" {
 		address = ":7580"
@@ -65,20 +77,21 @@ func NewMediaManager(options MediaOptions) (*MediaManager, error) {
 		return nil, fmt.Errorf("phone: listen WebRTC UDP mux on %s: %w", address, err)
 	}
 	mux := webrtc.NewICEUDPMux(nil, connection)
-	api, err := newWebRTCAPI(mux, options.PublicHost)
+	api, err := newWebRTCAPI(mux, publicIPs)
 	if err != nil {
 		_ = mux.Close()
 		return nil, err
 	}
 	return &MediaManager{
 		api: api, mux: mux, iceServers: options.ICEServers,
+		publicHost: publicHost, lookupIPAddr: lookup,
 		realtimeCodecs:   append([]string(nil), options.RealtimeCodecs...),
 		newRealtimeCodec: options.NewRealtimeCodec,
 		onState:          options.OnState, sessions: make(map[string]*MediaSession),
 	}, nil
 }
 
-func newWebRTCAPI(mux ice.UDPMux, publicHost string) (*webrtc.API, error) {
+func newWebRTCAPI(mux ice.UDPMux, publicIPs []string) (*webrtc.API, error) {
 	mediaEngine := &webrtc.MediaEngine{}
 	err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -91,38 +104,40 @@ func newWebRTCAPI(mux ice.UDPMux, publicHost string) (*webrtc.API, error) {
 	}
 	settings := webrtc.SettingEngine{}
 	settings.SetICEUDPMux(mux)
-	if err := setWebRTCPublicHost(&settings, publicHost, net.DefaultResolver.LookupIPAddr); err != nil {
-		return nil, err
+	if len(publicIPs) > 0 {
+		if err := settings.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
+			External:        publicIPs,
+			AsCandidateType: webrtc.ICECandidateTypeHost,
+			Mode:            webrtc.ICEAddressRewriteAppend,
+		}); err != nil {
+			return nil, fmt.Errorf("phone: configure WebRTC public host: %w", err)
+		}
 	}
 	return webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithSettingEngine(settings)), nil
 }
 
 type publicIPLookup func(context.Context, string) ([]net.IPAddr, error)
 
-func setWebRTCPublicHost(settings *webrtc.SettingEngine, value string, lookup publicIPLookup) error {
-	publicHost := strings.TrimSpace(value)
-	if publicHost == "" {
-		return nil
+func (m *MediaManager) sessionAPI(ctx context.Context) (*webrtc.API, error) {
+	if m.publicHost == "" || net.ParseIP(m.publicHost) != nil {
+		return m.api, nil
 	}
-	publicIPs, err := resolveWebRTCPublicIPs(publicHost, lookup)
+	publicIPs, err := resolveWebRTCPublicIPs(ctx, m.publicHost, m.lookupIPAddr)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := settings.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
-		External:        publicIPs,
-		AsCandidateType: webrtc.ICECandidateTypeHost,
-		Mode:            webrtc.ICEAddressRewriteAppend,
-	}); err != nil {
-		return fmt.Errorf("phone: configure WebRTC public host: %w", err)
-	}
-	return nil
+	// Each session owns its ICE rules; refreshing DNS must not mutate active peers.
+	return newWebRTCAPI(m.mux, publicIPs)
 }
 
-func resolveWebRTCPublicIPs(host string, lookup publicIPLookup) ([]string, error) {
+func resolveWebRTCPublicIPs(ctx context.Context, host string, lookup publicIPLookup) ([]string, error) {
+	if host == "" {
+		return nil, nil
+	}
 	if ip := net.ParseIP(host); ip != nil {
 		return []string{ip.String()}, nil
 	}
-	addresses, err := lookup(context.Background(), host)
+	addresses, err := lookup(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("phone: resolve WebRTC public host %q: %w", host, err)
 	}
@@ -149,6 +164,10 @@ func (m *MediaManager) Create(ctx context.Context, owner, offer, accessHost stri
 	if m == nil || m.api == nil {
 		return MediaAnswer{}, errors.New("phone: media manager is unavailable")
 	}
+	api, err := m.sessionAPI(ctx)
+	if err != nil {
+		return MediaAnswer{}, err
+	}
 	mediaID, err := randomToken(16)
 	if err != nil {
 		return MediaAnswer{}, err
@@ -159,7 +178,7 @@ func (m *MediaManager) Create(ctx context.Context, owner, offer, accessHost stri
 	}
 	session, answer, err := newMediaSession(ctx, mediaSessionOptions{
 		ID: mediaID, Lease: lease, Owner: owner, Offer: offer, AccessHost: accessHost,
-		API: m.api, ICEServers: m.iceServers, RealtimeCodecs: m.realtimeCodecs,
+		API: api, ICEServers: m.iceServers, RealtimeCodecs: m.realtimeCodecs,
 		NewRealtimeCodec: m.newRealtimeCodec, OnState: m.onState,
 	})
 	if err != nil {

@@ -13,7 +13,7 @@ HiDeck 的网页、API、SSE 和 WebRTC 信令使用 HTTP/HTTPS；通话音频�
 
 域名需要创建 `A` 或 `AAAA` 记录并指向实际接收 TCP、UDP 流量的公网服务器。双栈部署同时创建 `A` 和 `AAAA`，并确保两个地址都能接收相同端口的 TCP、UDP。不要启用只能代理 HTTP 的 CDN 模式，否则域名解析出的地址无法直接接收 WebRTC UDP。
 
-跨公网或存在 NAT 时，必须同时映射同一个数字端口的 TCP 和 UDP。`server.webrtc_public_host` 填写 HTTPS 使用的域名即可，HiDeck 启动时会解析域名的 IPv4、IPv6 地址并发布公网 ICE 地址，不需要再填写公网 IP。
+跨公网或存在 NAT 时，必须同时映射同一个数字端口的 TCP 和 UDP。`server.webrtc_public_host` 填写 HTTPS 使用的域名即可，HiDeck 启动时会检查域名解析，并在每次创建 WebRTC 媒体会话时重新解析 IPv4、IPv6 地址以发布公网 ICE 地址，不需要再填写公网 IP。DNS 更新生效后，新会话会使用新地址，无需重启；已有会话不会自动迁移到新地址。域名解析失败时，会明确报错，不会沿用旧 IP。
 
 ## 使用内置 HTTPS
 
