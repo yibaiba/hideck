@@ -141,3 +141,88 @@ func TestPCMRebindWaitsForPlaybackAndCloseUnblocks(t *testing.T) {
 		t.Fatalf("pending update on closed bridge = %v", err)
 	}
 }
+
+func TestUpdateCallMediaAllowsTeardownDuringBlockedPlayback(t *testing.T) {
+	for _, action := range []string{"disable", "retire", "handoff"} {
+		t.Run(action, func(t *testing.T) {
+			controller, bridge := blockedMediaController(t)
+			updated := beginBlockedMediaUpdate(t, controller)
+			ended := make(chan error, 1)
+			go func() {
+				switch action {
+				case "disable":
+					controller.Disable("dev")
+					ended <- nil
+				case "retire":
+					ended <- controller.RetireDevice("dev")
+				case "handoff":
+					ended <- controller.DisableForHandoff(context.Background(), "dev")
+				}
+			}()
+			select {
+			case err := <-ended:
+				if err != nil {
+					t.Errorf("teardown failed: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Error("pending media update prevented teardown from closing blocked PCM")
+				// Release the blocked I/O only to clean up a failing regression test.
+				_ = bridge.Close()
+				<-ended
+			}
+			select {
+			case err := <-updated:
+				if !errors.Is(err, net.ErrClosed) {
+					t.Errorf("update on retired bridge = %v, want closed error", err)
+				}
+			case <-time.After(time.Second):
+				t.Error("pending media update did not exit after teardown")
+			}
+			if controller.ActiveCall("dev") != nil || controller.media.get("volte-call") != nil {
+				t.Error("teardown retained call or media")
+			}
+		})
+	}
+}
+
+func blockedMediaController(t *testing.T) (*Controller, *PCMBridge) {
+	t.Helper()
+	remote, socket := rebindUDP(t), rebindUDP(t)
+	pcm := &blockedPlaybackPCM{entered: make(chan struct{}), closed: make(chan struct{})}
+	bridge := NewPCMBridge(socket, remote.LocalAddr(), pcm, false)
+	t.Cleanup(func() { _ = bridge.Close() })
+	controller := NewControllerWithBackup(newFakeModem(), t.TempDir())
+	controller.storeCall("dev", nativeCall{ID: "volte-call", QMI: 1, State: "connected"})
+	controller.media.put("volte-call", &callMedia{bridge: bridge, conn: socket, pcm: pcm})
+	sendRebindAudio(t, remote, socket.LocalAddr(), 3000)
+	select {
+	case <-pcm.entered:
+	case <-time.After(time.Second):
+		t.Fatal("PCM playback did not start")
+	}
+	return controller, bridge
+}
+
+func beginBlockedMediaUpdate(t *testing.T, controller *Controller) <-chan error {
+	t.Helper()
+	// Stop lookup inside the device operation, proving the update precedes teardown.
+	controller.media.mu.Lock()
+	defer controller.media.mu.Unlock()
+	updated := make(chan error, 1)
+	go func() { updated <- controller.UpdateCallMedia("dev", "volte-call", pcmuOfferSDP(12345)) }()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		controller.mu.Lock()
+		operation := controller.locks["dev"]
+		controller.mu.Unlock()
+		if operation != nil && !operation.TryLock() {
+			return updated
+		}
+		if operation != nil {
+			operation.Unlock()
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("media update did not acquire device operation lock")
+	return nil
+}

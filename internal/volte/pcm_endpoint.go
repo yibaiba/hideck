@@ -8,23 +8,31 @@ import (
 // SetRemote preserves the socket, PCM device and outgoing RTP timeline. mediaMu
 // also covers UDP writes and PCM playback: on return no old operation can start.
 func (b *PCMBridge) SetRemote(remote net.Addr) error {
+	_, err := b.swapRemote(remote)
+	return err
+}
+
+// Return the previous endpoint under the same lock so concurrent updates log
+// the endpoint they actually replaced.
+func (b *PCMBridge) swapRemote(remote net.Addr) (net.Addr, error) {
 	if b == nil || remote == nil {
-		return errors.New("volte: media endpoint is unavailable")
+		return nil, errors.New("volte: media endpoint is unavailable")
 	}
 	b.mediaMu.Lock()
 	defer b.mediaMu.Unlock()
 	if b.isClosed() {
-		return net.ErrClosed
+		return nil, net.ErrClosed
 	}
+	previous := b.remote
 	if samePCMEndpoint(b.remote, remote) {
-		return nil
+		return previous, nil
 	}
 	b.remote = remote
 	b.generation++
 	diagnostics := b.buffer.diagnostics
 	b.buffer = newAdaptivePCMBuffer()
 	b.buffer.diagnostics = diagnostics
-	return nil
+	return previous, nil
 }
 
 func samePCMEndpoint(left, right net.Addr) bool {
