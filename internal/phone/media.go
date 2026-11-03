@@ -8,31 +8,25 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
-	"github.com/yibaiba/hideck/pkg/logger"
 )
 
 const (
 	pcmPayloadType = 0
-
-	webRTCPublicHostLookupTimeout = 3 * time.Second
 )
 
 type MediaOptions struct {
 	UDPAddress       string
 	PublicHost       string
+	LookupIPAddr     func(context.Context, string) ([]net.IPAddr, error)
 	ICEServers       []webrtc.ICEServer
 	RealtimeCodecs   []string
 	NewRealtimeCodec RealtimeCodecFactory
 	OnState          func(mediaID string, state webrtc.PeerConnectionState)
-
-	LookupIPAddr func(context.Context, string) ([]net.IPAddr, error)
 }
 
 type MediaAnswer struct {
@@ -78,11 +72,10 @@ func NewMediaManager(options MediaOptions) (*MediaManager, error) {
 	if publicHost != nil {
 		// A host that does not resolve at startup is still a configuration
 		// error; startup keeps the resolver's own timeout, as before.
-		if publicIPs, err = publicHost.resolve(context.Background(), 0); err != nil {
+		if publicIPs, err = publicHost.resolve(context.Background()); err != nil {
 			_ = mux.Close()
 			return nil, err
 		}
-		logger.Info("WebRTC 公网地址", "host", publicHost.host, "ips", publicIPs)
 		if net.ParseIP(publicHost.host) != nil {
 			publicHost = nil // a literal never changes; the startup API serves every call
 		}
@@ -132,96 +125,11 @@ func (m *MediaManager) callAPI(ctx context.Context) (*webrtc.API, error) {
 	if m.publicHost == nil {
 		return m.api, nil
 	}
-	publicIPs, err := m.publicHost.resolve(ctx, webRTCPublicHostLookupTimeout)
+	publicIPs, err := m.publicHost.resolve(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return newWebRTCAPI(m.mux, publicIPs)
-}
-
-type publicIPLookup func(context.Context, string) ([]net.IPAddr, error)
-
-// webRTCPublicHost resolves server.webrtc_public_host and keeps the last good
-// answer for a lookup that fails mid-call-setup.
-type webRTCPublicHost struct {
-	host   string
-	lookup publicIPLookup
-	mu     sync.Mutex
-	last   []string
-}
-
-func newWebRTCPublicHost(value string, lookup publicIPLookup) *webRTCPublicHost {
-	host := strings.TrimSpace(value)
-	if host == "" {
-		return nil
-	}
-	if lookup == nil {
-		lookup = net.DefaultResolver.LookupIPAddr
-	}
-	return &webRTCPublicHost{host: host, lookup: lookup}
-}
-
-// resolve bounds the lookup by timeout when it is positive.
-func (h *webRTCPublicHost) resolve(ctx context.Context, timeout time.Duration) ([]string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	lookupCtx, cancel := ctx, context.CancelFunc(func() {})
-	if timeout > 0 {
-		lookupCtx, cancel = context.WithTimeout(ctx, timeout)
-	}
-	defer cancel()
-	publicIPs, err := resolveWebRTCPublicIPs(lookupCtx, h.host, h.lookup)
-	if err != nil && ctx.Err() != nil {
-		// The call setup itself was cancelled; that is not a DNS failure.
-		return nil, ctx.Err()
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if err != nil {
-		if h.last == nil {
-			return nil, err
-		}
-		logger.Warn("WebRTC 公网地址解析失败，沿用上次结果", "host", h.host, "ips", h.last, "err", err)
-		return h.last, nil
-	}
-	if h.last != nil && !sameIPSet(h.last, publicIPs) {
-		logger.Info("WebRTC 公网地址已变化", "host", h.host, "old", h.last, "new", publicIPs)
-	}
-	h.last = publicIPs
-	return publicIPs, nil
-}
-
-// sameIPSet ignores order, which round-robin DNS changes between lookups.
-func sameIPSet(a, b []string) bool {
-	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
-}
-
-func resolveWebRTCPublicIPs(ctx context.Context, host string, lookup publicIPLookup) ([]string, error) {
-	if ip := net.ParseIP(host); ip != nil {
-		return []string{ip.String()}, nil
-	}
-	addresses, err := lookup(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("phone: resolve WebRTC public host %q: %w", host, err)
-	}
-	unique := make(map[string]struct{}, len(addresses))
-	result := make([]string, 0, len(addresses))
-	for _, address := range addresses {
-		if address.IP == nil {
-			continue
-		}
-		ip := address.IP.String()
-		if _, exists := unique[ip]; exists {
-			continue
-		}
-		unique[ip] = struct{}{}
-		result = append(result, ip)
-	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("phone: WebRTC public host %q resolved without IP addresses", host)
-	}
-	return result, nil
 }
 
 func (m *MediaManager) Create(ctx context.Context, owner, offer, accessHost string) (MediaAnswer, error) {
