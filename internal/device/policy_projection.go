@@ -1,8 +1,11 @@
 package device
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/cardpolicy"
@@ -126,6 +129,11 @@ func (p *Pool) holdRadioOffOnConnect(w *Worker, reason string) {
 	}
 	if err := ctrl.SetOperatingMode(p.ctx, backend.ModeRFOff); err != nil {
 		logger.Warn("连接期暂扣射频失败", "device", w.ID, "reason", reason, "err", err)
+		if p.radioOffOverAT(w, reason, err) {
+			// AT+CFUN=4 may not persist: keep ConnectHoldRF so the QMI
+			// recovery path can hold the radio again.
+			logger.Info("连接期已用 AT 暂扣射频，QMI 恢复后再补持久飞行", "device", w.ID, "reason", reason)
+		}
 		return
 	}
 	clearConnectHoldRF(w)
@@ -175,7 +183,9 @@ func (p *Pool) enterAirplaneModeFromPolicy(w *Worker, reason string) {
 	}
 	if err := ctrl.SetOperatingMode(p.ctx, backend.ModeRFOff); err != nil {
 		logger.Warn("投影飞行模式失败", "device", w.ID, "reason", reason, "err", err)
-		return
+		if !p.radioOffOverAT(w, reason, err) {
+			return
+		}
 	}
 	logger.Info("已按策略进入飞行模式", "device", w.ID, "reason", reason)
 }
@@ -220,4 +230,97 @@ func (p *Pool) SetPolicyResolver(r cardpolicy.Resolver) {
 	p.mu.Lock()
 	p.policyResolver = r
 	p.mu.Unlock()
+}
+
+const (
+	radioOffATTimeout      = 15 * time.Second
+	radioOffATQueryTimeout = 3 * time.Second
+	// Wait for the AT port at most this long; the command timeouts above start
+	// only once the port is held.
+	radioOffATGateWait = 5 * time.Second
+)
+
+// radioOffOverAT turns the radio off over the AT port when QMI cannot reach
+// the modem (hideck#94: the QMI control channel hung for two hours while the
+// AT port kept answering). An explicit QMI failure, such as a DMS rejection, is
+// the answer and is not retried over AT. The Quectel AT manual does not say
+// whether AT+CFUN=4 survives a modem restart, so nothing relies on it; a later
+// policy projection re-evaluates the policy. Both commands are bound to w and
+// are refused when a new Worker with the same ID replaced it before or while
+// waiting for the AT port.
+func (p *Pool) radioOffOverAT(w *Worker, reason string, qmiErr error) bool {
+	if p == nil || w == nil || w.Backend == nil || w.Backend.Mode() != backend.BackendQMI {
+		return false
+	}
+	if p.ctx != nil && p.ctx.Err() != nil {
+		// The Pool is shutting down: treat the QMI failure as part of the
+		// shutdown, with no warning and no AT.
+		return false
+	}
+	if message := fmt.Sprint(qmiErr); !qmiErrorIndicatesCTLWedged(message) && !qmiErrorIndicatesTransportDown(message) {
+		logger.Warn("QMI 关射频收到明确失败，不改走 AT", "device", w.ID, "reason", reason, "qmi_err", qmiErr)
+		return false
+	}
+	ctx := p.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	setResponse, err := p.executeATContextFor(ctx, ATRequest{DeviceID: w.ID, Command: "AT+CFUN=4", Timeout: radioOffATTimeout}, w, radioOffATGateWait)
+	if err != nil {
+		logger.Warn("QMI 关射频失败，AT+CFUN=4 也失败", "device", w.ID, "reason", reason,
+			"qmi_err", qmiErr, "set_response", strings.TrimSpace(setResponse), "at_err", err)
+		return false
+	}
+	// The serial session returns a bare ERROR as a plain response with no
+	// error, so check the final result code here.
+	if !atFinalOK(setResponse) {
+		logger.Warn("QMI 关射频失败，AT+CFUN=4 没有返回 OK", "device", w.ID, "reason", reason,
+			"qmi_err", qmiErr, "set_response", strings.TrimSpace(setResponse))
+		return false
+	}
+	queryResponse, err := p.executeATContextFor(ctx, ATRequest{DeviceID: w.ID, Command: "AT+CFUN?", Timeout: radioOffATQueryTimeout}, w, radioOffATGateWait)
+	if err != nil {
+		logger.Warn("QMI 关射频失败，AT+CFUN=4 后读回 AT+CFUN? 失败", "device", w.ID, "reason", reason,
+			"qmi_err", qmiErr, "set_response", strings.TrimSpace(setResponse),
+			"query_response", strings.TrimSpace(queryResponse), "at_err", err)
+		return false
+	}
+	if fun, ok := parseCFUN(queryResponse); !ok || fun != 4 {
+		logger.Warn("QMI 关射频失败，AT+CFUN=4 后读回不是 4", "device", w.ID, "reason", reason,
+			"qmi_err", qmiErr, "set_response", strings.TrimSpace(setResponse),
+			"query_response", strings.TrimSpace(queryResponse))
+		return false
+	}
+	logger.Warn("QMI 关射频失败，已改用 AT 关射频（不保证模组重启后保持）", "device", w.ID, "reason", reason,
+		"qmi_err", qmiErr)
+	return true
+}
+
+// atFinalOK reports whether the first final result code in the response is
+// OK. Lines before it (echo, intermediate results) and URCs after it are
+// ignored.
+func atFinalOK(response string) bool {
+	for _, line := range strings.Split(response, "\n") {
+		switch line = strings.TrimSpace(line); {
+		case line == "OK":
+			return true
+		case line == "ERROR", strings.HasPrefix(line, "+CME ERROR:"), strings.HasPrefix(line, "+CMS ERROR:"):
+			return false
+		}
+	}
+	return false
+}
+
+// parseCFUN reads <fun> from the first "+CFUN: <fun>" line, skipping the
+// echo and any URC lines.
+func parseCFUN(response string) (int, bool) {
+	for _, line := range strings.Split(response, "\n") {
+		value, found := strings.CutPrefix(strings.TrimSpace(line), "+CFUN:")
+		if !found {
+			continue
+		}
+		fun, err := strconv.Atoi(strings.TrimSpace(value))
+		return fun, err == nil
+	}
+	return 0, false
 }
