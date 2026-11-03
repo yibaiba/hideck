@@ -885,3 +885,33 @@ func TestStopCancelsRecoveryRetryWhenCoreNotReadyDisconnected(t *testing.T) {
 		t.Fatal("expected Stop() to cancel manager context")
 	}
 }
+
+type warnRecorder struct {
+	Logger
+	warns *[][]interface{}
+}
+
+func (r warnRecorder) Warn(args ...interface{})             { *r.warns = append(*r.warns, args) }
+func (r warnRecorder) WithField(string, interface{}) Logger { return r }
+func (r warnRecorder) WithError(error) Logger               { return r }
+
+// hideck#94: the storm log printed services_affected 0 because it read the
+// window after clearing it.
+func TestTimeoutStormLogNamesTheServices(t *testing.T) {
+	m := newRecoveryTestManager()
+	var warns [][]interface{}
+	m.log = warnRecorder{Logger: NewNopLogger(), warns: &warns}
+	m.detectTimeoutStorm("NAS")
+	m.detectTimeoutStorm("DMS")
+	for _, args := range warns {
+		if len(args) == 0 || args[0] != "Timeout storm detected; triggering immediate core recovery" {
+			continue
+		}
+		got := fmt.Sprint(args[1:]...)
+		if got != fmt.Sprint("services_affected", 2, "services", "DMS,NAS") {
+			t.Fatalf("storm log fields = %v", args[1:])
+		}
+		return
+	}
+	t.Fatalf("no storm log in %v", warns)
+}
