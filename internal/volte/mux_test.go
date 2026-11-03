@@ -103,3 +103,14 @@ func TestMapQMIState(t *testing.T) {
 		t.Fatalf("setup -> %s %s", state, event)
 	}
 }
+
+func TestMuxMediaUpdatePropagatesNativeFailure(t *testing.T) {
+	controller := NewControllerWithBackup(newFakeModem(), t.TempDir())
+	mux := &Mux{IMS: &stubBackend{}, Native: controller}
+	if err := mux.UpdateCallMedia("dev", "volte-missing", pcmuOfferSDP(40000)); err == nil {
+		t.Fatal("native media update was silently ignored")
+	}
+	if err := mux.UpdateCallMedia("dev", "ims-call", pcmuOfferSDP(40000)); err != nil {
+		t.Fatalf("legacy backend recovery changed: %v", err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 )
 
 type callMedia struct {
+	// The bridge pointer stays immutable; Close and SetRemote synchronize inside it.
 	bridge *PCMBridge
 	conn   net.PacketConn
 	sdp    string
@@ -25,9 +26,9 @@ func pcmuOfferSDP(port int) string {
 func rtpPortFromSDP(sdp string) (int, error) {
 	for _, raw := range strings.Split(strings.ReplaceAll(sdp, "\r\n", "\n"), "\n") {
 		fields := strings.Fields(strings.TrimSpace(raw))
-		if len(fields) >= 2 && strings.HasPrefix(raw, "m=audio") {
+		if len(fields) >= 2 && fields[0] == "m=audio" {
 			port, err := strconv.Atoi(fields[1])
-			if err != nil || port <= 0 {
+			if err != nil || port <= 0 || port > 65535 {
 				return 0, fmt.Errorf("volte: SDP audio port %q", fields[1])
 			}
 			return port, nil
@@ -75,7 +76,6 @@ func (m *callMedia) Close() error {
 	var err error
 	if m.bridge != nil {
 		err = m.bridge.Close()
-		m.bridge = nil
 	}
 	return err
 }

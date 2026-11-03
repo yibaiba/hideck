@@ -180,6 +180,7 @@ type Event struct {
 }
 
 type activeCall struct {
+	mediaRefresh    sync.Mutex
 	view            CallView
 	record          CallRecord
 	owner           string

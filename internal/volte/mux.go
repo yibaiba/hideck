@@ -23,6 +23,12 @@ type VoiceBackend interface {
 	DeviceStatus(deviceID string) map[string]interface{}
 }
 
+type callMediaUpdater interface {
+	UpdateCallMedia(string, string, string) error
+}
+
+var _ callMediaUpdater = (*Controller)(nil)
+
 type Mux struct {
 	BeforeDial func(context.Context, string, string) error
 	IMS        VoiceBackend
@@ -162,11 +168,9 @@ func (m *Mux) DeviceStatus(deviceID string) map[string]interface{} {
 }
 
 func (m *Mux) UpdateCallMedia(deviceID, callID, sdp string) error {
-	if backend, ok := m.pickCall(deviceID, callID).(interface {
-		UpdateCallMedia(string, string, string) error
-	}); ok {
+	if backend, ok := m.pickCall(deviceID, callID).(callMediaUpdater); ok {
 		return backend.UpdateCallMedia(deviceID, callID, sdp)
 	}
-	// IMS/native backends retain their existing media recovery path.
+	// Backends without explicit updates retain their existing media recovery path.
 	return nil
 }

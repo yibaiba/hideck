@@ -31,7 +31,7 @@ func parsePCMURTP(raw []byte) (*rtp.Packet, bool) {
 	if err := packet.Unmarshal(owned); err != nil {
 		return nil, false
 	}
-	if packet.PayloadType != pcmuPayloadType || len(packet.Payload) == 0 {
+	if packet.Version != 2 || packet.PayloadType != pcmuPayloadType || len(packet.Payload) == 0 {
 		return nil, false
 	}
 	if firstPacketOnce.CompareAndSwap(false, true) {

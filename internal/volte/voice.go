@@ -893,7 +893,7 @@ func (c *Controller) lookupActive(deviceID string) (nativeCall, bool) {
 	if s == nil || s.voice == nil {
 		return nativeCall{}, false
 	}
-	for _, call := range s.voice.active {
+	for _, call := range s.voice.list() {
 		if call.State != "completed" {
 			return call, true
 		}
