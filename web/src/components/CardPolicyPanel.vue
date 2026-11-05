@@ -39,7 +39,7 @@ const mirror = computed<PolicyMirror | null>(() =>
     : null
 )
 
-const { ipVersion, apn, vowifiUpstreamProxyID, localPhoneOverride, pending: fieldPending, error: fieldError, errorCode: fieldErrorCode, errorField, saveIPVersion, saveAPN, saveVowifiUpstreamProxy, saveLocalPhoneOverride } =
+const { ipVersion, apn, vowifiUpstreamProxyID, localPhoneOverride, mwiMode, pending: fieldPending, error: fieldError, errorCode: fieldErrorCode, errorField, saveIPVersion, saveAPN, saveVowifiUpstreamProxy, saveLocalPhoneOverride, saveMWIMode, redetectMWI } =
   useCardPolicyFields(toRef(props, 'policy'), async (patch) => {
     if (!props.iccid) return { ok: false, error: { message: 'SIM 身份未就绪' } }
     return cardsService.putPolicy(props.iccid, patch)
@@ -275,6 +275,37 @@ const airplaneHint = computed(() => {
             <small v-if="fieldPending === 'vowifi_upstream_proxy_id'">{{ local.vowifi_enabled ? '正在保存并重连…' : '正在保存...' }}</small>
             <div v-if="fieldError && errorField === 'vowifi_upstream_proxy_id'" role="alert" class="text-xs text-red-600 dark:text-red-400">
               {{ fieldError }}<template v-if="fieldErrorCode !== CARD_POLICY_SAVED_RESTART_FAILED">，请重试</template>
+            </div>
+          </div>
+        </div>
+
+        <div class="policy-setting-row">
+          <span>
+            <strong>语音信箱提示</strong>
+            <small>自动按运营商默认，Vodafone DE 默认不订阅。更改在下次注册或订阅刷新时生效；</small>
+            <small>选开启且清除了不支持记录，或点「重新检测」时，会立即重启 VoWiFi，短信和通话中断片刻</small>
+          </span>
+          <div class="policy-field-control">
+            <div class="flex items-center gap-3">
+              <el-select
+                v-model="mwiMode"
+                class="min-w-0 flex-1"
+                :disabled="!canEditPolicy || fieldPending !== null"
+                @change="saveMWIMode"
+              >
+                <el-option label="自动" value="auto" />
+                <el-option label="开启" value="on" />
+                <el-option label="关闭" value="off" />
+              </el-select>
+              <el-button
+                v-if="mwiMode === 'on'"
+                :disabled="!canEditPolicy || fieldPending !== null"
+                @click="redetectMWI"
+              >重新检测</el-button>
+            </div>
+            <small v-if="fieldPending === 'mwi_mode'">正在保存...</small>
+            <div v-if="fieldError && errorField === 'mwi_mode'" role="alert" class="text-xs text-red-600 dark:text-red-400">
+              {{ fieldError }}，请重试
             </div>
           </div>
         </div>

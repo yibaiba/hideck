@@ -440,6 +440,7 @@ export type CardPolicy = {
   data_strategy?: 'always' | 'on_demand' | string
   vowifi_upstream_proxy_id?: string
   local_phone_override?: string
+  mwi_mode?: 'auto' | 'on' | 'off'
   source: 'auto' | 'user'
   updated_at?: string
 }

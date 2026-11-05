@@ -23,6 +23,14 @@ type cardPolicyStoreStub struct {
 	getErr     error
 	resolveErr error
 	upsertErr  error
+	cleared    []string
+	remembered bool
+	clearErr   error
+}
+
+func (s *cardPolicyStoreStub) ClearMWIRejections(iccid string) (bool, error) {
+	s.cleared = append(s.cleared, iccid)
+	return s.remembered, s.clearErr
 }
 
 type cardPolicyRestarterStub struct {
@@ -676,5 +684,94 @@ func TestLebaraUKRFLockClassificationErrorBlocksNetworkMutation(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "识别 Lebara UK 射频策略失败") {
 		t.Fatalf("classification failure was hidden: %s", rec.Body.String())
+	}
+}
+
+func TestPutCardPolicyMWIMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		body      string
+		code      int
+		mode      string
+		redetects bool
+	}{
+		{body: `{"mwi_mode":"on"}`, code: http.StatusOK, mode: "on", redetects: true},
+		{body: `{"mwi_mode":"off"}`, code: http.StatusOK, mode: "off"},
+		{body: `{"mwi_mode":"auto"}`, code: http.StatusOK, mode: "auto"},
+		{body: `{"apn":"ims"}`, code: http.StatusOK, mode: "on"},
+		{body: `{"mwi_mode":"maybe"}`, code: http.StatusBadRequest, mode: "on"},
+	} {
+		store := &cardPolicyStoreStub{policy: db.CardPolicy{ICCID: "8986005", MWIMode: "on", Source: "user"}}
+		s := &Server{cardPolicies: store}
+		r := gin.New()
+		r.PUT("/api/cards/:iccid/policy", s.handlePutCardPolicy)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/cards/8986005/policy", strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		if w.Code != tc.code || store.policy.MWIMode != tc.mode {
+			t.Fatalf("%s: code=%d mode=%q body=%s", tc.body, w.Code, store.policy.MWIMode, w.Body.String())
+		}
+		if redetected := len(store.cleared) == 1 && store.cleared[0] == "8986005"; redetected != tc.redetects {
+			t.Fatalf("%s: cleared=%v", tc.body, store.cleared)
+		}
+	}
+}
+
+func TestPutCardPolicyMWIRedetectReconnectsOnlyWhenARejectionWasCleared(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		remembered, vowifi, reconnect bool
+	}{{true, true, true}, {false, true, false}, {true, false, false}} {
+		store := &cardPolicyStoreStub{
+			policy:     db.CardPolicy{ICCID: "8986005", MWIMode: "auto", VoWiFiEnabled: tc.vowifi, Source: "user"},
+			remembered: tc.remembered,
+		}
+		restarter := &cardPolicyRestarterStub{}
+		s := &Server{cardPolicies: store, cardPolicyRestarter: restarter}
+		r := gin.New()
+		r.PUT("/api/cards/:iccid/policy", s.handlePutCardPolicy)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/cards/8986005/policy", strings.NewReader(`{"mwi_mode":"on"}`))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || (restarter.iccid != "") != tc.reconnect {
+			t.Fatalf("%+v: code=%d restarted=%q body=%s", tc, w.Code, restarter.iccid, w.Body.String())
+		}
+	}
+}
+
+func TestPutCardPolicyMWIClearFailureReportsSavedPolicy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &cardPolicyStoreStub{
+		policy:   db.CardPolicy{ICCID: "8986005", MWIMode: "off", Source: "user"},
+		clearErr: errors.New("database is locked"),
+	}
+	s := &Server{cardPolicies: store}
+	r := gin.New()
+	r.PUT("/api/cards/:iccid/policy", s.handlePutCardPolicy)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/cards/8986005/policy", strings.NewReader(`{"mwi_mode":"on"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError || store.policy.MWIMode != "on" ||
+		!strings.Contains(w.Body.String(), cardPolicySavedMWIClearFailedCode) {
+		t.Fatalf("code=%d mode=%q body=%s", w.Code, store.policy.MWIMode, w.Body.String())
+	}
+}
+
+func TestPutCardPolicyExplicitMWIRedetectReconnectsWithoutARecord(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &cardPolicyStoreStub{policy: db.CardPolicy{ICCID: "8986005", MWIMode: "on", VoWiFiEnabled: true, Source: "user"}}
+	restarter := &cardPolicyRestarterStub{}
+	s := &Server{cardPolicies: store, cardPolicyRestarter: restarter}
+	r := gin.New()
+	r.PUT("/api/cards/:iccid/policy", s.handlePutCardPolicy)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/cards/8986005/policy", strings.NewReader(`{"mwi_mode":"on","redetect_mwi":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || restarter.iccid != "8986005" {
+		t.Fatalf("code=%d restarted=%q body=%s", w.Code, restarter.iccid, w.Body.String())
 	}
 }

@@ -48,6 +48,34 @@ func TestAutomaticTaskRestoreKeepsManualPhoneEditedDuringTask(t *testing.T) {
 	}
 }
 
+func TestAutomaticTaskRestoreKeepsMWIModeEditedDuringTask(t *testing.T) {
+	openTestDB(t)
+	const iccid = "8944101234567890123"
+	snapshot := db.DefaultCardPolicy(iccid)
+	snapshot.NetworkEnabled = false
+	if err := db.UpsertCardPolicy(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	current := snapshot
+	current.NetworkEnabled = true
+	current.MWIMode = db.MWIModeOff
+	current.Source = "user"
+	if err := db.UpsertCardPolicy(current); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := restoreAutomaticTaskCardPolicy(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetCardPolicy(iccid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NetworkEnabled || got.MWIMode != db.MWIModeOff || got.Source != "user" {
+		t.Fatalf("restored policy=%+v", got)
+	}
+}
+
 func TestResolveAutomaticTaskProfileSwitchesOnlyWithAID(t *testing.T) {
 	task := automation.Task{
 		ProfileICCID: "8944101234567890123",
