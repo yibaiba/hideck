@@ -74,7 +74,12 @@ func (s *Service) expireSubscriptionTimersLocked(now time.Time) {
 			retry := f.lifecycle.retryAt
 			f.terminate("SUBSCRIBE Timer N expired without a matching NOTIFY")
 			if !f.retryBlocked() {
-				f.scheduleRetry(laterSubscriptionRetry(now.Add(f.refreshDelay(registerExpires(s.cfg))), retry))
+				// Sending clears retryAt, so a set one means this attempt's
+				// failure (e.g. its transaction timeout) was already counted.
+				if retry.IsZero() {
+					retry = s.subscriptionFailureRetryLocked(f, f.lifecycle.context.binding, now, 0)
+				}
+				f.scheduleRetry(retry)
 			}
 			logging.WarnRate(fmt.Sprintf("ims-subscription-notify-timeout-%s-%t", s.DeviceID(), mwi),
 				"IMS subscription NOTIFY timed out; keeping current registration", "device", s.DeviceID(), "mwi", mwi)
@@ -105,18 +110,19 @@ func (s *Service) terminateNotifiedSubscriptionLocked(f subscriptionFields, stat
 	switch state.reason {
 	case "rejected", "noresource", "invariant":
 		f.lifecycle.blockedReason = *f.lastErr
+		if f.mwi {
+			s.subscriptionRegistrations.subscriptionStopped(f.lifecycle.context.binding.identity, mwiEventPackage, *f.lastErr)
+		}
 	case "deactivated", "timeout":
 		f.scheduleRetry(now)
 	default:
-		// Keep the existing package-specific retry pacing when the notifier
-		// supplies no delay. This is local scheduling, not IMS flow recovery.
-		delay := f.refreshDelay(registerExpires(s.cfg))
+		// Use the package's failure backoff when the notifier supplies no delay;
+		// a retry-after stays the minimum. This is local scheduling, not IMS
+		// flow recovery.
+		var networkWait time.Duration
 		if state.retryAfterPresent {
-			delay = state.retryAfter
+			networkWait = state.retryAfter
 		}
-		if state.reason == "probation" && delay <= 0 {
-			delay = f.refreshDelay(registerExpires(s.cfg))
-		}
-		f.scheduleRetry(now.Add(delay))
+		f.scheduleRetry(s.subscriptionFailureRetryLocked(f, f.lifecycle.context.binding, now, networkWait))
 	}
 }
