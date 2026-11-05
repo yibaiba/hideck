@@ -108,6 +108,7 @@ func cloneCarrierOverridePointers(value *CarrierOverride) {
 	template.RPReportOverPortUS = cloneBoolPointer(template.RPReportOverPortUS)
 	template.RefreshOffersNewSecurityClient = cloneBoolPointer(template.RefreshOffersNewSecurityClient)
 	template.EnableInitialRejectFallback = cloneBoolPointer(template.EnableInitialRejectFallback)
+	template.DisableMWISubscription = cloneBoolPointer(template.DisableMWISubscription)
 	template.FallbackIncludesServerParamsInSecCl = cloneBoolPointer(template.FallbackIncludesServerParamsInSecCl)
 	template.RegisterPolicy.TemporaryRetrySeconds = cloneIntPointer(template.RegisterPolicy.TemporaryRetrySeconds)
 }

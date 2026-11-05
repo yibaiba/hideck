@@ -26,6 +26,7 @@ func RegisterTemplateFromInternal(value policy.IMSRegisterTemplate) IMSRegisterT
 		RPReportOverPortUS:                  value.RPReportOverPortUS,
 		RefreshOffersNewSecurityClient:      value.RefreshOffersNewSecurityClient,
 		EnableInitialRejectFallback:         value.EnableInitialRejectFallback,
+		DisableMWISubscription:              value.DisableMWISubscription,
 		FallbackIncludesServerParamsInSecCl: value.FallbackIncludesServerParamsInSecCl,
 		RegisterPolicy:                      registerPolicyFromInternal(value.RegisterPolicy),
 		ExpiresSeconds:                      value.ExpiresSeconds, Transport: value.Transport,

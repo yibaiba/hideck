@@ -136,6 +136,9 @@ func (s *Service) failSubscriptionUsageLocked(f subscriptionFields, result subsc
 				subscriptionEventPackage(f.mwi),
 				status,
 			)
+			if f.mwi {
+				s.rememberMWIRejectionLocked(result.context.binding, status)
+			}
 		} else {
 			f.lifecycle.rejectedStatus = status
 		}

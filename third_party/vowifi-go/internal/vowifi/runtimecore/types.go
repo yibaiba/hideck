@@ -131,6 +131,7 @@ type SessionConfig struct {
 	EPDGCandidates        *swu.EPDGCandidateStore
 
 	SubscriptionRegistrations *imscore.SubscriptionRegistrationStore
+	MWIPolicyStore            imscore.MWISubscriptionPolicyStore
 }
 
 type SessionResult struct {
@@ -169,6 +170,7 @@ type RuntimeStartRequest struct {
 	DNSServer           string
 	DeliveryStore       smsdelivery.Store
 	SubscriptionStore   imscore.SubscriptionRejectionPersistence
+	MWIPolicyStore      imscore.MWISubscriptionPolicyStore
 	Dispatch            events.EventDispatcher
 	Reconnect           bool
 	ReconnectDelay      func(int) int64

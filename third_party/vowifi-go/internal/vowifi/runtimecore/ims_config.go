@@ -68,6 +68,7 @@ func buildIMSConfig(input imsConfigInput) (*imscore.IMSConfig, error) {
 	value.RegisterTemplate = convertRegisterTemplate(imsPlan.RegisterTemplate, imsPlan.Transport)
 	value.RegistrarPenalties = input.session.RegistrarPenalties
 	value.SubscriptionRegistrations = input.session.SubscriptionRegistrations
+	value.MWIPolicyStore = input.session.MWIPolicyStore
 	if input.result != nil && input.result.Session != nil {
 		session := input.result.Session
 		value.OnLocalAddressChange = func(oldIP, newIP net.IP) error {
@@ -110,5 +111,6 @@ func convertRegisterTemplate(
 		ContactOrder:              append([]string(nil), template.ContactOrder...),
 		IncludePANIAuthenticated:  template.IncludePANIAuthenticated,
 		StrictSecurityServerOffer: template.StrictSecurityServerOffer,
+		DisableMWISubscription:    template.DisableMWISubscription,
 	}
 }

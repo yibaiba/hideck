@@ -34,6 +34,7 @@ func imsRegisterConfigForPrepared(prepared *identity.PreparedSession) (imscore.I
 		ContactOrder:              append([]string(nil), template.ContactOrder...),
 		IncludePANIAuthenticated:  template.IncludePANIAuthenticated,
 		StrictSecurityServerOffer: template.StrictSecurityServerOffer,
+		DisableMWISubscription:    template.DisableMWISubscription,
 	}
 	return registerTemplate, profile.ResolveUserAgentForModel(defaultIMSDeviceModel), nil
 }

@@ -43,6 +43,7 @@ type IMSRegisterTemplate struct {
 	ContactOrder              []string
 	IncludePANIAuthenticated  bool
 	StrictSecurityServerOffer bool
+	DisableMWISubscription    bool
 }
 
 // AKAProvider computes AKA from the network challenge.

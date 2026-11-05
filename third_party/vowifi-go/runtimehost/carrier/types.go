@@ -74,6 +74,7 @@ type IMSRegisterTemplate struct {
 	RPReportOverPortUS                  bool
 	RefreshOffersNewSecurityClient      bool
 	EnableInitialRejectFallback         bool
+	DisableMWISubscription              bool
 	FallbackIncludesServerParamsInSecCl bool
 	RegisterPolicy                      IMSRegisterPolicy
 

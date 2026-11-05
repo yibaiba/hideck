@@ -121,6 +121,21 @@ func TestSubscriptionRejectionExpiryAllowsRetryWithoutServiceRestart(t *testing.
 	}
 }
 
+func TestCarrierPolicySkipsMWISubscription(t *testing.T) {
+	s := newSubscriptionLifecycleTestService(t, nil)
+	s.cfg.RegisterTemplate.DisableMWISubscription = true
+	s.startMWISubscription()
+	s.mu.RLock()
+	started := s.mwiSubscriptionLifecycle.started
+	s.mu.RUnlock()
+	if started || s.mwiSubscriptionInFlight.Load() {
+		t.Fatal("carrier policy did not stop SUBSCRIBE(mwi)")
+	}
+	if start, reason := s.prepareSubscriptionStart(false); !start {
+		t.Fatalf("carrier MWI policy blocked registration event subscription: %s", reason)
+	}
+}
+
 func TestRegisteredSubscriptionDialogSurvivesRegisterRefresh(t *testing.T) {
 	s := newSubscriptionLifecycleTestService(t, nil)
 	for _, mwi := range []bool{false, true} {

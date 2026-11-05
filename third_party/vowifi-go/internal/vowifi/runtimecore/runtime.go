@@ -185,6 +185,7 @@ func sessionConfigFromRequest(
 		RegistrarPenalties:        req.registrarPenalties,
 		EPDGCandidates:            req.epdgCandidates,
 		SubscriptionRegistrations: req.subscriptionRegistrations,
+		MWIPolicyStore:            req.MWIPolicyStore,
 	}
 	req.fastReauth.Apply(&config)
 	return config

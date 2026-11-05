@@ -24,6 +24,10 @@ ims_register_template:
   include_pani_authenticated: true
   strict_security_server_offer: true
   enable_initial_reject_fallback: true
+  # SUBSCRIBE(mwi) got 480 (Restoration-Info: noresponse) or no answer and
+  # port-s was reset about every 30 s; builds that skipped MWI ran for hours
+  # with no such reset observed (hideck#90, #97).
+  disable_mwi_subscription: true
   contact_param_order:
     - access_type
     - sip_instance

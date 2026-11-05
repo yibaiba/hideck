@@ -165,6 +165,15 @@ type SubscriptionRejectionStore interface {
 	DeleteIMSSubscriptionRejections(identity string) error
 }
 
+// MWISubscriptionPolicyStore is an optional delivery-store capability that
+// supplies the per-SIM MWI setting (auto, on, off) and remembers identities
+// whose network explicitly rejected SUBSCRIBE(mwi) with 405 or 489. A
+// remembered rejection has no expiry; turning the setting on clears it.
+type MWISubscriptionPolicyStore interface {
+	LoadMWISubscriptionPolicy(iccid, identity string) (mode string, rejectedStatus int, err error)
+	SaveMWISubscriptionRejection(iccid, identity string, status int) error
+}
+
 // SIPResultStore is an optional delivery-store capability used to preserve
 // the initial SIP MESSAGE result while the part is still waiting for RP-ACK.
 type SIPResultStore interface {
