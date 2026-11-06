@@ -47,7 +47,7 @@ func TestOriginalCarrierPresetAssetsRemainExact(t *testing.T) {
 		"three_uk_234020.yaml":     "49cf6d64d8e180ff475e28718f70f6bdf6da1b388fdd8996cc6921d8e3d6d9c3",
 		"tmobile_310240.yaml":      "bed3bfcb871282eab4c446004c1837c39426aa94e1206ab18c41f52aa82c4cb1",
 		"tmobile_310260.yaml":      "57619113de3cfbe9ddb4afda13885501415f534f580fc55a8e7f54a15f2b93a6",
-		"vodafone_de_26202.yaml":   "6881882fa8e11ecbbaa3f4d44b1bc8d7f16deba34a08f4d7d53268e96b7ab2a6",
+		"vodafone_de_26202.yaml":   "9a0139126df010399ba89608e2fb96300611c8506a75d55e6af3e7e6bdb38d3e",
 		"vodafone_nl_20404.yaml":   "ca847e87abe516603cd92f05ef0a9e5ba8ad0869f7cca3ea2aabe9f49694df8b",
 		"vodafone_uk_23415.yaml":   "4a83ec1b4d83d853d627b008cdc40ecfc40fd521dd183e303c74b5e79df12808",
 		"ymobile_44000.yaml":       "6804965637e8d5d279b9a2eeb6a2dcd5ecd01bd8b4745ee7a5486b17d1c30c72",
