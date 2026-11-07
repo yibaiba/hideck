@@ -1,6 +1,7 @@
 package imscore
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,7 @@ type subscriptionRetryState struct {
 	localAt   time.Time // Local backoff.
 	networkAt time.Time // Retry-After / retry-after; local pacing never shortens it.
 	stopped   string    // MWI terminated with rejected, noresource or invariant.
+	iccid     string    // Card the identity ran on, for the host's per-card reset.
 }
 
 func subscriptionBackoffDelay(eventPackage string, failures int) time.Duration {
@@ -71,7 +73,7 @@ func subscriptionRetryKey(identity, eventPackage string) string {
 }
 
 func (store *SubscriptionRetryStore) subscriptionFailed(
-	identity, eventPackage string,
+	identity, eventPackage, iccid string,
 	now time.Time,
 	networkWait time.Duration,
 ) subscriptionRetryState {
@@ -80,6 +82,7 @@ func (store *SubscriptionRetryStore) subscriptionFailed(
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
 	state.failures++
+	state.iccid = iccid
 	state.localAt = now.Add(subscriptionBackoffDelay(eventPackage, state.failures))
 	if at := now.Add(networkWait); networkWait > 0 && at.After(state.networkAt) {
 		state.networkAt = at
@@ -94,12 +97,13 @@ func (store *SubscriptionRetryStore) subscriptionRetry(identity, eventPackage st
 	return store.retries[subscriptionRetryKey(identity, eventPackage)]
 }
 
-func (store *SubscriptionRetryStore) subscriptionStopped(identity, eventPackage, reason string) {
+func (store *SubscriptionRetryStore) subscriptionStopped(identity, eventPackage, iccid, reason string) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
 	state.stopped = reason
+	state.iccid = iccid
 	store.retries[key] = state
 }
 
@@ -114,11 +118,97 @@ func (store *SubscriptionRetryStore) subscriptionConfirmed(identity, eventPackag
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
 	if state.networkAt.After(now) || state.stopped != "" {
-		store.retries[key] = subscriptionRetryState{networkAt: state.networkAt, stopped: state.stopped}
+		store.retries[key] = subscriptionRetryState{networkAt: state.networkAt, stopped: state.stopped, iccid: state.iccid}
 	} else {
 		delete(store.retries, key)
 	}
 	return state.failures
+}
+
+// MWIBackoffReset reports what ResetMWILocalBackoff did for one identity.
+type MWIBackoffReset struct {
+	Device           string
+	Failures         int       // Local failure count cleared.
+	NetworkWaitUntil time.Time // Kept; zero when no network wait is running.
+	Stopped          string    // Kept stop reason: rejected, noresource or invariant.
+}
+
+// ResetMWILocalBackoff clears the MWI failure count and local wait of every
+// identity that ran on one card, on any device, when the user turns MWI on or
+// asks to re-detect it (hideck#102). A network wait still running and a stop
+// state stay, and reg event state is untouched, so the next SUBSCRIBE may
+// still have to wait. sameCard compares ICCIDs the way the host does; it runs
+// under the store lock and must not block.
+func (store *SubscriptionRetryStore) ResetMWILocalBackoff(sameCard func(iccid string) bool) []MWIBackoffReset {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	now := time.Now()
+	var resets []MWIBackoffReset
+	for key, state := range store.retries {
+		if !strings.HasSuffix(key, "\x00"+mwiEventPackage) || state.iccid == "" || !sameCard(state.iccid) {
+			continue
+		}
+		// trackSubscriptionRegistrationLocked starts every identity with the device ID.
+		device, _, _ := strings.Cut(key, "\x00")
+		reset := MWIBackoffReset{Device: device, Failures: state.failures, Stopped: state.stopped}
+		if state.networkAt.After(now) {
+			reset.NetworkWaitUntil = state.networkAt
+		}
+		state.failures, state.localAt = 0, time.Time{}
+		if reset.NetworkWaitUntil.IsZero() && state.stopped == "" {
+			delete(store.retries, key)
+		} else {
+			store.retries[key] = state
+		}
+		resets = append(resets, reset)
+	}
+	return resets
+}
+
+// WakeMWISubscription re-checks the MWI usage after the host reset its local
+// backoff or the user turned MWI on. A retry still in the future follows the
+// retry store: earlier once the local backoff is gone, never before a stored
+// wait, and stopped if the identity's MWI was stopped, also by the other
+// Service of an IKE reauthentication sharing the store. A retry already due,
+// such as the immediate re-subscribe after deactivated or timeout, is left
+// alone. A usage the policy stopped starts
+// again. Sending still needs a registration, a policy that allows MWI and no
+// stop state; an attempt already in flight is not repeated. It reports false
+// only for a nil Service.
+func (s *Service) WakeMWISubscription() bool {
+	if s == nil {
+		return false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	f := s.subscriptionFieldsLocked(true)
+	state := s.subscriptionRetries.subscriptionRetry(s.subscriptionBinding.identity, mwiEventPackage)
+	if f.lifecycle.context == s.subscriptionContextLocked() && !f.retryBlocked() && f.lifecycle.retryAt.After(now) {
+		if state.stopped != "" {
+			f.lifecycle.blockedReason = state.stopped
+		} else {
+			f.scheduleRetry(laterSubscriptionRetry(now, state.retryAt(true)))
+		}
+	}
+	retryAt, stopped := f.lifecycle.retryAt, firstNonBlank(f.lifecycle.blockedReason, state.stopped)
+	registered := s.regState == regRegistered
+	s.mu.Unlock()
+	logging.Info("IMS SUBSCRIBE(mwi) re-check requested; sending may still wait",
+		"device", s.DeviceID(), "registered", registered, "failures", state.failures,
+		"retry_at", formatSubscriptionRetryAt(retryAt), "network_wait_until", formatSubscriptionRetryAt(state.networkAt),
+		"stopped", stopped)
+	if registered {
+		s.startMWISubscription()
+	}
+	s.signalIMSMaintenance()
+	return true
+}
+
+func formatSubscriptionRetryAt(at time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	return at.Format(time.RFC3339)
 }
 
 // subscriptionFailureRetryLocked counts one temporary failure of f and returns
@@ -131,7 +221,7 @@ func (s *Service) subscriptionFailureRetryLocked(
 	networkWait time.Duration,
 ) time.Time {
 	eventPackage := subscriptionEventPackage(f.mwi)
-	state := s.subscriptionRetries.subscriptionFailed(binding.identity, eventPackage, now, networkWait)
+	state := s.subscriptionRetries.subscriptionFailed(binding.identity, eventPackage, s.cfg.ICCID, now, networkWait)
 	at := state.retryAt(true)
 	basis := "local backoff"
 	if at.Equal(state.networkAt) {

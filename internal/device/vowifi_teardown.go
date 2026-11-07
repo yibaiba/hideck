@@ -182,6 +182,42 @@ func (p *Pool) RestartVoWiFi(deviceID string) error {
 	return p.voWiFiHost().Restart(p.ctx, deviceID)
 }
 
+// RedetectMWIForICCID clears the card's local MWI backoff, then has every
+// running runtime that holds the card re-check MWI: reconnect restarts it,
+// otherwise it is woken. A device without a running runtime is not started;
+// its next normal start reads the reset state (hideck#102).
+func (p *Pool) RedetectMWIForICCID(iccid string, reconnect bool) error {
+	if p == nil {
+		return nil
+	}
+	iccid = db.CanonicalICCID(iccid)
+	if iccid == "" {
+		return nil
+	}
+	host := p.voWiFiHost()
+	host.ResetMWISubscriptionBackoff(func(value string) bool { return db.CanonicalICCID(value) == iccid })
+	running := 0
+	for _, w := range p.GetAllWorkers() {
+		if w == nil || db.CanonicalICCID(w.CurrentICCID()) != iccid || !host.Active(w.ID) {
+			continue
+		}
+		running++
+		// Active is checked before Restart without holding the
+		// lifecycle; a runtime that stops in between is started again.
+		if reconnect && w.Config.VoWiFiEnabled && !UsesModemPhoneControl(w.Config.PhoneMode) {
+			if err := p.RestartVoWiFi(w.ID); err != nil {
+				return err
+			}
+			continue
+		}
+		host.WakeMWISubscription(w.ID)
+	}
+	if running == 0 {
+		logger.Info("MWI 重新检测：这张卡没有运行中的 VoWiFi，只重置状态", "reconnect", reconnect)
+	}
+	return nil
+}
+
 func (p *Pool) RestartVoWiFiForICCID(iccid string) error {
 	if p == nil {
 		return nil

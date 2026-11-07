@@ -306,3 +306,294 @@ func TestSubscriptionConfirmationKeepsAnotherServicesStopState(t *testing.T) {
 		t.Fatal("a NOTIFY on the old subscription lifted the MWI stop state")
 	}
 }
+
+func sameCardForTest(iccid string) func(string) bool {
+	return func(value string) bool { return value == iccid }
+}
+
+func newMWIResetTestService(t *testing.T, retries *SubscriptionRetryStore, deviceID, iccid string) *Service {
+	t.Helper()
+	s := newRetryTestService(t, retries)
+	s.mu.Lock()
+	s.cfg.DeviceID, s.cfg.ICCID = deviceID, iccid
+	s.trackSubscriptionRegistrationLocked(time.Hour)
+	s.mu.Unlock()
+	return s
+}
+
+func failMWIWithStatusForTest(t *testing.T, s *Service, retryAfter string) {
+	t.Helper()
+	s.subscriptionFieldsLocked(true).lifecycle.retryAt = time.Time{}
+	result := beginProtocolSubscription(t, s, true)
+	result.response = sip.NewResponse(503, "Service Unavailable")
+	if retryAfter != "" {
+		result.response.AppendHeader(sip.NewHeader("Retry-After", retryAfter))
+	}
+	result.err = errors.New("503")
+	_ = s.recordMWISubscriptionResult(result)
+}
+
+// The reset follows the card, including onto a device that held it before and
+// is gone now, and leaves every other card and the reg event package alone.
+func TestMWIBackoffResetClearsOnlyThisCardsLocalMWIBackoff(t *testing.T) {
+	retries := NewSubscriptionRetryStore()
+	card := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	failSubscriptionByTimerN(t, card, true)
+	failSubscriptionByTimerN(t, card, true)
+	failSubscriptionByTimerN(t, card, false)
+	otherCard := newMWIResetTestService(t, retries, "wwan0", "8949020000000000002")
+	otherCard.mu.Lock()
+	otherCard.cfg.IMPI = "other-" + otherCard.cfg.IMPI
+	otherCard.trackSubscriptionRegistrationLocked(time.Hour)
+	otherCard.mu.Unlock()
+	failSubscriptionByTimerN(t, otherCard, true)
+	earlierDevice := newMWIResetTestService(t, retries, "wwan1", "8949020000000000001")
+	failSubscriptionByTimerN(t, earlierDevice, true)
+	otherDevice := newMWIResetTestService(t, retries, "wwan2", "8949020000000000003")
+	failSubscriptionByTimerN(t, otherDevice, true)
+
+	resets := retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+	cleared := map[string]int{}
+	for _, reset := range resets {
+		if !reset.NetworkWaitUntil.IsZero() || reset.Stopped != "" {
+			t.Fatalf("reset = %+v", reset)
+		}
+		cleared[reset.Device] = reset.Failures
+	}
+	if len(resets) != 2 || cleared["wwan0"] != 2 || cleared["wwan1"] != 1 {
+		t.Fatalf("resets = %+v", resets)
+	}
+	for _, check := range []struct {
+		name string
+		s    *Service
+		mwi  bool
+		want int
+	}{
+		{"this card MWI", card, true, 0},
+		{"this card reg event", card, false, 1},
+		{"other card MWI", otherCard, true, 1},
+		{"same card on an earlier device", earlierDevice, true, 0},
+		{"other card on another device", otherDevice, true, 1},
+	} {
+		if got := subscriptionFailuresForTest(check.s, check.mwi); got != check.want {
+			t.Fatalf("%s failures = %d, want %d", check.name, got, check.want)
+		}
+	}
+	rebuilt := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	if start, reason := rebuilt.prepareSubscriptionStart(true); !start {
+		t.Fatalf("MWI still waited after its local backoff was reset: %s", reason)
+	}
+	if _, got := failSubscriptionByTimerN(t, rebuilt, true); got != 5*time.Minute {
+		t.Fatalf("MWI backoff after reset restarted at %s", got)
+	}
+}
+
+func TestMWIBackoffResetKeepsNetworkWaitAndStopState(t *testing.T) {
+	retries := NewSubscriptionRetryStore()
+	waiting := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	failMWIWithStatusForTest(t, waiting, "7200")
+	resets := retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+	if len(resets) != 1 || resets[0].NetworkWaitUntil.Before(time.Now().Add(7100*time.Second)) {
+		t.Fatalf("resets = %+v", resets)
+	}
+	if start, _ := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001").prepareSubscriptionStart(true); start {
+		t.Fatal("reset bypassed Retry-After")
+	}
+
+	retries = NewSubscriptionRetryStore()
+	stopped := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	result := beginProtocolSubscription(t, stopped, true)
+	_, _ = stopped.acceptSubscriptionNotification(notifyForSubscription(result.request, "terminated;reason=rejected", 1))
+	resets = retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+	if len(resets) != 1 || resets[0].Stopped == "" {
+		t.Fatalf("resets = %+v", resets)
+	}
+	if start, _ := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001").prepareSubscriptionStart(true); start {
+		t.Fatal("reset lifted the MWI stop state")
+	}
+}
+
+// holdMWIInFlightForTest marks a SUBSCRIBE(mwi) as in flight, so a wake that
+// starts the usage does not reach the network in the test.
+func holdMWIInFlightForTest(t *testing.T, s *Service) {
+	t.Helper()
+	s.mwiSubscriptionInFlight.Store(true)
+	t.Cleanup(func() { s.mwiSubscriptionInFlight.Store(false) })
+}
+
+func TestWakeMWISubscriptionFollowsTheRetryStore(t *testing.T) {
+	retries := NewSubscriptionRetryStore()
+	s := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	failSubscriptionByTimerN(t, s, true)
+	f := s.subscriptionFieldsLocked(true)
+	local := f.lifecycle.retryAt
+	holdMWIInFlightForTest(t, s)
+
+	// Without a reset the local backoff still applies.
+	s.WakeMWISubscription()
+	if !f.lifecycle.retryAt.Equal(local) {
+		t.Fatalf("wake moved the retry without a reset: %s -> %s", local, f.lifecycle.retryAt)
+	}
+	retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+	s.WakeMWISubscription()
+	if f.lifecycle.retryAt.After(time.Now()) || !f.lifecycle.started {
+		t.Fatalf("wake after reset left MWI waiting until %s (started=%t)", f.lifecycle.retryAt, f.lifecycle.started)
+	}
+}
+
+func TestWakeMWISubscriptionKeepsNetworkWaitAndStopState(t *testing.T) {
+	retries := NewSubscriptionRetryStore()
+	s := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	failMWIWithStatusForTest(t, s, "7200")
+	holdMWIInFlightForTest(t, s)
+	retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+	s.WakeMWISubscription()
+	if f := s.subscriptionFieldsLocked(true); f.lifecycle.retryAt.Before(time.Now().Add(7100 * time.Second)) {
+		t.Fatalf("wake shortened Retry-After to %s", f.lifecycle.retryAt)
+	}
+
+	retries = NewSubscriptionRetryStore()
+	s = newMWIResetTestService(t, retries, "wwan0", "8949020000000000002")
+	holdMWIInFlightForTest(t, s)
+	result := beginProtocolSubscription(t, s, true)
+	_, _ = s.acceptSubscriptionNotification(notifyForSubscription(result.request, "terminated;reason=noresource", 1))
+	retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000002"))
+	s.WakeMWISubscription()
+	if f := s.subscriptionFieldsLocked(true); f.lifecycle.blockedReason == "" {
+		t.Fatal("wake lifted the MWI stop state")
+	}
+	if start, _ := s.prepareSubscriptionStart(true); start {
+		t.Fatal("stopped MWI started after a wake")
+	}
+}
+
+// Finding B: a usage the SIM setting stopped stays stopped until the next
+// registration unless the host wakes it after the user turns MWI on.
+func TestWakeMWISubscriptionRestartsAUsageThePolicyStopped(t *testing.T) {
+	policy := &fakeMWIPolicyStore{mode: MWISubscriptionOff}
+	s := newMWIPolicyTestService(t, policy, false)
+	if start, reason := s.prepareSubscriptionStart(true); !start {
+		t.Fatal(reason)
+	}
+	s.stopBlockedMWIUsage(s.mwiSubscriptionBlockedReason())
+	holdMWIInFlightForTest(t, s)
+	s.WakeMWISubscription()
+	if s.subscriptionFieldsLocked(true).lifecycle.started {
+		t.Fatal("wake started MWI while the SIM setting is off")
+	}
+	policy.mode = MWISubscriptionOn
+	s.WakeMWISubscription()
+	if !s.subscriptionFieldsLocked(true).lifecycle.started {
+		t.Fatal("wake did not restart MWI after the SIM setting turned on")
+	}
+}
+
+// A reset while a SUBSCRIBE(mwi) is in flight sends nothing new, and the
+// attempt's late failure counts from the reset instead of restoring the old
+// count.
+func TestMWIBackoffResetDuringAnAttemptInFlight(t *testing.T) {
+	retries := NewSubscriptionRetryStore()
+	s := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	failSubscriptionByTimerN(t, s, true)
+	failSubscriptionByTimerN(t, s, true)
+	f := s.subscriptionFieldsLocked(true)
+	f.lifecycle.retryAt = time.Time{}
+	inFlight := beginProtocolSubscription(t, s, true)
+	holdMWIInFlightForTest(t, s)
+	generation, attempt := f.lifecycle.usageGeneration, f.lifecycle.attemptKey
+
+	retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+	s.WakeMWISubscription()
+	if f.lifecycle.usageGeneration != generation || f.lifecycle.attemptKey != attempt {
+		t.Fatal("wake replaced the attempt in flight")
+	}
+	if start, reason := s.prepareSubscriptionStart(true); start {
+		t.Fatalf("MWI could start again while an attempt is in flight (%s)", reason)
+	}
+	inFlight.response = sip.NewResponse(503, "Service Unavailable")
+	inFlight.err = errors.New("503")
+	before := time.Now()
+	_ = s.recordMWISubscriptionResult(inFlight)
+	if got := subscriptionFailuresForTest(s, true); got != 1 {
+		t.Fatalf("late failure after reset left failures=%d", got)
+	}
+	if got := f.lifecycle.retryAt.Sub(before); got < 5*time.Minute || got > 5*time.Minute+time.Second {
+		t.Fatalf("late failure after reset waits %s", got)
+	}
+}
+
+func TestWakeMWISubscriptionWaitsForRegistration(t *testing.T) {
+	retries := NewSubscriptionRetryStore()
+	s := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	holdMWIInFlightForTest(t, s)
+	s.mu.Lock()
+	s.regState = regRegistering
+	s.mu.Unlock()
+	if !s.WakeMWISubscription() || s.subscriptionFieldsLocked(true).lifecycle.started {
+		t.Fatal("wake started MWI without a registration")
+	}
+	var none *Service
+	if none.WakeMWISubscription() {
+		t.Fatal("nil Service reported a wake")
+	}
+}
+
+// During IKE reauthentication two Services share the retry store. Waking one
+// must apply the stop or the later network wait the other recorded.
+func TestWakeMWISubscriptionFollowsAnotherServicesState(t *testing.T) {
+	for _, stop := range []bool{false, true} {
+		retries := NewSubscriptionRetryStore()
+		waiting := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+		other := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+		result := beginProtocolSubscription(t, other, true)
+		failSubscriptionByTimerN(t, waiting, true)
+		if stop {
+			_, _ = other.acceptSubscriptionNotification(notifyForSubscription(result.request, "terminated;reason=rejected", 1))
+		} else {
+			result.response = sip.NewResponse(503, "Service Unavailable")
+			result.response.AppendHeader(sip.NewHeader("Retry-After", "7200"))
+			result.err = errors.New("503")
+			_ = other.recordMWISubscriptionResult(result)
+		}
+		holdMWIInFlightForTest(t, waiting)
+		retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+		waiting.WakeMWISubscription()
+		f := waiting.subscriptionFieldsLocked(true)
+		if stop && f.lifecycle.blockedReason == "" {
+			t.Fatal("wake ignored the stop the other Service recorded")
+		}
+		if !stop && f.lifecycle.retryAt.Before(time.Now().Add(7100*time.Second)) {
+			t.Fatalf("wake ignored the other Service's Retry-After: %s", f.lifecycle.retryAt)
+		}
+		if start, _ := waiting.prepareSubscriptionStart(true); start {
+			t.Fatalf("stop=%t: MWI could start after the wake", stop)
+		}
+	}
+}
+
+// RFC 6665 4.1.3 lets a usage terminated with deactivated re-subscribe at
+// once. A refresh 503 with Retry-After just before does not hold that back,
+// and neither does a wake that lands before maintenance sends it.
+func TestWakeMWISubscriptionKeepsAnImmediateResubscribe(t *testing.T) {
+	retries := NewSubscriptionRetryStore()
+	s := newMWIResetTestService(t, retries, "wwan0", "8949020000000000001")
+	initial := beginProtocolSubscription(t, s, true)
+	completeProtocolSubscription(t, s, true, initial)
+	if _, status := s.acceptSubscriptionNotification(notifyForSubscription(initial.request, "active;expires=120", 1)); status != 200 {
+		t.Fatalf("NOTIFY got %d", status)
+	}
+	failMWIWithStatusForTest(t, s, "7200") // A refresh gets 503; the dialog stays.
+	if _, status := s.acceptSubscriptionNotification(notifyForSubscription(initial.request, "terminated;reason=deactivated", 2)); status != 200 {
+		t.Fatalf("terminated NOTIFY got %d", status)
+	}
+	f := s.subscriptionFieldsLocked(true)
+	if f.lifecycle.retryAt.After(time.Now()) {
+		t.Fatalf("deactivated waited until %s", f.lifecycle.retryAt)
+	}
+	holdMWIInFlightForTest(t, s)
+	retries.ResetMWILocalBackoff(sameCardForTest("8949020000000000001"))
+	s.WakeMWISubscription()
+	if f.lifecycle.retryAt.After(time.Now()) {
+		t.Fatalf("wake moved the immediate re-subscribe to %s", f.lifecycle.retryAt)
+	}
+}

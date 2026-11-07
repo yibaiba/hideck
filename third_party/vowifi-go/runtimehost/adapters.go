@@ -98,6 +98,10 @@ func (a serviceAdapter) SetSMSMemoryFull(full bool) {
 	}
 }
 
+func (a serviceAdapter) WakeMWISubscription() bool {
+	return a.svc.WakeMWISubscription()
+}
+
 // SendSMSWithOptions sends an SMS with options.
 func (a serviceAdapter) SendSMSWithOptions(ctx context.Context, to, text string, opts messaging.SendOptions) (messaging.SendOutcome, error) {
 	if a.svc == nil {
