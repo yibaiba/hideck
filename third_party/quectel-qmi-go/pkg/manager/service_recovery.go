@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -165,10 +166,17 @@ func (m *Manager) detectTimeoutStorm(service string) {
 
 	if len(m.globalTimeoutServices) >= stormMinSvcs {
 		if m.globalTimeoutStormAt.IsZero() || now.Sub(m.globalTimeoutStormAt) > stormCooldown {
+			// Name the services before clearing the window; logging after the
+			// reset always printed 0 (hideck#94).
+			affected := make([]string, 0, len(m.globalTimeoutServices))
+			for svc := range m.globalTimeoutServices {
+				affected = append(affected, svc)
+			}
+			sort.Strings(affected)
 			m.globalTimeoutStormAt = now
 			m.globalTimeoutServices = make(map[string]time.Time)
 			m.log.Warn("Timeout storm detected; triggering immediate core recovery",
-				"services_affected", len(m.globalTimeoutServices))
+				"services_affected", len(affected), "services", strings.Join(affected, ","))
 			m.enqueueModemResetEvent("timeout_storm")
 		}
 	}
