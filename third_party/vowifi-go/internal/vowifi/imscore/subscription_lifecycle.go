@@ -128,12 +128,14 @@ func (s *Service) alignSubscriptionContextLocked(mwi bool) *subscriptionLifecycl
 		lifecycle = &s.mwiSubscriptionLifecycle
 	}
 	if lifecycle.context != current {
+		previous := lifecycle.context
 		if mwi {
 			s.resetMWISubscriptionLocked()
 		} else {
 			s.resetRegistrationSubscriptionLocked()
 		}
 		*lifecycle = subscriptionLifecycle{context: current}
+		s.carrySubscriptionRetryLocked(s.subscriptionFieldsLocked(mwi), previous, current)
 	}
 	return lifecycle
 }
