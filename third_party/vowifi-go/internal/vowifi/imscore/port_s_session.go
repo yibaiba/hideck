@@ -127,11 +127,13 @@ func (s *Service) recordPortSClosed(conn net.Conn, err error, now time.Time) boo
 		kind = portSCloseSARetired
 	}
 	// Retired cleanup must not replace the latest failure. An older live
-	// connection still matters if it is the final downlink on this registrar.
+	// connection still matters if it is the final downlink on this registrar,
+	// unless it went with the old SAs after a newer flow had opened.
 	relevant := tracked && strings.EqualFold(registrar, currentRegistrar)
 	current := relevant &&
 		(connection.generation == s.portSSession.generation ||
-			(kind != portSCloseLocal && !s.hasLivePortSConnectionLocked(currentRegistrar)))
+			(kind != portSCloseLocal && kind != portSCloseSARetired &&
+				!s.hasLivePortSConnectionLocked(currentRegistrar)))
 	if current {
 		if kind != portSCloseLocal {
 			s.udpDownlinkProven.Store(false)
