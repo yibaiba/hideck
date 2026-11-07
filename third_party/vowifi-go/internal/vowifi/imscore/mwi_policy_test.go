@@ -289,3 +289,54 @@ func TestMWIPolicyBlockDoesNotKillSignaling(t *testing.T) {
 		t.Fatal("a policy block was treated as a dead signaling connection")
 	}
 }
+
+// Turning the SIM setting off stops the MWI usage and clears its retry time.
+// Turning it on again in the same registration context must not drop a
+// Retry-After or a stop state recorded for the identity, also when the other
+// Service of an IKE reauthentication on the same store records the stop while
+// the usage waits (TS 24.229 5.1.2.2, RFC 6665 4.1.3).
+func TestMWIRestartAfterPolicyStopKeepsTheStoredWait(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		stopBefore, stopAfter bool
+	}{{name: "network wait"}, {name: "stop", stopBefore: true}, {name: "stop while waiting", stopAfter: true}} {
+		policy := &fakeMWIPolicyStore{mode: MWISubscriptionOn}
+		s := newMWIPolicyTestService(t, policy, false)
+		other := newSubscriptionLifecycleTestService(t, s.subscriptionRegistrations)
+		attempt := beginProtocolSubscription(t, other, true)
+		otherServiceStopsMWI := func() {
+			_, _ = other.acceptSubscriptionNotification(notifyForSubscription(attempt.request, "terminated;reason=invariant", 1))
+		}
+		result := beginProtocolSubscription(t, s, true)
+		if !tc.stopBefore {
+			result.response = sip.NewResponse(503, "Service Unavailable")
+			result.response.AppendHeader(sip.NewHeader("Retry-After", "3600"))
+			result.err = errors.New("503")
+			_ = s.recordMWISubscriptionResult(result)
+		}
+		policy.mode = MWISubscriptionOff
+		s.startMWISubscription() // A REGISTER refresh stops the usage.
+		if tc.stopBefore {
+			otherServiceStopsMWI()
+		}
+		policy.mode = MWISubscriptionOn
+		// Keep any restart off the network.
+		s.mwiSubscriptionInFlight.Store(true)
+		s.startMWISubscription() // The next REGISTER refresh.
+		if tc.stopAfter {
+			otherServiceStopsMWI()
+			s.startMWISubscription() // And the one after.
+		}
+		s.mwiSubscriptionInFlight.Store(false)
+		f := s.subscriptionFieldsLocked(true)
+		if f.lifecycle.started {
+			t.Fatalf("%s: MWI restarted past the stored wait", tc.name)
+		}
+		if stop := tc.stopBefore || tc.stopAfter; stop && f.lifecycle.blockedReason == "" {
+			t.Fatalf("%s: restart dropped the MWI stop state", tc.name)
+		}
+		if !tc.stopBefore && f.lifecycle.retryAt.Before(time.Now().Add(3500*time.Second)) {
+			t.Fatalf("%s: restart shortened Retry-After to %s", tc.name, f.lifecycle.retryAt)
+		}
+	}
+}

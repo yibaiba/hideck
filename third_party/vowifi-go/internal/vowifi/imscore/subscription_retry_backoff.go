@@ -149,7 +149,9 @@ func (s *Service) carrySubscriptionRetryLocked(f subscriptionFields, previous, c
 	}
 	refreshed := previous.binding == current.binding && previous.generation == current.generation
 	exception := !f.mwi && !refreshed
-	if at := state.retryAt(!exception); at.After(time.Now()) {
+	// Re-carrying an unchanged retry, e.g. on each REGISTER refresh while a
+	// restarted MWI usage waits, logs nothing new.
+	if at := state.retryAt(!exception); at.After(time.Now()) && !at.Equal(f.lifecycle.retryAt) {
 		f.scheduleRetry(at)
 		basis := "local backoff"
 		if at.Equal(state.networkAt) {

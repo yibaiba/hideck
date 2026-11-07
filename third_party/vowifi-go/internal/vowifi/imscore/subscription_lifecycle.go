@@ -77,8 +77,15 @@ func (s *Service) prepareSubscriptionStart(mwi bool) (bool, string) {
 	if eligible, reason := s.subscriptionGateLocked(); !eligible {
 		return false, reason
 	}
+	sameContext := s.subscriptionFieldsLocked(mwi).lifecycle.context == s.subscriptionContextLocked()
 	lifecycle := s.alignSubscriptionContextLocked(mwi)
 	current := lifecycle.context
+	if mwi && sameContext && !lifecycle.started && lifecycle.blockedReason == "" {
+		// A usage the SIM setting stopped lost its retry time when it was
+		// terminated; restarting it in the same context must still honour the
+		// identity's backoff and stop state (hideck#102).
+		s.carrySubscriptionRetryLocked(s.subscriptionFieldsLocked(true), current, current)
+	}
 	if status := s.subscriptionRegistrations.rejected(current.binding, subscriptionEventPackage(mwi)); status != 0 {
 		if mwi {
 			s.mwiSubscriptionClosed = true
