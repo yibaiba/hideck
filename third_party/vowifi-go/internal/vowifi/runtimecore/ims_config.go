@@ -68,6 +68,7 @@ func buildIMSConfig(input imsConfigInput) (*imscore.IMSConfig, error) {
 	value.RegisterTemplate = convertRegisterTemplate(imsPlan.RegisterTemplate, imsPlan.Transport)
 	value.RegistrarPenalties = input.session.RegistrarPenalties
 	value.SubscriptionRegistrations = input.session.SubscriptionRegistrations
+	value.SubscriptionRetries = input.session.SubscriptionRetries
 	value.MWIPolicyStore = input.session.MWIPolicyStore
 	if input.result != nil && input.result.Session != nil {
 		session := input.result.Session

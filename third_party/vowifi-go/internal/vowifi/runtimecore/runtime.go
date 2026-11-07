@@ -40,6 +40,9 @@ func (Runtime) Start(
 			req.SubscriptionStore,
 		)
 	}
+	if req.SubscriptionRetries == nil {
+		req.SubscriptionRetries = imscore.NewSubscriptionRetryStore()
+	}
 	if req.Options.Voice != nil && req.voiceBinding == nil {
 		req.voiceBinding = &voiceLifecycleBinding{deviceID: req.DeviceID, voice: req.Options.Voice}
 	}
@@ -185,6 +188,7 @@ func sessionConfigFromRequest(
 		RegistrarPenalties:        req.registrarPenalties,
 		EPDGCandidates:            req.epdgCandidates,
 		SubscriptionRegistrations: req.subscriptionRegistrations,
+		SubscriptionRetries:       req.SubscriptionRetries,
 		MWIPolicyStore:            req.MWIPolicyStore,
 	}
 	req.fastReauth.Apply(&config)

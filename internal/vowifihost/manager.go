@@ -25,6 +25,11 @@ type Manager struct {
 	voiceGateway   *voicehost.Gateway
 	deliveryStore  messaging.DeliveryStore
 	dispatcher     eventhost.Dispatcher
+
+	// subscriptionRetries is handed to every runtime the manager starts, so
+	// SUBSCRIBE failure backoff survives runtime restarts, recoveries and
+	// Worker rebuilds; a new process starts empty (hideck#102).
+	subscriptionRetries *runtimehost.SubscriptionRetries
 }
 
 func NewManager() *Manager {
@@ -40,6 +45,8 @@ func NewManagerWithRuntimeStore(store RuntimeStore) *Manager {
 		stateHub:     NewStateHub(),
 		recoverStore: NewDesiredRecoverStore(),
 		healthStore:  newWiFiCallingHealthStore(),
+
+		subscriptionRetries: runtimehost.NewSubscriptionRetries(),
 	}
 	m.lifecycle = NewLifecycleController(LifecycleControllerOptions{
 		IsActive: m.Active,

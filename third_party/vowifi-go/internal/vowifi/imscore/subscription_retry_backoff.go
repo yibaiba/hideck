@@ -1,6 +1,7 @@
 package imscore
 
 import (
+	"sync"
 	"time"
 
 	"github.com/iniwex5/vowifi-go/internal/vowifi/logging"
@@ -20,10 +21,29 @@ var (
 	}
 )
 
-// subscriptionRetryState is kept per IMS identity and event package, apart
-// from the registration entries: those go away when bindings expire or the
-// identity deregisters, and the failure count must survive Service rebuilds.
-// It stays in memory, so a new process starts from the first step.
+// SubscriptionRetryStore keeps the backoff per IMS identity and event package,
+// apart from SubscriptionRegistrationStore: registration entries go away when
+// bindings expire or the identity deregisters, and a runtime builds a new
+// registration store on every start. The host keeps one retry store for the
+// process and passes it to every runtime it starts, so the count survives
+// Service rebuilds, runtime restarts and recoveries on both the default and
+// the custom-tunnel path. It stays in memory, so a new process starts from the
+// first step. The identity key includes the device ID.
+type SubscriptionRetryStore struct {
+	mu      sync.Mutex
+	retries map[string]subscriptionRetryState
+}
+
+func NewSubscriptionRetryStore() *SubscriptionRetryStore {
+	return &SubscriptionRetryStore{retries: make(map[string]subscriptionRetryState)}
+}
+
+// SubscriptionRetries returns the store this Service records SUBSCRIBE
+// failure backoff in.
+func (s *Service) SubscriptionRetries() *SubscriptionRetryStore {
+	return s.subscriptionRetries
+}
+
 type subscriptionRetryState struct {
 	failures  int
 	localAt   time.Time // Local backoff.
@@ -50,16 +70,13 @@ func subscriptionRetryKey(identity, eventPackage string) string {
 	return identity + "\x00" + eventPackage
 }
 
-func (store *SubscriptionRegistrationStore) subscriptionFailed(
+func (store *SubscriptionRetryStore) subscriptionFailed(
 	identity, eventPackage string,
 	now time.Time,
 	networkWait time.Duration,
 ) subscriptionRetryState {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.retries == nil {
-		store.retries = make(map[string]subscriptionRetryState)
-	}
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
 	state.failures++
@@ -71,18 +88,15 @@ func (store *SubscriptionRegistrationStore) subscriptionFailed(
 	return state
 }
 
-func (store *SubscriptionRegistrationStore) subscriptionRetry(identity, eventPackage string) subscriptionRetryState {
+func (store *SubscriptionRetryStore) subscriptionRetry(identity, eventPackage string) subscriptionRetryState {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return store.retries[subscriptionRetryKey(identity, eventPackage)]
 }
 
-func (store *SubscriptionRegistrationStore) subscriptionStopped(identity, eventPackage, reason string) {
+func (store *SubscriptionRetryStore) subscriptionStopped(identity, eventPackage, reason string) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.retries == nil {
-		store.retries = make(map[string]subscriptionRetryState)
-	}
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
 	state.stopped = reason
@@ -94,7 +108,7 @@ func (store *SubscriptionRegistrationStore) subscriptionStopped(identity, eventP
 // MWI stop state: during IKE reauthentication the old and the new Service
 // share this store, and a NOTIFY on the old subscription must not lift the
 // stop the new one recorded.
-func (store *SubscriptionRegistrationStore) subscriptionConfirmed(identity, eventPackage string, now time.Time) int {
+func (store *SubscriptionRetryStore) subscriptionConfirmed(identity, eventPackage string, now time.Time) int {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	key := subscriptionRetryKey(identity, eventPackage)
@@ -117,7 +131,7 @@ func (s *Service) subscriptionFailureRetryLocked(
 	networkWait time.Duration,
 ) time.Time {
 	eventPackage := subscriptionEventPackage(f.mwi)
-	state := s.subscriptionRegistrations.subscriptionFailed(binding.identity, eventPackage, now, networkWait)
+	state := s.subscriptionRetries.subscriptionFailed(binding.identity, eventPackage, now, networkWait)
 	at := state.retryAt(true)
 	basis := "local backoff"
 	if at.Equal(state.networkAt) {
@@ -142,7 +156,7 @@ func (s *Service) subscriptionFailureRetryLocked(
 // package does not: TS 24.229 5.1.1.3 requires a subscription after every
 // new initial registration.
 func (s *Service) carrySubscriptionRetryLocked(f subscriptionFields, previous, current subscriptionContext) {
-	state := s.subscriptionRegistrations.subscriptionRetry(current.binding.identity, subscriptionEventPackage(f.mwi))
+	state := s.subscriptionRetries.subscriptionRetry(current.binding.identity, subscriptionEventPackage(f.mwi))
 	eventPackage := subscriptionEventPackage(f.mwi)
 	if f.mwi && state.stopped != "" {
 		f.lifecycle.blockedReason = state.stopped

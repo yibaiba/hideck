@@ -24,8 +24,19 @@ func failSubscriptionByTimerN(t *testing.T, s *Service, mwi bool) (subscriptionR
 }
 
 func subscriptionFailuresForTest(s *Service, mwi bool) int {
-	return s.subscriptionRegistrations.subscriptionRetry(
+	return s.subscriptionRetries.subscriptionRetry(
 		s.subscriptionBinding.identity, subscriptionEventPackage(mwi)).failures
+}
+
+// newRetryTestService builds a Service the way a runtime restart does: a new
+// registration store, and the retry store the host keeps for the process.
+func newRetryTestService(t *testing.T, retries *SubscriptionRetryStore) *Service {
+	t.Helper()
+	s := newSubscriptionLifecycleTestService(t, nil)
+	s.mu.Lock()
+	s.subscriptionRetries = retries
+	s.mu.Unlock()
+	return s
 }
 
 func TestSubscriptionTimerNBacksOffPerEventPackage(t *testing.T) {
@@ -141,8 +152,8 @@ func TestSubscriptionTransactionTimeoutAndTimerNCountOnce(t *testing.T) {
 }
 
 func TestSubscriptionConfirmationKeepsNetworkWait(t *testing.T) {
-	store := NewSubscriptionRegistrationStore()
-	s := newSubscriptionLifecycleTestService(t, store)
+	retries := NewSubscriptionRetryStore()
+	s := newRetryTestService(t, retries)
 	initial := beginProtocolSubscription(t, s, false)
 	completeProtocolSubscription(t, s, false, initial)
 	_, _ = s.acceptSubscriptionNotification(notifyForSubscription(initial.request, "active;expires=120", 1))
@@ -159,22 +170,22 @@ func TestSubscriptionConfirmationKeepsNetworkWait(t *testing.T) {
 	if got := subscriptionFailuresForTest(s, false); got != 1 {
 		t.Fatalf("NOTIFY on the older subscription cleared the failed refresh (failures=%d)", got)
 	}
-	rebuilt := newSubscriptionLifecycleTestService(t, store)
+	rebuilt := newRetryTestService(t, retries)
 	if start, _ := rebuilt.prepareSubscriptionStart(false); start {
 		t.Fatal("rebuild dropped the Retry-After wait")
 	}
 }
 
 func TestSubscriptionBackoffSurvivesServiceRebuildAndBindingExpiry(t *testing.T) {
-	store := NewSubscriptionRegistrationStore()
-	old := newSubscriptionLifecycleTestService(t, store)
+	retries := NewSubscriptionRetryStore()
+	old := newRetryTestService(t, retries)
 	failSubscriptionByTimerN(t, old, false)
 	failSubscriptionByTimerN(t, old, false)
 	failSubscriptionByTimerN(t, old, true)
 	// The identity's registration entry goes away; the backoff must not.
-	store.deregistered(old.subscriptionBinding, true)
+	old.subscriptionRegistrations.deregistered(old.subscriptionBinding, true)
 
-	rebuilt := newSubscriptionLifecycleTestService(t, store)
+	rebuilt := newRetryTestService(t, retries)
 	// TS 24.229 5.1.1.3: the reg event package subscribes after the new
 	// initial registration. MWI keeps waiting for its local backoff.
 	if start, reason := rebuilt.prepareSubscriptionStart(false); !start {
@@ -200,8 +211,8 @@ func TestSubscriptionBackoffSurvivesServiceRebuildAndBindingExpiry(t *testing.T)
 
 func TestSubscriptionNetworkWaitIsNeverShortened(t *testing.T) {
 	for _, mwi := range []bool{false, true} {
-		store := NewSubscriptionRegistrationStore()
-		s := newSubscriptionLifecycleTestService(t, store)
+		retries := NewSubscriptionRetryStore()
+		s := newRetryTestService(t, retries)
 		result := beginProtocolSubscription(t, s, mwi)
 		result.response = sip.NewResponse(503, "Service Unavailable")
 		result.response.AppendHeader(sip.NewHeader("Retry-After", "7200"))
@@ -218,7 +229,7 @@ func TestSubscriptionNetworkWaitIsNeverShortened(t *testing.T) {
 		}
 		// TS 24.229 5.1.2.2: the wait applies to the request, so neither a
 		// new initial registration nor a rebuilt Service lifts it.
-		rebuilt := newSubscriptionLifecycleTestService(t, store)
+		rebuilt := newRetryTestService(t, retries)
 		if start, _ := rebuilt.prepareSubscriptionStart(mwi); start {
 			t.Fatalf("mwi=%t: rebuild bypassed Retry-After", mwi)
 		}
@@ -238,11 +249,11 @@ func TestSubscriptionNetworkWaitIsNeverShortened(t *testing.T) {
 func TestSubscriptionStopReasonsAcrossNewInitialRegistration(t *testing.T) {
 	for _, reason := range []string{"rejected", "noresource", "invariant"} {
 		for _, mwi := range []bool{false, true} {
-			store := NewSubscriptionRegistrationStore()
-			s := newSubscriptionLifecycleTestService(t, store)
+			retries := NewSubscriptionRetryStore()
+			s := newRetryTestService(t, retries)
 			result := beginProtocolSubscription(t, s, mwi)
 			_, _ = s.acceptSubscriptionNotification(notifyForSubscription(result.request, "terminated;reason="+reason, 1))
-			rebuilt := newSubscriptionLifecycleTestService(t, store)
+			rebuilt := newRetryTestService(t, retries)
 			start, _ := rebuilt.prepareSubscriptionStart(mwi)
 			// RFC 6665 4.1.3 SHOULD NOT re-subscribe; for reg event, TS 24.229
 			// 5.1.1.3 still requires a subscription after initial registration.
@@ -254,15 +265,15 @@ func TestSubscriptionStopReasonsAcrossNewInitialRegistration(t *testing.T) {
 }
 
 func TestSubscriptionBackoffIsolatedByEventPackageAndIdentity(t *testing.T) {
-	store := NewSubscriptionRegistrationStore()
-	first := newSubscriptionLifecycleTestService(t, store)
+	retries := NewSubscriptionRetryStore()
+	first := newRetryTestService(t, retries)
 	failSubscriptionByTimerN(t, first, false)
 	failSubscriptionByTimerN(t, first, false)
 	if got := subscriptionFailuresForTest(first, true); got != 0 {
 		t.Fatalf("reg event failures leaked into MWI: %d", got)
 	}
 
-	other := newSubscriptionLifecycleTestService(t, store)
+	other := newRetryTestService(t, retries)
 	other.mu.Lock()
 	other.cfg.IMPI = "other-" + other.cfg.IMPI
 	other.trackSubscriptionRegistrationLocked(time.Hour)
@@ -282,16 +293,16 @@ func TestSubscriptionBackoffIsolatedByEventPackageAndIdentity(t *testing.T) {
 // on the same store. A NOTIFY on the old MWI subscription must not lift the
 // stop the candidate recorded (RFC 6665 4.1.3).
 func TestSubscriptionConfirmationKeepsAnotherServicesStopState(t *testing.T) {
-	store := NewSubscriptionRegistrationStore()
-	old := newSubscriptionLifecycleTestService(t, store)
+	retries := NewSubscriptionRetryStore()
+	old := newRetryTestService(t, retries)
 	initial := beginProtocolSubscription(t, old, true)
-	candidate := newSubscriptionLifecycleTestService(t, store)
+	candidate := newRetryTestService(t, retries)
 	result := beginProtocolSubscription(t, candidate, true)
 	_, _ = candidate.acceptSubscriptionNotification(notifyForSubscription(result.request, "terminated;reason=rejected", 1))
 	if _, status := old.acceptSubscriptionNotification(notifyForSubscription(initial.request, "active;expires=120", 1)); status != 200 {
 		t.Fatalf("NOTIFY on the old subscription got %d", status)
 	}
-	if start, _ := newSubscriptionLifecycleTestService(t, store).prepareSubscriptionStart(true); start {
+	if start, _ := newRetryTestService(t, retries).prepareSubscriptionStart(true); start {
 		t.Fatal("a NOTIFY on the old subscription lifted the MWI stop state")
 	}
 }

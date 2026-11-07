@@ -131,6 +131,7 @@ type SessionConfig struct {
 	EPDGCandidates        *swu.EPDGCandidateStore
 
 	SubscriptionRegistrations *imscore.SubscriptionRegistrationStore
+	SubscriptionRetries       *imscore.SubscriptionRetryStore
 	MWIPolicyStore            imscore.MWISubscriptionPolicyStore
 }
 
@@ -171,6 +172,7 @@ type RuntimeStartRequest struct {
 	DeliveryStore       smsdelivery.Store
 	SubscriptionStore   imscore.SubscriptionRejectionPersistence
 	MWIPolicyStore      imscore.MWISubscriptionPolicyStore
+	SubscriptionRetries *imscore.SubscriptionRetryStore // Host-owned; outlives this runtime.
 	Dispatch            events.EventDispatcher
 	Reconnect           bool
 	ReconnectDelay      func(int) int64

@@ -303,6 +303,7 @@ func TestMWIRestartAfterPolicyStopKeepsTheStoredWait(t *testing.T) {
 		policy := &fakeMWIPolicyStore{mode: MWISubscriptionOn}
 		s := newMWIPolicyTestService(t, policy, false)
 		other := newSubscriptionLifecycleTestService(t, s.subscriptionRegistrations)
+		other.subscriptionRetries = s.subscriptionRetries
 		attempt := beginProtocolSubscription(t, other, true)
 		otherServiceStopsMWI := func() {
 			_, _ = other.acceptSubscriptionNotification(notifyForSubscription(attempt.request, "terminated;reason=invariant", 1))

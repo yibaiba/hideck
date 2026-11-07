@@ -111,7 +111,7 @@ func (s *Service) terminateNotifiedSubscriptionLocked(f subscriptionFields, stat
 	case "rejected", "noresource", "invariant":
 		f.lifecycle.blockedReason = *f.lastErr
 		if f.mwi {
-			s.subscriptionRegistrations.subscriptionStopped(f.lifecycle.context.binding.identity, mwiEventPackage, *f.lastErr)
+			s.subscriptionRetries.subscriptionStopped(f.lifecycle.context.binding.identity, mwiEventPackage, *f.lastErr)
 		}
 	case "deactivated", "timeout":
 		f.scheduleRetry(now)

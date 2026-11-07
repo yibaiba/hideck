@@ -22,7 +22,6 @@ type SubscriptionRegistrationStore struct {
 	mu          sync.Mutex
 	nextEpoch   uint64
 	identities  map[string]*subscriptionRegistrationEntry
-	retries     map[string]subscriptionRetryState
 	persistence SubscriptionRejectionPersistence
 }
 

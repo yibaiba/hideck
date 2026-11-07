@@ -46,6 +46,10 @@ func New(cfg *IMSConfig) (*Service, error) {
 	if registrations == nil {
 		registrations = NewSubscriptionRegistrationStore()
 	}
+	retries := cfg.SubscriptionRetries
+	if retries == nil {
+		retries = NewSubscriptionRetryStore()
+	}
 	s := &Service{
 		cfg:                    cfg,
 		state:                  regIdle,
@@ -82,6 +86,7 @@ func New(cfg *IMSConfig) (*Service, error) {
 		portSRecoveryJitter:   randomRFC5626RecoveryDelay,
 
 		subscriptionRegistrations: registrations,
+		subscriptionRetries:       retries,
 	}
 	transport.SetFatalHandler(s.handleFatalTransactionError)
 	return s, nil

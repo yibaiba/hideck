@@ -47,6 +47,7 @@ func (req StartRequest) coreRequest() runtimecore.RuntimeStartRequest {
 		MWIPolicyStore:    runtimeCoreMWIPolicyStore(req.DeliveryStore),
 		Dispatch:          runtimeCoreDispatcher(req.Dispatch), ShouldRun: req.ShouldRun,
 	}
+	request.SubscriptionRetries = req.SubscriptionRetries
 	if req.BeforeStart != nil {
 		hook := req.BeforeStart
 		request.BeforeSessionStart = func(ctx context.Context, config runtimecore.SessionConfig) error {

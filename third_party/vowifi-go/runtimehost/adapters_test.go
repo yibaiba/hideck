@@ -884,3 +884,11 @@ func TestStartInstanceAsync(t *testing.T) {
 	}
 	cancel()
 }
+
+func TestCoreRequestCarriesHostSubscriptionRetries(t *testing.T) {
+	request := restoredRuntimeRequest()
+	request.SubscriptionRetries = NewSubscriptionRetries()
+	if request.coreRequest().SubscriptionRetries != request.SubscriptionRetries {
+		t.Fatal("core request dropped the host subscription retry store")
+	}
+}
