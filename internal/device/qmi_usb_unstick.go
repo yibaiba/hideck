@@ -77,6 +77,72 @@ func (w *Worker) isQMIUSBUnsticking() bool {
 	return until > 0 && qmiUSBUnstickNowFn().UnixNano() < until
 }
 
+type qmiUSBUnstickRecord struct {
+	at         time.Time
+	resets     int
+	skipLogged bool
+}
+
+// recordQMIUSBUnstick records a completed reset by USB path, so a Worker
+// rebuilt for the same modem stays on cooldown.
+func (p *Pool) recordQMIUSBUnstick(worker *Worker) {
+	if p == nil || worker == nil {
+		return
+	}
+	path := strings.TrimSpace(worker.Config.USBPath)
+	if path == "" {
+		return
+	}
+	now := qmiUSBUnstickNowFn()
+	p.qmiUSBUnsticksMu.Lock()
+	defer p.qmiUSBUnsticksMu.Unlock()
+	if p.qmiUSBUnsticks == nil {
+		p.qmiUSBUnsticks = make(map[string]*qmiUSBUnstickRecord)
+	}
+	record := p.qmiUSBUnsticks[path]
+	if record == nil {
+		record = &qmiUSBUnstickRecord{}
+		p.qmiUSBUnsticks[path] = record
+	}
+	// Resets more than two cooldowns apart start a new run.
+	if record.at.IsZero() || now.Sub(record.at) > 2*qmiUSBUnstickCooldown {
+		record.resets = 0
+	}
+	record.at, record.resets, record.skipLogged = now, record.resets+1, false
+}
+
+// qmiUSBUnstickOnCooldown reports whether this modem was reset within the
+// cooldown: by USB path, or by Worker when there is no path. The USB path
+// record logs only the first skip of each cooldown window.
+func (p *Pool) qmiUSBUnstickOnCooldown(worker *Worker) bool {
+	if worker == nil {
+		return false
+	}
+	path := strings.TrimSpace(worker.Config.USBPath)
+	if p == nil || path == "" {
+		return worker.qmiUSBUnstickOnCooldown()
+	}
+	now := qmiUSBUnstickNowFn()
+	p.qmiUSBUnsticksMu.Lock()
+	defer p.qmiUSBUnsticksMu.Unlock()
+	record := p.qmiUSBUnsticks[path]
+	if record == nil || record.at.IsZero() {
+		return false
+	}
+	since := now.Sub(record.at)
+	if since >= qmiUSBUnstickCooldown {
+		return false
+	}
+	if !record.skipLogged {
+		record.skipLogged = true
+		logger.Warn("QMI CTL 仍卡死，USB 控制面复位在冷却中，暂不再复位",
+			"device", worker.ID, "usb_path", path,
+			"since_last_reset", since.Round(time.Second).String(), "cooldown", qmiUSBUnstickCooldown.String(),
+			"resets_in_run", record.resets)
+	}
+	return true
+}
+
 func (w *Worker) qmiUSBUnstickOnCooldown() bool {
 	if w == nil {
 		return false
@@ -165,7 +231,7 @@ func (p *Pool) maybeUnstickWedgedQMI(worker *Worker, startErr error, wedgeStreak
 	if *wedgeStreak < qmiCTLWedgeUnstickAfter {
 		return false
 	}
-	if worker.qmiUSBUnstickOnCooldown() {
+	if p.qmiUSBUnstickOnCooldown(worker) {
 		return false
 	}
 	if p.volteCtl != nil {
@@ -263,6 +329,7 @@ func (p *Pool) reauthorizeWorkerUSBModemAt(worker *Worker, auth string) error {
 		if err := usbDeviceAuthorizeFn(auth, "1"); err == nil {
 			worker.qmiUSBNeedsReauthorize.Store(false)
 			worker.markQMIUSBUnstickCompleted()
+			p.recordQMIUSBUnstick(worker)
 			return nil
 		} else {
 			lastErr = err

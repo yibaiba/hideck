@@ -3,11 +3,13 @@ package device
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/yibaiba/hideck/internal/config"
+	"github.com/yibaiba/hideck/pkg/logger"
 )
 
 func TestQMIErrorIndicatesCTLWedged(t *testing.T) {
@@ -198,5 +200,86 @@ func TestFailedUSBReauthorizationRemainsRepairable(t *testing.T) {
 func TestQMITransportDownDoesNotOverrideUSBUnstick(t *testing.T) {
 	if qmiTransportDownOverridesSuppression(true, "qmi_usb_unstick") {
 		t.Fatal("USB unstick must not be overridden by broken pipe; the reset itself drops the fd")
+	}
+}
+
+// hideck#94: every reset drops the modem and the Worker is rebuilt, so the
+// cooldown must follow the USB path, not the Worker.
+func TestQMIUSBUnstickCooldownSurvivesWorkerRebuild(t *testing.T) {
+	origAuth := usbModemAuthorizedPathFn
+	origWrite := usbDeviceAuthorizeFn
+	origExists := qmiControlPathExistsFn
+	origSleep := qmiUSBUnstickSleepFn
+	origNow := qmiUSBUnstickNowFn
+	origProbe := probeIMEICachedFn
+	t.Cleanup(func() {
+		usbModemAuthorizedPathFn = origAuth
+		usbDeviceAuthorizeFn = origWrite
+		qmiControlPathExistsFn = origExists
+		qmiUSBUnstickSleepFn = origSleep
+		qmiUSBUnstickNowFn = origNow
+		probeIMEICachedFn = origProbe
+	})
+	now := time.Unix(1_800_000_000, 0)
+	qmiUSBUnstickNowFn = func() time.Time { return now }
+	usbModemAuthorizedPathFn = func(string) (string, error) { return "/tmp/authorized-test", nil }
+	qmiControlPathExistsFn = func(string) (os.FileInfo, error) { return nil, nil }
+	qmiUSBUnstickSleepFn = func(time.Duration) {}
+	probeIMEICachedFn = func(string, time.Duration) (string, error) { return "490154203237518", nil }
+	resets := 0
+	usbDeviceAuthorizeFn = func(_ string, value string) error {
+		if value == "0" {
+			resets++
+		}
+		return nil
+	}
+	wedged := errors.New("allocate client ID request failed after retries: context deadline exceeded")
+	newWorker := func(path string) *Worker {
+		return &Worker{ID: "wwan0", Config: config.DeviceConfig{
+			USBPath: path, ControlDevice: "/dev/cdc-wdm0", ATPort: "/dev/ttyUSB2",
+		}}
+	}
+	pool := &Pool{}
+
+	streak := qmiCTLWedgeUnstickAfter
+	if !pool.maybeUnstickWedgedQMI(newWorker("/sys/bus/usb/devices/1-7"), wedged, &streak) || resets != 1 {
+		t.Fatalf("first wedge did not reset the modem: resets=%d", resets)
+	}
+	logger.Setup(logger.LogConfig{Debug: true, Filename: filepath.Join(t.TempDir(), "app.log")})
+	logs := logger.GlobalBroadcaster.Subscribe()
+	defer logger.GlobalBroadcaster.Unsubscribe(logs)
+	for _, after := range []time.Duration{38 * time.Second, 38 * time.Second} {
+		now = now.Add(after)
+		streak = qmiCTLWedgeUnstickAfter
+		if pool.maybeUnstickWedgedQMI(newWorker("/sys/bus/usb/devices/1-7"), wedged, &streak) || resets != 1 {
+			t.Fatalf("rebuilt Worker reset the same modem again within the cooldown: resets=%d", resets)
+		}
+	}
+	var skips []logger.LogEntry
+	for drained := false; !drained; {
+		select {
+		case entry := <-logs:
+			if strings.Contains(entry.Message, "USB 控制面复位在冷却中") {
+				skips = append(skips, entry)
+			}
+		default:
+			drained = true
+		}
+	}
+	if len(skips) != 1 {
+		t.Fatalf("cooldown skip logged %d times, want once per window", len(skips))
+	}
+	if fields := readLogFields(t, skips[0]); fields["usb_path"] != "/sys/bus/usb/devices/1-7" ||
+		fields["since_last_reset"] != "38s" || fields["cooldown"] != "10m0s" || fields["resets_in_run"] != float64(1) {
+		t.Fatalf("cooldown skip fields = %v", fields)
+	}
+	streak = qmiCTLWedgeUnstickAfter
+	if !pool.maybeUnstickWedgedQMI(newWorker("/sys/bus/usb/devices/1-8"), wedged, &streak) || resets != 2 {
+		t.Fatalf("another modem was held by this modem's cooldown: resets=%d", resets)
+	}
+	now = now.Add(qmiUSBUnstickCooldown)
+	streak = qmiCTLWedgeUnstickAfter
+	if !pool.maybeUnstickWedgedQMI(newWorker("/sys/bus/usb/devices/1-7"), wedged, &streak) || resets != 3 {
+		t.Fatalf("cooldown never expired: resets=%d", resets)
 	}
 }

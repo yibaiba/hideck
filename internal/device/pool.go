@@ -181,6 +181,12 @@ type workerLifecycleOwner struct {
 }
 
 type Pool struct {
+	// qmiUSBUnsticks keeps the last USB control-plane reset per USB path. A
+	// reset drops the modem and the Worker is rebuilt, so the cooldown cannot
+	// live on the Worker alone (hideck#94: 173 resets about 38 s apart).
+	qmiUSBUnsticksMu sync.Mutex
+	qmiUSBUnsticks   map[string]*qmiUSBUnstickRecord
+
 	mbnService      *mbn.Service
 	outboundLimiter OutboundLimiter
 	workers         map[string]*Worker
