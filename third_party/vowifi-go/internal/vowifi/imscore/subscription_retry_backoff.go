@@ -90,14 +90,17 @@ func (store *SubscriptionRegistrationStore) subscriptionStopped(identity, eventP
 }
 
 // subscriptionConfirmed ends the local backoff and returns the failures it
-// cleared. A network wait that has not run out stays in force.
+// cleared. A network wait that has not run out stays in force, and so does an
+// MWI stop state: during IKE reauthentication the old and the new Service
+// share this store, and a NOTIFY on the old subscription must not lift the
+// stop the new one recorded.
 func (store *SubscriptionRegistrationStore) subscriptionConfirmed(identity, eventPackage string, now time.Time) int {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
-	if state.networkAt.After(now) {
-		store.retries[key] = subscriptionRetryState{networkAt: state.networkAt}
+	if state.networkAt.After(now) || state.stopped != "" {
+		store.retries[key] = subscriptionRetryState{networkAt: state.networkAt, stopped: state.stopped}
 	} else {
 		delete(store.retries, key)
 	}

@@ -277,3 +277,21 @@ func TestSubscriptionBackoffIsolatedByEventPackageAndIdentity(t *testing.T) {
 		t.Fatalf("another identity started at %s", got)
 	}
 }
+
+// During IKE reauthentication the old and the candidate Service run at once
+// on the same store. A NOTIFY on the old MWI subscription must not lift the
+// stop the candidate recorded (RFC 6665 4.1.3).
+func TestSubscriptionConfirmationKeepsAnotherServicesStopState(t *testing.T) {
+	store := NewSubscriptionRegistrationStore()
+	old := newSubscriptionLifecycleTestService(t, store)
+	initial := beginProtocolSubscription(t, old, true)
+	candidate := newSubscriptionLifecycleTestService(t, store)
+	result := beginProtocolSubscription(t, candidate, true)
+	_, _ = candidate.acceptSubscriptionNotification(notifyForSubscription(result.request, "terminated;reason=rejected", 1))
+	if _, status := old.acceptSubscriptionNotification(notifyForSubscription(initial.request, "active;expires=120", 1)); status != 200 {
+		t.Fatalf("NOTIFY on the old subscription got %d", status)
+	}
+	if start, _ := newSubscriptionLifecycleTestService(t, store).prepareSubscriptionStart(true); start {
+		t.Fatal("a NOTIFY on the old subscription lifted the MWI stop state")
+	}
+}
