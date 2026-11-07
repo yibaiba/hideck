@@ -560,3 +560,180 @@ func TestRetiredPortSFlowAwaitsTheNewSAs(t *testing.T) {
 		t.Fatal("SMS readiness requires the retired port-s flow")
 	}
 }
+
+// The P-CSCF may delete the old SAs first (TS 33.203 7.4.2a) and reset or
+// close its flow from the old port_pc. That is the same retirement; a reset
+// from the new port_pc, or our own timeout on the old one, is still a lost
+// port-s.
+func TestPCSCFResetOfOldSAPortSAwaitsTheNewSAs(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		remotePort int
+		err        error
+		want       string
+	}{
+		{"reset from old port_pc", 16381, syscall.ECONNRESET, portSCloseSARetired},
+		{"close from old port_pc", 16381, io.EOF, portSCloseSARetired},
+		{"timeout on old port_pc", 16381, syscall.ETIMEDOUT, portSCloseTimeout},
+		{"reset from new port_pc", 16382, syscall.ECONNRESET, portSClosePeerReset},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, _, _ := switchRefreshService(t, 200, switchedSecurityServer)
+			if _, _, err := svc.runRegisterAttempt(context.Background()); err != nil {
+				t.Fatalf("refresh: %v", err)
+			}
+			if retirement := svc.saRetirement.Load(); retirement == nil ||
+				retirement.oldServerPortC != 16381 || retirement.newServerPortC != 16382 {
+				t.Fatalf("retirement = %+v", retirement)
+			}
+			pipe, pcscf := net.Pipe()
+			defer pcscf.Close()
+			portS := addressedConn{Conn: pipe,
+				local:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 41001},
+				remote: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: tc.remotePort}}
+			if !svc.trackProtectedPortSConnection(portS, time.Now()) {
+				t.Fatal("port-s flow not tracked")
+			}
+			svc.recordPortSClosed(portS, tc.err, time.Now())
+			if got := svc.capturePortSSession().lastCloseKind; got != tc.want {
+				t.Fatalf("close kind = %q, want %q", got, tc.want)
+			}
+			if tc.want != portSCloseSARetired {
+				return
+			}
+			if !svc.awaitPortSAfterRegister() {
+				t.Fatal("a port-s flow reset with the old SAs is not awaited from the P-CSCF")
+			}
+			if count := svc.capturePortSSession().peerResetCount; count != 0 {
+				t.Fatalf("peer resets = %d, want 0", count)
+			}
+			svc.mu.RLock()
+			pushRequired := svc.protectedSMSPushRequiredLocked()
+			svc.mu.RUnlock()
+			if pushRequired {
+				t.Fatal("SMS readiness requires the port-s flow reset with the old SAs")
+			}
+		})
+	}
+}
+
+// A failure of the port-s flow over the new SAs is kept when the old flow
+// goes with the old SAs afterwards.
+func TestOldSAPortSResetKeepsNewFlowFailure(t *testing.T) {
+	svc, _, _, _, _ := switchRefreshService(t, 200, switchedSecurityServer)
+	if _, _, err := svc.runRegisterAttempt(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	portS := func(remotePort int) net.Conn {
+		pipe, pcscf := net.Pipe()
+		t.Cleanup(func() { pcscf.Close() })
+		conn := addressedConn{Conn: pipe,
+			local:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 41001},
+			remote: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: remotePort}}
+		if !svc.trackProtectedPortSConnection(conn, time.Now()) {
+			t.Fatal("port-s flow not tracked")
+		}
+		return conn
+	}
+	oldFlow, newFlow := portS(16381), portS(16382)
+	svc.recordPortSClosed(newFlow, syscall.ECONNRESET, time.Now())
+	svc.recordPortSClosed(oldFlow, syscall.ECONNRESET, time.Now())
+	if got := svc.capturePortSSession().lastCloseKind; got != portSClosePeerReset {
+		t.Fatalf("close kind = %q, want the new flow's %q", got, portSClosePeerReset)
+	}
+}
+
+type closeHookConn struct {
+	addressedConn
+	onClose func()
+}
+
+func (conn *closeHookConn) Close() error {
+	conn.onClose()
+	return conn.addressedConn.Close()
+}
+
+// A P-CSCF reset of an old flow that lands while the UE is retiring the old
+// SAs is still the old SAs going.
+func TestOldSAPortSResetDuringRetirementAwaitsTheNewSAs(t *testing.T) {
+	svc, _, _, _, _ := switchRefreshService(t, 200, switchedSecurityServer)
+	if _, _, err := svc.runRegisterAttempt(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	oldAddr := func(local int) (addressedConn, net.Conn) {
+		pipe, pcscf := net.Pipe()
+		return addressedConn{Conn: pipe,
+			local:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: local},
+			remote: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 16381}}, pcscf
+	}
+	reset, resetPeer := oldAddr(41001)
+	defer resetPeer.Close()
+	swept, sweptPeer := oldAddr(41002)
+	defer sweptPeer.Close()
+	hooked := &closeHookConn{addressedConn: swept, onClose: func() {
+		svc.recordPortSClosed(reset, syscall.ECONNRESET, time.Now())
+	}}
+	if !svc.trackProtectedPortSConnection(hooked, time.Now()) {
+		t.Fatal("port-s flow not tracked")
+	}
+	// The reset flow is the latest one but already left protectedConns, so
+	// retirement never sweeps it.
+	svc.recordPortSOpened(reset, time.Now())
+	svc.retireReplacedSecurity(svc.saRetirement.Load(), "test")
+	if got := svc.capturePortSSession().lastCloseKind; got != portSCloseSARetired {
+		t.Fatalf("close kind = %q, want %q", got, portSCloseSARetired)
+	}
+	if svc.saRetirement.Load() != nil {
+		t.Fatal("the retirement was not cleared after cleanup")
+	}
+}
+
+// A retire timer re-armed while the retirement was being cleaned up must not
+// keep waiting for pending transactions afterwards.
+func TestRetiredRetirementTimerIsANoOp(t *testing.T) {
+	svc, _, _, _, _ := switchRefreshService(t, 200, switchedSecurityServer)
+	if _, _, err := svc.runRegisterAttempt(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	retirement := svc.saRetirement.Load()
+	svc.retireReplacedSecurity(retirement, "test")
+	svc.transport.mu.Lock()
+	svc.transport.waiters[sipTransactionKey{}] = &clientSIPTransaction{}
+	svc.transport.mu.Unlock()
+	defer func() {
+		svc.transport.mu.Lock()
+		delete(svc.transport.waiters, sipTransactionKey{})
+		svc.transport.mu.Unlock()
+	}()
+	svc.retireWhenDrained(retirement)
+	if retirement.timer.Stop() {
+		t.Fatal("a retired retirement re-armed its timer")
+	}
+}
+
+// Retiring the old SAs closes the old port-s flow; when a newer flow has
+// already failed, that failure stays the one recovery acts on.
+func TestRetiredOldFlowKeepsNewFlowFailure(t *testing.T) {
+	svc, _, _, _, _ := switchRefreshService(t, 200, switchedSecurityServer)
+	if _, _, err := svc.runRegisterAttempt(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	portS := func(remotePort int) net.Conn {
+		pipe, pcscf := net.Pipe()
+		t.Cleanup(func() { pcscf.Close() })
+		conn := addressedConn{Conn: pipe,
+			local:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 41001},
+			remote: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: remotePort}}
+		if !svc.trackProtectedPortSConnection(conn, time.Now()) {
+			t.Fatal("port-s flow not tracked")
+		}
+		return conn
+	}
+	oldFlow, newFlow := portS(16381), portS(16382)
+	svc.recordPortSClosed(newFlow, syscall.ECONNRESET, time.Now())
+	svc.markPortSSARetired(oldFlow)
+	svc.recordPortSClosed(oldFlow, io.EOF, time.Now())
+	if got := svc.capturePortSSession().lastCloseKind; got != portSClosePeerReset {
+		t.Fatalf("close kind = %q, want the new flow's %q", got, portSClosePeerReset)
+	}
+}
