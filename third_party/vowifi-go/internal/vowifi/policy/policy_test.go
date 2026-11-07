@@ -157,6 +157,13 @@ func TestResolveEmbeddedCarrierPresets(t *testing.T) {
 		!CarrierPlanFromEffectiveConfig(twoDegrees).IMS.RegisterTemplate.RefreshOffersNewSecurityClient {
 		t.Fatalf("2degrees nz = %+v", twoDegrees.IMSRegisterTemplate)
 	}
+	if vodafoneDE := ResolveEffectiveCarrierConfig("262", "02"); vodafoneDE.PresetID != "vodafone_de_26202" ||
+		!CarrierPlanFromEffectiveConfig(vodafoneDE).IMS.RegisterTemplate.DisableMWISubscription {
+		t.Fatalf("vodafone de = %+v", vodafoneDE.IMSRegisterTemplate)
+	}
+	if telekomDE := ResolveEffectiveCarrierConfig("262", "01"); CarrierPlanFromEffectiveConfig(telekomDE).IMS.RegisterTemplate.DisableMWISubscription {
+		t.Fatalf("telekom de disables MWI: %+v", telekomDE.IMSRegisterTemplate)
+	}
 	if dito := ResolveEffectiveCarrierConfig("515", "66"); dito.PresetID != "dito_51566" ||
 		!CarrierPlanFromEffectiveConfig(dito).IMS.RegisterTemplate.RefreshOffersNewSecurityClient {
 		t.Fatalf("dito ph = %+v", dito.IMSRegisterTemplate)

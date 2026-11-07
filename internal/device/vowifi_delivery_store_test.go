@@ -13,6 +13,7 @@ import (
 var _ messaging.InboundFragmentStore = vowifiDeliveryStore{}
 var _ messaging.InboundFragmentLifecycleStore = vowifiDeliveryStore{}
 var _ messaging.SubscriptionRejectionStore = vowifiDeliveryStore{}
+var _ messaging.MWISubscriptionPolicyStore = vowifiDeliveryStore{}
 
 func TestVoWiFiDeliveryStoreReportsMatchedPart(t *testing.T) {
 	previousDB := db.DB
@@ -130,5 +131,82 @@ func assertInboundFragmentStoreRoundTrip(t *testing.T, store vowifiDeliveryStore
 	}
 	if err := store.DeleteInboundFragments(scope); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVoWiFiDeliveryStoreMWIPolicy(t *testing.T) {
+	previousDB := db.DB
+	if err := db.Init(filepath.Join(t.TempDir(), "mwi.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := db.DB.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+		db.DB = previousDB
+	})
+	store := vowifiDeliveryStore{}
+	const iccid, identity = "8949020000000000001", "dev\x00impi\x00ims.example\x00sip:user@ims.example"
+
+	if mode, rejected, err := store.LoadMWISubscriptionPolicy(iccid, identity); err != nil || mode != db.MWIModeAuto || rejected != 0 {
+		t.Fatalf("card without policy: mode=%q rejected=%d err=%v", mode, rejected, err)
+	}
+	policy := db.DefaultCardPolicy(iccid)
+	policy.MWIMode = db.MWIModeOff
+	if err := db.UpsertCardPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	if mode, _, err := store.LoadMWISubscriptionPolicy(iccid, identity); err != nil || mode != db.MWIModeOff {
+		t.Fatalf("saved setting: mode=%q err=%v", mode, err)
+	}
+	policy.MWIMode = db.MWIModeOn
+	if err := db.UpsertCardPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	if mode, _, err := store.LoadMWISubscriptionPolicy(iccid, identity); err != nil || mode != db.MWIModeOn {
+		t.Fatalf("updated setting: mode=%q err=%v", mode, err)
+	}
+	if err := store.SaveMWISubscriptionRejection(iccid, identity, 480); err == nil {
+		t.Fatal("480 was saved as an explicit rejection")
+	}
+	if err := store.SaveMWISubscriptionRejection(iccid, identity, 405); err != nil {
+		t.Fatal(err)
+	}
+	if _, rejected, err := store.LoadMWISubscriptionPolicy(iccid, identity); err != nil || rejected != 405 {
+		t.Fatalf("remembered rejection = %d err=%v", rejected, err)
+	}
+	if _, rejected, _ := store.LoadMWISubscriptionPolicy(iccid, identity+"-other"); rejected != 0 {
+		t.Fatal("rejection leaked to another identity")
+	}
+	if _, rejected, _ := store.LoadMWISubscriptionPolicy("8949020000000000002", identity); rejected != 0 {
+		t.Fatal("rejection leaked to another card")
+	}
+	if err := db.DeleteIMSSubscriptionRejections(identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, rejected, _ := store.LoadMWISubscriptionPolicy(iccid, identity); rejected != 405 {
+		t.Fatal("deregistration cleanup removed the MWI rejection")
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := db.SaveIMSSubscriptionRejection(identity, "message-summary", 489, expires); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveIMSSubscriptionRejection(identity, "reg", 489, expires); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := db.DeleteIMSMWIRejections(iccid); err != nil || !cleared {
+		t.Fatalf("cleared=%v err=%v", cleared, err)
+	}
+	if _, rejected, _ := store.LoadMWISubscriptionPolicy(iccid, identity); rejected != 0 {
+		t.Fatal("clearing the card kept the MWI rejection")
+	}
+	if status, _, _ := db.LoadIMSSubscriptionRejection(identity, "message-summary", time.Now()); status != 0 {
+		t.Fatal("clearing the card kept the registration-scoped MWI rejection")
+	}
+	if status, _, _ := db.LoadIMSSubscriptionRejection(identity, "reg", time.Now()); status != 489 {
+		t.Fatal("clearing MWI removed the reg-event rejection")
+	}
+	if cleared, err := db.DeleteIMSMWIRejections(iccid); err != nil || cleared {
+		t.Fatalf("second clear: cleared=%v err=%v", cleared, err)
 	}
 }

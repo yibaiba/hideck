@@ -218,10 +218,12 @@ func restoreAutomaticTaskCardPolicy(snapshot db.CardPolicy) error {
 	}
 	// The task temporarily owns network state only. A number edited while the
 	// task runs is user data and must not be rolled back with that state.
-	if current.LocalPhoneOverride != snapshot.LocalPhoneOverride {
+	// The voicemail indication setting is user data as well (hideck#97).
+	if current.LocalPhoneOverride != snapshot.LocalPhoneOverride || current.MWIMode != snapshot.MWIMode {
 		snapshot.Source = current.Source
 	}
 	snapshot.LocalPhoneOverride = current.LocalPhoneOverride
+	snapshot.MWIMode = current.MWIMode
 	return db.UpsertCardPolicy(snapshot)
 }
 

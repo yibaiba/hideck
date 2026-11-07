@@ -24,6 +24,11 @@ func runtimeCoreSubscriptionRejectionStore(
 	return persistence
 }
 
+func runtimeCoreMWIPolicyStore(store messaging.DeliveryStore) imscore.MWISubscriptionPolicyStore {
+	policy, _ := store.(messaging.MWISubscriptionPolicyStore)
+	return policy
+}
+
 type runtimeCoreDeliveryStoreAdapter struct{ store messaging.DeliveryStore }
 
 type runtimeCoreSIPDeliveryStoreAdapter struct {

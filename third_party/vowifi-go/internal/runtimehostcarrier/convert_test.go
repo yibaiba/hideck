@@ -128,6 +128,7 @@ func populatedTemplate(id string) carrier.IMSRegisterTemplate {
 		StrictSecurityServerOffer: true, AcceptRegisterContactWithoutUser: true, RPReportOverPortUS: true,
 		RefreshOffersNewSecurityClient: true,
 		EnableInitialRejectFallback:    true, FallbackIncludesServerParamsInSecCl: true,
+		DisableMWISubscription: true,
 		RegisterPolicy: carrier.IMSRegisterPolicy{
 			ID: "register", TemporaryStatusCodes: []int{408, 500}, ForbiddenStatusCodes: []int{403},
 			InitialRejectFallbackStatusCodes: []int{404, 488}, TemporaryRetrySeconds: 15,

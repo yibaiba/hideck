@@ -269,10 +269,16 @@ func TestBuildIMSConfigUsesNegotiatedPCSCFAndCarrierRuntimeFields(t *testing.T) 
 		},
 	}
 	config, err := buildIMSConfig(imsConfigInput{
-		session: SessionConfig{Prepared: prepared, RegistrarPenalties: penalties, SubscriptionRegistrations: registrations}, result: result,
+		session: SessionConfig{
+			Prepared: prepared, RegistrarPenalties: penalties, SubscriptionRegistrations: registrations,
+			MWIPolicyStore: mwiPolicyStoreStub{},
+		}, result: result,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if config.MWIPolicyStore != (mwiPolicyStoreStub{}) {
+		t.Fatal("IMS config dropped the MWI policy store")
 	}
 	if config.Registrar != "192.0.2.10:5060;192.0.2.11:5060" {
 		t.Fatalf("registrar = %q", config.Registrar)
@@ -411,6 +417,7 @@ func TestRuntimeStartKeepsScheduledRegistrarRetryInCurrentLoop(t *testing.T) {
 	recorder := &eventRecorder{}
 	req := baseRuntimeRequest(recorder)
 	req.Reconnect = true
+	req.MWIPolicyStore = mwiPolicyStoreStub{}
 	var firstStore *imscore.RegistrarPenaltyStore
 	var subscriptions *imscore.SubscriptionRegistrationStore
 	var candidates *swu.EPDGCandidateStore
@@ -431,6 +438,9 @@ func TestRuntimeStartKeepsScheduledRegistrarRetryInCurrentLoop(t *testing.T) {
 		}
 		if candidates == nil || config.EPDGCandidates != candidates {
 			t.Fatal("runtime reconnect replaced the ePDG candidate store")
+		}
+		if config.MWIPolicyStore != (mwiPolicyStoreStub{}) {
+			t.Fatal("runtime reconnect dropped the MWI policy store")
 		}
 		cancel()
 		return nil, context.Canceled
@@ -999,5 +1009,19 @@ func TestCarrierPresetKeysReachSWUConfig(t *testing.T) {
 	}
 	if lebara := build("234", "87"); !lebara.WithholdDeviceIdentity || lebara.KeepChildSAOnRekeyDecline || lebara.DeferPeerChildRekeySwitch {
 		t.Fatalf("Lebara UK SWu config = %+v", lebara)
+	}
+}
+
+type mwiPolicyStoreStub struct{}
+
+func (mwiPolicyStoreStub) LoadMWISubscriptionPolicy(string, string) (string, int, error) {
+	return imscore.MWISubscriptionAuto, 0, nil
+}
+
+func (mwiPolicyStoreStub) SaveMWISubscriptionRejection(string, string, int) error { return nil }
+
+func TestConvertRegisterTemplateCarriesMWISwitch(t *testing.T) {
+	if !convertRegisterTemplate(policy.IMSRegisterTemplate{DisableMWISubscription: true}, "tcp").DisableMWISubscription {
+		t.Fatal("runtimecore dropped the carrier MWI switch")
 	}
 }

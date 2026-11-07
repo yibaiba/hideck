@@ -95,6 +95,7 @@ func cloneCarrierOverridePointers(value *CarrierOverride) {
 	value.IMSTCPKeepaliveSeconds = cloneIntPointer(value.IMSTCPKeepaliveSeconds)
 	value.IMSOptionsPingIntervalSeconds = cloneIntPointer(value.IMSOptionsPingIntervalSeconds)
 	value.ForceSMSCAuth = cloneBoolPointer(value.ForceSMSCAuth)
+	value.AllowHandoverPDNWLANAndEPS = cloneBoolPointer(value.AllowHandoverPDNWLANAndEPS)
 	template := &value.IMSRegisterTemplate
 	template.UsePlainDigestPlaceholder = cloneBoolPointer(template.UsePlainDigestPlaceholder)
 	template.Expires = cloneIntPointer(template.Expires)
@@ -107,6 +108,7 @@ func cloneCarrierOverridePointers(value *CarrierOverride) {
 	template.RPReportOverPortUS = cloneBoolPointer(template.RPReportOverPortUS)
 	template.RefreshOffersNewSecurityClient = cloneBoolPointer(template.RefreshOffersNewSecurityClient)
 	template.EnableInitialRejectFallback = cloneBoolPointer(template.EnableInitialRejectFallback)
+	template.DisableMWISubscription = cloneBoolPointer(template.DisableMWISubscription)
 	template.FallbackIncludesServerParamsInSecCl = cloneBoolPointer(template.FallbackIncludesServerParamsInSecCl)
 	template.RegisterPolicy.TemporaryRetrySeconds = cloneIntPointer(template.RegisterPolicy.TemporaryRetrySeconds)
 }

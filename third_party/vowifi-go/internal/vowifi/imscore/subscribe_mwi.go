@@ -20,6 +20,20 @@ const (
 )
 
 func (s *Service) startMWISubscription() {
+	if reason := s.mwiSubscriptionBlockedReason(); reason != "" {
+		s.mu.RLock()
+		active := s.mwiSubscriptionLifecycle.started
+		s.mu.RUnlock()
+		if active {
+			// A usage from before the setting changed stops now, not at its
+			// next refresh.
+			s.stopBlockedMWIUsage(reason)
+			return
+		}
+		logging.Info("IMS SUBSCRIBE(mwi) skipped",
+			"device", s.DeviceID(), "reason", reason, "preset", s.cfg.CarrierPresetID)
+		return
+	}
 	eligible, skipReason := s.prepareSubscriptionStart(true)
 	if !eligible {
 		logging.Info("IMS SUBSCRIBE(mwi) skipped",
@@ -126,6 +140,10 @@ func (s *Service) sendMWISubscription(ctx context.Context, expires time.Duration
 	}
 	response, err := s.exchangeMWISubscription(ctx, result)
 	result.response, result.err = response, err
+	if blocked := (*mwiPolicyBlockedError)(nil); errors.As(err, &blocked) {
+		s.stopBlockedMWIUsage(blocked.reason)
+		return nil
+	}
 	if err != nil {
 		return s.recordMWISubscriptionResult(result)
 	}
@@ -140,6 +158,10 @@ func (s *Service) sendMWISubscription(ctx context.Context, expires time.Duration
 		}
 		response, err = s.exchangeMWISubscription(ctx, result)
 		result.response, result.err = response, err
+		if blocked := (*mwiPolicyBlockedError)(nil); errors.As(err, &blocked) {
+			s.stopBlockedMWIUsage(blocked.reason)
+			return nil
+		}
 		if err != nil {
 			return s.recordMWISubscriptionResult(result)
 		}
@@ -170,7 +192,16 @@ func (s *Service) exchangeMWISubscription(
 	logging.Debug("IMS SUBSCRIBE(mwi) outbound", "device", s.DeviceID(), "sip", logging.RedactSIPRaw(request.String()))
 	response, _, err := s.dispatchOutboundRequestWithCallbacks(outboundDispatchOptions{
 		Context: ctx, Flow: mwiSubscriptionFlow, Request: request, Timeout: mwiSubscriptionTimeout,
-		Callbacks: sipTransactionCallbacks{onBeforeSend: func() error { return s.subscriptionSent(result, true) }},
+		Callbacks: sipTransactionCallbacks{onBeforeSend: func() error {
+			// Checked right before the bytes go out, so a setting saved while
+			// this request waited for a lock or a dispatch slot still applies.
+			if !result.unsubscribe {
+				if reason := s.mwiSubscriptionBlockedReason(); reason != "" {
+					return &mwiPolicyBlockedError{reason: reason}
+				}
+			}
+			return s.subscriptionSent(result, true)
+		}},
 	}, true)
 	if err != nil {
 		return nil, fmt.Errorf("SUBSCRIBE transaction: %w", err)

@@ -125,6 +125,11 @@ func (s *Service) handleOutboundRequestError(mode outboundModeContext, req *sip.
 	if err == nil || mode.InboundPeer || !isFatalSIPTransportError(err) {
 		return
 	}
+	// A policy block never reached the wire; its reason may quote a store
+	// error that only looks like a transport failure.
+	if blocked := (*mwiPolicyBlockedError)(nil); errors.As(err, &blocked) {
+		return
+	}
 	method := "request"
 	if req != nil && strings.TrimSpace(string(req.Method)) != "" {
 		method = strings.TrimSpace(string(req.Method))

@@ -30,6 +30,28 @@ func (vowifiDeliveryStore) DeleteIMSSubscriptionRejections(identity string) erro
 	return db.DeleteIMSSubscriptionRejections(identity)
 }
 
+// LoadMWISubscriptionPolicy reads the card's MWI setting and any remembered
+// network rejection. A card without a policy row follows the carrier preset.
+func (vowifiDeliveryStore) LoadMWISubscriptionPolicy(iccid, identity string) (string, int, error) {
+	mode := db.MWIModeAuto
+	policy, err := db.GetCardPolicy(iccid)
+	switch {
+	case err == nil:
+		mode = db.NormalizeMWIMode(policy.MWIMode)
+	case !errors.Is(err, db.ErrCardPolicyNotFound):
+		return "", 0, err
+	}
+	if db.CanonicalICCID(iccid) == "" {
+		return mode, 0, nil
+	}
+	status, err := db.LoadIMSMWIRejection(iccid, identity)
+	return mode, status, err
+}
+
+func (vowifiDeliveryStore) SaveMWISubscriptionRejection(iccid, identity string, status int) error {
+	return db.SaveIMSMWIRejection(iccid, identity, status)
+}
+
 func (vowifiDeliveryStore) CreateSMSDelivery(
 	messageID, imsi, deviceID, peer, content string,
 	partsTotal int,

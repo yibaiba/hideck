@@ -75,6 +75,7 @@ type IMSRegisterTemplate struct {
 	// Refresh REGISTER offers new SPIs and port-c (TS 24.229 5.1.1.4.2 d).
 	RefreshOffersNewSecurityClient      bool
 	EnableInitialRejectFallback         bool
+	DisableMWISubscription              bool // Skip SUBSCRIBE(mwi) after registration.
 	FallbackIncludesServerParamsInSecCl bool
 	RegisterPolicy                      IMSRegisterPolicy
 
@@ -114,6 +115,7 @@ type IMSRegisterTemplateOverride struct {
 	RPReportOverPortUS                  *bool                        `yaml:"rp_report_over_port_us"`
 	RefreshOffersNewSecurityClient      *bool                        `yaml:"refresh_offers_new_security_client"`
 	EnableInitialRejectFallback         *bool                        `yaml:"enable_initial_reject_fallback"`
+	DisableMWISubscription              *bool                        `yaml:"disable_mwi_subscription"`
 	FallbackIncludesServerParamsInSecCl *bool                        `yaml:"fallback_includes_server_params_in_sec_client"`
 	RegisterPolicy                      IMSRegisterPolicyOverride    `yaml:"register_policy"`
 }

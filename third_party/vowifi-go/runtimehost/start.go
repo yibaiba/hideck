@@ -490,18 +490,26 @@ func imscoreFromPrepared(req StartRequest, tunnel Tunnel) (*imscore.Service, err
 	if req.Dispatch != nil {
 		eventBus.Subscribe(&imsEventBridge{dispatcher: req.Dispatch})
 	}
-	if req.DeliveryStore != nil {
-		cfg.DeliveryStore = newDeliveryStoreAdapter(req.DeliveryStore)
-		cfg.SubscriptionRegistrations = imscore.NewPersistentSubscriptionRegistrationStore(
-			runtimeCoreSubscriptionRejectionStore(req.DeliveryStore),
-		)
-	}
+	applyDeliveryStores(cfg, req.DeliveryStore)
 	svc, err := imscore.New(cfg)
 	if err != nil {
 		_ = imsNetwork.Close()
 		return nil, err
 	}
 	return svc, nil
+}
+
+// applyDeliveryStores wires the host store into a custom-tunnel IMS service the
+// same way the runtimecore path does.
+func applyDeliveryStores(cfg *imscore.IMSConfig, store messaging.DeliveryStore) {
+	if store == nil {
+		return
+	}
+	cfg.DeliveryStore = newDeliveryStoreAdapter(store)
+	cfg.SubscriptionRegistrations = imscore.NewPersistentSubscriptionRegistrationStore(
+		runtimeCoreSubscriptionRejectionStore(store),
+	)
+	cfg.MWIPolicyStore = runtimeCoreMWIPolicyStore(store)
 }
 
 func firstNonEmptyString(values ...string) string {

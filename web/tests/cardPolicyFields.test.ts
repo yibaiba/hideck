@@ -120,3 +120,48 @@ test('failed manual local number save restores the persisted value', async () =>
   assert.equal(fields.localPhoneOverride.value, '+447700900123')
   assert.equal(fields.errorField.value, 'local_phone_override')
 })
+
+test('voicemail indication defaults to auto and saves the selected mode', async () => {
+  const source = ref<CardPolicy | null>(policy())
+  const patches: Array<Record<string, unknown>> = []
+  const fields = useCardPolicyFields(source, async (patch) => {
+    patches.push(patch)
+    return { ok: true }
+  })
+  await nextTick()
+  assert.equal(fields.mwiMode.value, 'auto')
+
+  fields.mwiMode.value = 'off'
+  await fields.saveMWIMode()
+  fields.mwiMode.value = 'off'
+  await fields.saveMWIMode()
+
+  assert.deepEqual(patches, [{ mwi_mode: 'off' }])
+})
+
+test('redetecting MWI resends on even when the setting is already on', async () => {
+  const source = ref<CardPolicy | null>({ ...policy(), mwi_mode: 'on' })
+  const patches: Array<Record<string, unknown>> = []
+  const fields = useCardPolicyFields(source, async (patch) => {
+    patches.push(patch)
+    return { ok: true }
+  })
+  await nextTick()
+  await fields.redetectMWI()
+  assert.deepEqual(patches, [{ mwi_mode: 'on', redetect_mwi: true }])
+})
+
+test('a saved policy whose follow-up failed is reloaded instead of rolled back', async () => {
+  const source = ref<CardPolicy | null>({ ...policy(), mwi_mode: 'off' })
+  let reloads = 0
+  const fields = useCardPolicyFields(source, async () => ({
+    ok: false,
+    error: { message: '清除失败', code: 'card_policy_saved_mwi_clear_failed' }
+  }), () => { reloads++ })
+  await nextTick()
+  fields.mwiMode.value = 'on'
+  await fields.saveMWIMode()
+  assert.equal(reloads, 1)
+  assert.equal(fields.mwiMode.value, 'on')
+  assert.equal(fields.errorField.value, 'mwi_mode')
+})
