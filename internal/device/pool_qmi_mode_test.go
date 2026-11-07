@@ -26,6 +26,7 @@ type workerStatusBackendStub struct {
 	simMetadata              *backend.SIMMetadata
 	opMode                   backend.OperatingMode
 	opModeErr                error
+	setOpModeErr             error
 	setOpModeCalls           []backend.OperatingMode
 	openLogicalChannelCalls  int
 	closeLogicalChannelCalls int
@@ -80,6 +81,9 @@ func (s *workerStatusBackendStub) ListSMS(ctx context.Context) ([]backend.SMSSum
 func (s *workerStatusBackendStub) DeleteAllSMS(ctx context.Context) error { return nil }
 func (s *workerStatusBackendStub) SetOperatingMode(ctx context.Context, mode backend.OperatingMode) error {
 	s.setOpModeCalls = append(s.setOpModeCalls, mode)
+	if s.setOpModeErr != nil {
+		return s.setOpModeErr
+	}
 	s.opMode = mode
 	return nil
 }

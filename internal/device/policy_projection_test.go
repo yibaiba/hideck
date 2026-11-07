@@ -3,6 +3,8 @@ package device
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/yibaiba/hideck/internal/cardpolicy"
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/vowifihost"
+	"github.com/yibaiba/hideck/pkg/logger"
 )
 
 func TestApplyPolicyCellularAirplaneKeepsSoftwarePhone(t *testing.T) {
@@ -743,5 +746,281 @@ func TestRefreshIdentityAndApplyCardPolicyReturnsResolverError(t *testing.T) {
 	_, err := p.refreshIdentityAndApplyCardPolicy(w, "startup_post_apply")
 	if !errors.Is(err, expected) {
 		t.Fatalf("refresh error = %v, want wrapped resolver error", err)
+	}
+}
+
+// hideck#94: QMI DMS hung for two hours while the AT port kept answering.
+func radioOffATTestPool(t *testing.T, backendMode string, cfunReply string) (*Pool, *Worker, *[]string) {
+	t.Helper()
+	p, w := atTestPool(t)
+	w.Backend = &workerStatusBackendStub{
+		mode: backendMode, opMode: backend.ModeOnline,
+		setOpModeErr: errors.New("QMI 服务未就绪: DMS"),
+	}
+	commands := &[]string{}
+	p.openATSession = func(string) (atSerialSession, error) {
+		return &controlledATSession{execute: func(cmd string, _ time.Duration) (string, error) {
+			*commands = append(*commands, cmd)
+			if cmd == "AT+CFUN?" {
+				return cfunReply, nil
+			}
+			return "OK", nil
+		}}, nil
+	}
+	return p, w, commands
+}
+
+func TestAirplaneFallsBackToATWhenQMIFails(t *testing.T) {
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	p.enterAirplaneModeFromPolicy(w, "test")
+	if got := strings.Join(*commands, ","); got != "AT+CFUN=4,AT+CFUN?" {
+		t.Fatalf("AT commands = %s", got)
+	}
+	if !p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) {
+		t.Fatal("confirmed CFUN 4 was reported as a failure")
+	}
+}
+
+func TestAirplaneATFallbackRequiresReadback(t *testing.T) {
+	p, w, _ := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 1\r\nOK")
+	if p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) {
+		t.Fatal("AT fallback trusted CFUN=4 without reading back 4")
+	}
+}
+
+func TestConnectHoldFallsBackToATWhenQMIFails(t *testing.T) {
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	w.Config.ConnectHoldRF = true
+	p.holdRadioOffOnConnect(w, "connect_hold_rf")
+	if got := strings.Join(*commands, ","); got != "AT+CFUN=4,AT+CFUN?" {
+		t.Fatalf("AT commands = %s", got)
+	}
+	// CFUN=4 may not survive a restart, so the hold stays for QMI to redo in PersistLow.
+	if !w.Config.ConnectHoldRF {
+		t.Fatal("an AT radio-off cleared ConnectHoldRF")
+	}
+}
+
+func TestConnectHoldKeptWhenATReadbackFails(t *testing.T) {
+	p, w, _ := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 1\r\nOK")
+	w.Config.ConnectHoldRF = true
+	p.holdRadioOffOnConnect(w, "connect_hold_rf")
+	if !w.Config.ConnectHoldRF {
+		t.Fatal("a failed radio-off cleared ConnectHoldRF")
+	}
+}
+
+func TestAirplaneATFallbackSkipsExplicitQMIFailure(t *testing.T) {
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	w.Backend.(*workerStatusBackendStub).setOpModeErr = errors.New("DMS SetOperatingMode: QMI_ERR_INVALID_TRANSITION")
+	p.enterAirplaneModeFromPolicy(w, "test")
+	if len(*commands) != 0 {
+		t.Fatalf("an explicit QMI failure was retried over AT: %v", *commands)
+	}
+}
+
+func TestAirplaneATFallbackStopsWhenSetFails(t *testing.T) {
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	p.openATSession = func(string) (atSerialSession, error) {
+		return &controlledATSession{execute: func(cmd string, _ time.Duration) (string, error) {
+			*commands = append(*commands, cmd)
+			return "ERROR", errors.New("AT 命令返回 ERROR")
+		}}, nil
+	}
+	if p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) {
+		t.Fatal("a failed AT+CFUN=4 was reported as success")
+	}
+	if got := strings.Join(*commands, ","); got != "AT+CFUN=4" {
+		t.Fatalf("AT commands = %s", got)
+	}
+}
+
+func TestAirplaneATFallbackStopsOnATError(t *testing.T) {
+	logger.Setup(logger.LogConfig{Debug: true, Filename: filepath.Join(t.TempDir(), "app.log")})
+	logs := logger.GlobalBroadcaster.Subscribe()
+	defer logger.GlobalBroadcaster.Unsubscribe(logs)
+	for _, tc := range []struct {
+		reply   string
+		err     error
+		message string
+	}{
+		// SerialAT returns as soon as it sees ERROR, with a nil error.
+		{"ERROR\r\n", nil, "AT+CFUN=4 没有返回 OK"},
+		// +CME ERROR does not end its read early: it times out with an error.
+		{"+CME ERROR: 3\r\n", errors.New("timeout"), "AT+CFUN=4 也失败"},
+	} {
+		p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+		p.openATSession = func(string) (atSerialSession, error) {
+			return &controlledATSession{execute: func(cmd string, _ time.Duration) (string, error) {
+				*commands = append(*commands, cmd)
+				if cmd == "AT+CFUN?" {
+					return "+CFUN: 4\r\nOK\r\n", nil
+				}
+				return tc.reply, tc.err
+			}}, nil
+		}
+		if p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) {
+			t.Fatalf("AT+CFUN=4 answered %q was reported as success", tc.reply)
+		}
+		if got := strings.Join(*commands, ","); got != "AT+CFUN=4" {
+			t.Fatalf("AT commands after %q = %s", tc.reply, got)
+		}
+		entry := waitLogEntry(t, logs, func(entry logger.LogEntry) bool {
+			return strings.Contains(entry.Message, tc.message)
+		})
+		fields := readLogFields(t, entry)
+		if fields["set_response"] != strings.TrimSpace(tc.reply) || fields["qmi_err"] == nil {
+			t.Fatalf("log fields after %q = %v", tc.reply, fields)
+		}
+	}
+}
+
+func TestAirplaneATFallbackAcceptsOKBeforeAURC(t *testing.T) {
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	p.openATSession = func(string) (atSerialSession, error) {
+		return &controlledATSession{execute: func(cmd string, _ time.Duration) (string, error) {
+			*commands = append(*commands, cmd)
+			if cmd == "AT+CFUN?" {
+				return "+CFUN: 4\r\nOK\r\n", nil
+			}
+			return "AT+CFUN=4\r\r\nOK\r\n\r\n+CREG: 0\r\n", nil
+		}}, nil
+	}
+	if !p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) {
+		t.Fatalf("an OK followed by a URC was reported as a failure: %v", *commands)
+	}
+}
+
+func TestAirplaneATFallbackFailsWhenQueryFails(t *testing.T) {
+	logger.Setup(logger.LogConfig{Debug: true, Filename: filepath.Join(t.TempDir(), "app.log")})
+	logs := logger.GlobalBroadcaster.Subscribe()
+	defer logger.GlobalBroadcaster.Unsubscribe(logs)
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "")
+	p.openATSession = func(string) (atSerialSession, error) {
+		return &controlledATSession{execute: func(cmd string, _ time.Duration) (string, error) {
+			*commands = append(*commands, cmd)
+			if cmd == "AT+CFUN?" {
+				return "+CF", errors.New("timeout")
+			}
+			return "OK\r\n", nil
+		}}, nil
+	}
+	if p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) {
+		t.Fatal("a failed AT+CFUN? was reported as success")
+	}
+	if got := strings.Join(*commands, ","); got != "AT+CFUN=4,AT+CFUN?" {
+		t.Fatalf("AT commands = %s", got)
+	}
+	entry := waitLogEntry(t, logs, func(entry logger.LogEntry) bool {
+		return strings.Contains(entry.Message, "读回 AT+CFUN? 失败")
+	})
+	if fields := readLogFields(t, entry); fields["set_response"] != "OK" || fields["query_response"] != "+CF" ||
+		fields["at_err"] == nil {
+		t.Fatalf("log fields = %v", fields)
+	}
+}
+
+func TestAirplaneATFallbackSkippedDuringShutdown(t *testing.T) {
+	logger.Setup(logger.LogConfig{Debug: true, Filename: filepath.Join(t.TempDir(), "app.log")})
+	logs := logger.GlobalBroadcaster.Subscribe()
+	defer logger.GlobalBroadcaster.Unsubscribe(logs)
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.ctx = ctx
+	if p.radioOffOverAT(w, "test", errors.New("context canceled")) || len(*commands) != 0 {
+		t.Fatalf("fallback ran during shutdown: %v", *commands)
+	}
+	for drained := false; !drained; {
+		select {
+		case entry := <-logs:
+			if strings.Contains(entry.Message, "明确失败") {
+				t.Fatalf("shutdown was logged as an explicit QMI failure: %s", entry.Message)
+			}
+		default:
+			drained = true
+		}
+	}
+}
+
+func TestAirplaneATFallbackFailsWhenThePortWillNotOpen(t *testing.T) {
+	p, w, _ := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	p.openATSession = func(string) (atSerialSession, error) { return nil, errors.New("device busy") }
+	if p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) {
+		t.Fatal("an AT port that would not open was reported as success")
+	}
+}
+
+func TestAirplaneATFallbackWaitsForTheATPortOnlyBriefly(t *testing.T) {
+	p, w, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	release, err := p.acquireDeviceAT(context.Background(), w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	started := time.Now()
+	if p.radioOffOverAT(w, "test", errors.New("QMI 服务未就绪: DMS")) || len(*commands) != 0 {
+		t.Fatalf("fallback ran while the AT port was busy: %v", *commands)
+	}
+	if waited := time.Since(started); waited < radioOffATGateWait || waited > radioOffATGateWait+2*time.Second {
+		t.Fatalf("waited %s for the AT port, want about %s", waited, radioOffATGateWait)
+	}
+}
+
+func TestAirplaneATFallbackOnlyForQMIBackend(t *testing.T) {
+	p, w, commands := radioOffATTestPool(t, backend.BackendAT, "+CFUN: 4\r\nOK")
+	p.enterAirplaneModeFromPolicy(w, "test")
+	if len(*commands) != 0 {
+		t.Fatalf("AT backend failure was retried over AT: %v", *commands)
+	}
+}
+
+func TestAirplaneATFallbackSkipsAReplacedWorker(t *testing.T) {
+	p, old, commands := radioOffATTestPool(t, backend.BackendQMI, "+CFUN: 4\r\nOK")
+	replacement := &Worker{ID: old.ID, Config: old.Config, Backend: old.Backend}
+	p.workers[old.ID] = replacement
+	if p.radioOffOverAT(old, "test", errors.New("QMI 服务未就绪: DMS")) || len(*commands) != 0 {
+		t.Fatalf("a replaced Worker's fallback reached the new Worker: %v", *commands)
+	}
+}
+
+func TestATFinalOK(t *testing.T) {
+	for response, want := range map[string]bool{
+		"OK\r\n":                        true,
+		"\r\nOK\r\n":                    true,
+		"AT+CFUN=4\r\r\nOK\r\n":         true,
+		"\r\n\r\nOK":                    true,
+		"OK\r\n\r\n+CREG: 0\r\n":        true,
+		"ERROR\r\n":                     false,
+		"+CME ERROR: 3\r\n":             false,
+		"+CMS ERROR: 500\r\nOK\r\n":     false,
+		"+CME ERROR_COUNT: 0\r\nOK\r\n": true,
+		"+CREG: 0\r\nERROR\r\nOK\r\n":   false,
+		"":                              false,
+		"+CFUN: 4\r\n":                  false,
+	} {
+		if got := atFinalOK(response); got != want {
+			t.Errorf("atFinalOK(%q) = %v, want %v", response, got, want)
+		}
+	}
+}
+
+func TestParseCFUN(t *testing.T) {
+	for _, tc := range []struct {
+		response string
+		fun      int
+		ok       bool
+	}{
+		{"+CFUN: 4\r\nOK", 4, true},
+		{"+CFUN:4", 4, true},
+		{"\r\n+CFUN: 40\r\n\r\nOK\r\n", 40, true},
+		{"+CFUN: 1,0", 0, false},
+		{"AT+CFUN?\r\r\n+CREG: 0\r\n+CFUN: 4\r\n\r\nOK\r\n", 4, true},
+		{"OK", 0, false},
+	} {
+		fun, ok := parseCFUN(tc.response)
+		if fun != tc.fun || ok != tc.ok {
+			t.Errorf("parseCFUN(%q) = %d,%v want %d,%v", tc.response, fun, ok, tc.fun, tc.ok)
+		}
 	}
 }

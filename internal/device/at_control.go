@@ -35,6 +35,15 @@ func (p *Pool) ExecuteAT(deviceID, command string, timeout time.Duration) (strin
 }
 
 func (p *Pool) ExecuteATContext(ctx context.Context, request ATRequest) (string, error) {
+	return p.executeATContextFor(ctx, request, nil, 0)
+}
+
+// executeATContextFor runs the request only on expected when it is non-nil:
+// it is refused when expected was replaced before or while waiting for the
+// AT port.
+// A positive gateWait bounds the wait for the AT port; the command timeout
+// still starts once the port is held.
+func (p *Pool) executeATContextFor(ctx context.Context, request ATRequest, expected *Worker, gateWait time.Duration) (string, error) {
 	releaseOperation, err := p.AcquireDeviceOperation(request.DeviceID)
 	if err != nil {
 		return "", err
@@ -47,9 +56,21 @@ func (p *Pool) ExecuteATContext(ctx context.Context, request ATRequest) (string,
 	if worker == nil {
 		return "", fmt.Errorf("%w: 设备未找到或未运行", ErrATUnavailable)
 	}
+	if expected != nil && worker != expected {
+		return "", fmt.Errorf("%w: 设备已被替换", ErrATUnavailable)
+	}
 	iccid := worker.CurrentICCID()
-	release, err := p.acquireDeviceAT(ctx, worker.ID)
+	gateCtx := ctx
+	if gateWait > 0 {
+		var cancel context.CancelFunc
+		gateCtx, cancel = context.WithTimeout(ctx, gateWait)
+		defer cancel()
+	}
+	release, err := p.acquireDeviceAT(gateCtx, worker.ID)
 	if err != nil {
+		if gateWait > 0 {
+			return "", fmt.Errorf("等待 AT 口失败（上限 %s）: %w", gateWait, err)
+		}
 		return "", err
 	}
 	defer release()
