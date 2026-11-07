@@ -28,6 +28,11 @@ ims_register_template:
   # port-s was reset about every 30 s; builds that skipped MWI ran for hours
   # with no such reset observed (hideck#90, #97).
   disable_mwi_subscription: true
+  # Every refresh REGISTER that the S-CSCF re-authenticated reused the active
+  # port-c and SPIs; no packet came back after the response to the challenge.
+  # Offering new ones, all 5 re-authenticated refreshes in about 28 hours
+  # switched SAs (hideck#90).
+  refresh_offers_new_security_client: true
   contact_param_order:
     - access_type
     - sip_instance
