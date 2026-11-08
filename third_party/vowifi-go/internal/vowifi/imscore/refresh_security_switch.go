@@ -349,6 +349,10 @@ func (s *Service) noteInboundOverNewSA(localPort, remotePort int) {
 // or after a message over the new SAs when no client transaction is pending
 // (TS 33.203 7.4.1a); it waits again otherwise.
 func (s *Service) retireWhenDrained(retirement *saRetirement) {
+	// A timer re-armed while the retirement was being cleaned up.
+	if s.saRetirement.Load() != retirement {
+		return
+	}
 	remaining := time.Until(retirement.lifetimeEnd)
 	if remaining <= 0 {
 		s.retireReplacedSecurity(retirement, "old_sa_lifetime")
@@ -366,14 +370,17 @@ func (s *Service) retireWhenDrained(retirement *saRetirement) {
 // retireReplacedSecurity deletes the replaced SAs and closes the flows they
 // protected. Only the current retirement acts; stale timers are no-ops.
 func (s *Service) retireReplacedSecurity(retirement *saRetirement, trigger string) {
-	// Claiming the retirement clears its pointer before cleanup completes.
-	// Even a nil caller must wait, or the previous cleanup can remove the
-	// retiring set published by the next refresh switch.
+	// Every caller claims the retirement under saRetirementMu. Even a nil
+	// caller must wait, or the previous cleanup can remove the retiring set
+	// published by the next refresh switch. The pointer is cleared only after
+	// cleanup, so a P-CSCF reset of an old flow racing it is still recognised
+	// as the old SAs going (onReplacedSAs).
 	s.saRetirementMu.Lock()
 	defer s.saRetirementMu.Unlock()
-	if retirement == nil || !s.saRetirement.CompareAndSwap(retirement, nil) {
+	if retirement == nil || s.saRetirement.Load() != retirement {
 		return
 	}
+	defer s.saRetirement.CompareAndSwap(retirement, nil)
 	retirement.timer.Stop()
 	if retirement.oldConn != nil {
 		_ = retirement.oldConn.Close()

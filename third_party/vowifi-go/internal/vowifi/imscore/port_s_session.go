@@ -20,7 +20,8 @@ const (
 	portSCloseOther     = "other"
 	portSCloseTimeout   = "transport_timeout"
 	portSCloseDeadline  = "read_deadline"
-	// Closed by the UE when a refresh switch deleted the SAs under it; the
+	// Went with the SAs a refresh switch replaced: closed by the UE retiring
+	// them, or reset or closed by the P-CSCF from its old port_pc. The
 	// P-CSCF reopens port-s over the new SAs (TS 33.203 7.4.1a).
 	portSCloseSARetired = "sa_retired"
 )
@@ -119,19 +120,33 @@ func (s *Service) recordPortSClosed(conn net.Conn, err error, now time.Time) boo
 	if registrar == "" {
 		registrar = currentRegistrar
 	}
-	kind := classifyPortSClose(err)
+	rawKind := classifyPortSClose(err)
+	kind := rawKind
 	if connection.localClosing {
 		kind = portSCloseLocal
 	}
-	if connection.saRetired {
-		kind = portSCloseSARetired
+	// The P-CSCF may delete the old SAs on its own (TS 33.203 7.4.2a), while
+	// the UE only retires them after a message has arrived over the new ones
+	// or at their lifetime end.
+	// Vodafone DE reset its flow from the old port_pc about 230 s after the
+	// switch with nothing over the new SAs yet (hideck#90). A reset or close
+	// it sent is that SA replacement, not a lost port-s; a timeout is only our
+	// side noticing silence and still counts as a failure.
+	saRetiredVia := ""
+	switch {
+	case connection.saRetired:
+		kind, saRetiredVia = portSCloseSARetired, "ue_retired"
+	case (kind == portSClosePeerReset || kind == portSCloseEOF) && s.onReplacedSAs(conn):
+		kind, saRetiredVia = portSCloseSARetired, "old_port_pc"
 	}
 	// Retired cleanup must not replace the latest failure. An older live
-	// connection still matters if it is the final downlink on this registrar.
+	// connection still matters if it is the final downlink on this registrar,
+	// unless it went with the old SAs after a newer flow had opened.
 	relevant := tracked && strings.EqualFold(registrar, currentRegistrar)
 	current := relevant &&
 		(connection.generation == s.portSSession.generation ||
-			(kind != portSCloseLocal && !s.hasLivePortSConnectionLocked(currentRegistrar)))
+			(kind != portSCloseLocal && kind != portSCloseSARetired &&
+				!s.hasLivePortSConnectionLocked(currentRegistrar)))
 	if current {
 		if kind != portSCloseLocal {
 			s.udpDownlinkProven.Store(false)
@@ -159,7 +174,8 @@ func (s *Service) recordPortSClosed(conn net.Conn, err error, now time.Time) boo
 	logging.Info("IMS port-s lifecycle",
 		"device", s.DeviceID(), "event", "closed", "generation", generation,
 		"pcscf", registrar, "inner_ip", s.cfg.LocalAddr,
-		"close_kind", kind, "reason", errorText(err),
+		"close_kind", kind, "raw_close_kind", rawKind, "sa_retired_via", saRetiredVia,
+		"reason", errorText(err), "remote", conn.RemoteAddr(), "current", current,
 		"lifetime", elapsedSince(connection.openedAt, now),
 		"last_inbound_at", lastInboundAt)
 	if probe != nil {
@@ -225,6 +241,13 @@ func (s *Service) markPortSSARetired(conn net.Conn) {
 		s.portSSession.connections[conn] = state
 	}
 	s.portSSessionMu.Unlock()
+}
+
+// onReplacedSAs reports whether conn comes from the P-CSCF's old port_pc
+// while a refresh switch has not yet retired the old SAs.
+func (s *Service) onReplacedSAs(conn net.Conn) bool {
+	retirement := s.saRetirement.Load()
+	return retirement != nil && tcpPortFromAddr(conn.RemoteAddr()) == retirement.oldServerPortC
 }
 
 func (s *Service) portSRegistrar(conn net.Conn) string {
