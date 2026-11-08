@@ -31,8 +31,9 @@ var (
 // the custom-tunnel path. It stays in memory, so a new process starts from the
 // first step. The identity key includes the device ID.
 type SubscriptionRetryStore struct {
-	mu      sync.Mutex
-	retries map[string]subscriptionRetryState
+	mu           sync.Mutex
+	retries      map[string]subscriptionRetryState
+	nextRevision uint64
 }
 
 func NewSubscriptionRetryStore() *SubscriptionRetryStore {
@@ -46,6 +47,7 @@ func (s *Service) SubscriptionRetries() *SubscriptionRetryStore {
 }
 
 type subscriptionRetryState struct {
+	revision  uint64 // Store-wide sequence; deleting a record must not reuse it.
 	failures  int
 	localAt   time.Time // Local backoff.
 	networkAt time.Time // Retry-After / retry-after; local pacing never shortens it.
@@ -81,6 +83,8 @@ func (store *SubscriptionRetryStore) subscriptionFailed(
 	defer store.mu.Unlock()
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
+	store.nextRevision++
+	state.revision = store.nextRevision
 	state.failures++
 	state.iccid = iccid
 	state.localAt = now.Add(subscriptionBackoffDelay(eventPackage, state.failures))
@@ -107,18 +111,25 @@ func (store *SubscriptionRetryStore) subscriptionStopped(identity, eventPackage,
 	store.retries[key] = state
 }
 
-// subscriptionConfirmed ends the local backoff and returns the failures it
-// cleared. A network wait that has not run out stays in force, and so does an
-// MWI stop state: during IKE reauthentication the old and the new Service
-// share this store, and a NOTIFY on the old subscription must not lift the
-// stop the new one recorded.
-func (store *SubscriptionRetryStore) subscriptionConfirmed(identity, eventPackage string, now time.Time) int {
+type subscriptionConfirmation struct {
+	revision uint64
+	now      time.Time
+}
+
+// subscriptionConfirmed clears only failures visible when this attempt was
+// sent. Overlapping Services cannot confirm each other's later failures;
+// network waits and MWI stop states stay in force.
+func (store *SubscriptionRetryStore) subscriptionConfirmed(identity, eventPackage string, confirmation subscriptionConfirmation) int {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	key := subscriptionRetryKey(identity, eventPackage)
 	state := store.retries[key]
-	if state.networkAt.After(now) || state.stopped != "" {
-		store.retries[key] = subscriptionRetryState{networkAt: state.networkAt, stopped: state.stopped, iccid: state.iccid}
+	if state.revision != confirmation.revision {
+		return 0 // This NOTIFY cannot confirm a failure recorded after its attempt.
+	}
+	if state.networkAt.After(confirmation.now) || state.stopped != "" {
+		state.failures, state.localAt = 0, time.Time{}
+		store.retries[key] = state
 	} else {
 		delete(store.retries, key)
 	}

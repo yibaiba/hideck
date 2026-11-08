@@ -24,6 +24,7 @@ type subscriptionLifecycle struct {
 	blockedReason   string
 	attemptKey      sipTransactionKey
 	sentAt          time.Time
+	retryRevision   uint64
 	notifyDeadline  time.Time
 	expiresAt       time.Time
 	retryAt         time.Time
