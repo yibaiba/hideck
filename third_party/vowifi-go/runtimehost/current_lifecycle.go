@@ -36,6 +36,11 @@ func (adapter lifecycleServiceAdapter) SetSMSMemoryFull(full bool) {
 	}
 }
 
+func (adapter lifecycleServiceAdapter) WakeMWISubscription() bool {
+	waker, ok := adapter.lifecycle.(interface{ WakeMWISubscription() bool })
+	return ok && waker.WakeMWISubscription()
+}
+
 func (adapter lifecycleServiceAdapter) SendSMSWithOptions(
 	ctx context.Context,
 	to, text string,
@@ -129,6 +134,10 @@ func (adapter *imscoreLifecycleAdapter) SetSMSMemoryFull(full bool) {
 	if adapter != nil && adapter.svc != nil {
 		adapter.svc.SetSMSMemoryFull(full)
 	}
+}
+
+func (adapter *imscoreLifecycleAdapter) WakeMWISubscription() bool {
+	return adapter != nil && adapter.svc.WakeMWISubscription()
 }
 
 func (adapter *imscoreLifecycleAdapter) SendSMSWithOptions(

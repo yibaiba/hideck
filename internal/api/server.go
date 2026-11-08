@@ -131,6 +131,7 @@ type Server struct {
 	websheets               *vwebsheet.Broker
 	cardPolicies            cardPolicyStore
 	cardPolicyRestarter     cardPolicyVoWiFiRestarter
+	cardPolicyMWIRedetector cardPolicyMWIRedetector
 	disclaimerAcceptances   disclaimerAcceptanceStore
 	systemTime              systemTimeProvider
 	backendSwitch           deviceBackendSwitcher

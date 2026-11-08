@@ -453,6 +453,18 @@ func (i *Instance) SetSMSMemoryFull(full bool) {
 	}
 }
 
+// WakeMWISubscription asks the current IMS service to re-check its MWI
+// subscription after the host reset the card's local MWI backoff. It reports
+// whether an IMS service took the request; without one the next start reads
+// the reset state.
+func (i *Instance) WakeMWISubscription() bool {
+	if i == nil {
+		return false
+	}
+	waker, ok := i.Service().(interface{ WakeMWISubscription() bool })
+	return ok && waker.WakeMWISubscription()
+}
+
 // SendSMSWithResult sends an SMS and returns the delivery outcome.
 func (i *Instance) SendSMSWithResult(ctx context.Context, to, text string) (messaging.SendOutcome, error) {
 	svc := i.Service()

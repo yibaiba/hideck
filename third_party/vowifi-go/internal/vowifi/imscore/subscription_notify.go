@@ -125,7 +125,7 @@ func (s *Service) acceptSubscriptionNotification(raw string) (*subscriptionNotif
 		// older, still-valid subscription confirms nothing new.
 		eventPackage := subscriptionEventPackage(n.mwi)
 		if f.lifecycle.retryAt.IsZero() {
-			if failures := s.subscriptionRegistrations.subscriptionConfirmed(f.lifecycle.context.binding.identity, eventPackage, time.Now()); failures != 0 {
+			if failures := s.subscriptionRetries.subscriptionConfirmed(f.lifecycle.context.binding.identity, eventPackage, time.Now()); failures != 0 {
 				logging.Info("IMS subscription confirmed; failure backoff cleared",
 					"device", s.DeviceID(), "event_package", eventPackage, "failures", failures, "state", state.state)
 			}

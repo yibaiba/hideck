@@ -1025,3 +1025,36 @@ func TestConvertRegisterTemplateCarriesMWISwitch(t *testing.T) {
 		t.Fatal("runtimecore dropped the carrier MWI switch")
 	}
 }
+
+func TestRuntimeStartUsesHostSubscriptionRetriesOnEveryAttempt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req := baseRuntimeRequest(&eventRecorder{})
+	req.Reconnect = true
+	req.SubscriptionRetries = imscore.NewSubscriptionRetryStore()
+	attempts := 0
+	req.SessionStarter = func(_ context.Context, config SessionConfig) (*SessionResult, error) {
+		attempts++
+		if config.SubscriptionRetries != req.SubscriptionRetries {
+			t.Fatalf("attempt %d did not use the host subscription retry store", attempts)
+		}
+		imsConfig, err := buildIMSConfig(imsConfigInput{session: config, result: &SessionResult{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if imsConfig.SubscriptionRetries != req.SubscriptionRetries {
+			t.Fatal("IMS config dropped the host subscription retry store")
+		}
+		if attempts == 1 {
+			return nil, scheduledRetryTestError{retryAt: time.Now().Add(10 * time.Millisecond)}
+		}
+		cancel()
+		return nil, context.Canceled
+	}
+	if _, err := (Runtime{}).Start(ctx, req); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Runtime.Start() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("runtime attempts = %d", attempts)
+	}
+}

@@ -237,3 +237,40 @@ func TestManagerStartRuntimeStopsStaleStartedInstance(t *testing.T) {
 		t.Fatalf("stale completion cleared replacement startup: %+v", state)
 	}
 }
+
+// Restart and recovery both start the runtime through StartRuntime; each start
+// must get the manager's retry store rather than a fresh one (hideck#102).
+func TestManagerStartRuntimeKeepsSubscriptionRetriesAcrossStarts(t *testing.T) {
+	manager := NewManager()
+	var stores []*runtimehost.SubscriptionRetries
+	manager.SetRuntimeStartForTest(func(_ context.Context, req runtimehost.StartRequest) (*runtimehost.Instance, error) {
+		stores = append(stores, req.SubscriptionRetries)
+		return &runtimehost.Instance{}, nil
+	})
+	start := func(deviceID string) *runtimehost.Instance {
+		t.Helper()
+		claim := manager.BeginStart(deviceID)
+		if !claim.Accepted {
+			t.Fatalf("BeginStart(%s) = %+v", deviceID, claim)
+		}
+		result, err := manager.StartRuntime(context.Background(), RuntimeStartRequest{
+			DeviceID: deviceID, Epoch: claim.Epoch,
+			Prepared: PreparedStart{SIM: runtimehost.NewReaderSIMAdapter(simProviderStub{})},
+			Modem:    runtimeStartTestModem{},
+		})
+		if err != nil {
+			t.Fatalf("StartRuntime(%s) error = %v", deviceID, err)
+		}
+		return result.Instance
+	}
+	first := start("dev-1")
+	manager.RuntimeStore().DeleteInstance("dev-1", first)
+	start("dev-1")
+	start("dev-2")
+	if len(stores) != 3 || stores[0] == nil || stores[1] != stores[0] || stores[2] != stores[0] {
+		t.Fatalf("subscription retry stores = %p", stores)
+	}
+	if NewManager().subscriptionRetries == stores[0] {
+		t.Fatal("a new manager inherited the subscription retry store")
+	}
+}

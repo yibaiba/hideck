@@ -749,3 +749,82 @@ func TestIMSAPNFromDomain(t *testing.T) {
 		t.Fatalf("empty imsAPNFromDomain() = %q", got)
 	}
 }
+
+func TestCustomTunnelIMSServiceUsesHostSubscriptionRetries(t *testing.T) {
+	tunnel := newLifecycleTunnel(nil)
+	prepared := &identity.PreparedSession{
+		Profile:     identity.Profile{IMSI: "310260123456789", MCC: "310", MNC: "260"},
+		IMSIdentity: identity.IMSIdentity{IMPI: "310260123456789@ims.example", IMPU: "sip:310260123456789@ims.example", Domain: "ims.example"},
+		EPDGAddr:    "epdg.example.com",
+	}
+	req := runtimeTestRequest(prepared, tunnel)
+	req.SubscriptionRetries = NewSubscriptionRetries()
+	for range 2 {
+		svc, err := imscoreFromPrepared(req, tunnel)
+		if err != nil {
+			t.Fatalf("imscoreFromPrepared: %v", err)
+		}
+		svc.StopCurrent()
+		if svc.SubscriptionRetries() != req.SubscriptionRetries {
+			t.Fatal("custom tunnel IMS service did not use the host subscription retry store")
+		}
+	}
+}
+
+type wakeableLifecycleIMS struct {
+	lifecycleIMS
+	wakes int
+}
+
+func (s *wakeableLifecycleIMS) WakeMWISubscription() bool {
+	s.wakes++
+	return true
+}
+
+func TestInstanceWakeMWISubscriptionReachesTheIMSService(t *testing.T) {
+	var none *Instance
+	if none.WakeMWISubscription() || (&Instance{}).WakeMWISubscription() {
+		t.Fatal("wake without an IMS service reported success")
+	}
+	// Custom-tunnel path with an injected lifecycle.
+	ims := &wakeableLifecycleIMS{}
+	inst := &Instance{}
+	inst.setService(lifecycleServiceAdapter{lifecycle: ims})
+	if !inst.WakeMWISubscription() || ims.wakes != 1 {
+		t.Fatalf("custom tunnel wake reached the lifecycle %d times", ims.wakes)
+	}
+	inst.setService(lifecycleServiceAdapter{lifecycle: &lifecycleIMS{}})
+	if inst.WakeMWISubscription() {
+		t.Fatal("a lifecycle without MWI reported a wake")
+	}
+	// Default path and the built-in tunnel IMS reach a real imscore Service.
+	tunnel := newLifecycleTunnel(nil)
+	prepared := &identity.PreparedSession{
+		Profile:     identity.Profile{IMSI: "310260123456789", MCC: "310", MNC: "260"},
+		IMSIdentity: identity.IMSIdentity{IMPI: "310260123456789@ims.example", IMPU: "sip:310260123456789@ims.example", Domain: "ims.example"},
+		EPDGAddr:    "epdg.example.com",
+	}
+	svc, err := imscoreFromPrepared(runtimeTestRequest(prepared, tunnel), tunnel)
+	if err != nil {
+		t.Fatalf("imscoreFromPrepared: %v", err)
+	}
+	t.Cleanup(svc.StopCurrent)
+	for _, service := range []Service{
+		newServiceAdapter(svc),
+		lifecycleServiceAdapter{lifecycle: &imscoreLifecycleAdapter{svc: svc}},
+	} {
+		inst.setService(service)
+		if !inst.WakeMWISubscription() {
+			t.Fatalf("%T wake did not reach the imscore Service", service)
+		}
+	}
+	for _, service := range []Service{
+		newServiceAdapter(nil),
+		lifecycleServiceAdapter{lifecycle: &imscoreLifecycleAdapter{}},
+	} {
+		inst.setService(service)
+		if inst.WakeMWISubscription() {
+			t.Fatalf("%T without an imscore Service reported a wake", service)
+		}
+	}
+}

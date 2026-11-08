@@ -262,6 +262,7 @@ type Service struct {
 	subscriptionGeneration    uint64
 	subscriptionBinding       subscriptionRegistration
 	subscriptionRegistrations *SubscriptionRegistrationStore
+	subscriptionRetries       *SubscriptionRetryStore
 	notifyReconnectPending    atomic.Bool
 	bindingCleanupPending     atomic.Bool
 	lastRegisterContactCount  atomic.Int32

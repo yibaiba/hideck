@@ -133,6 +133,8 @@ func (m *Manager) StartRuntime(ctx context.Context, req RuntimeStartRequest) (Ru
 			return ctx.Err() == nil && m.ShouldRun(deviceID, req.Epoch)
 		},
 		Observer: m.runtimeStateObserver(deviceID, req.Epoch, readiness),
+
+		SubscriptionRetries: m.subscriptionRetries,
 	})
 	if err != nil {
 		return RuntimeStartResult{}, err
