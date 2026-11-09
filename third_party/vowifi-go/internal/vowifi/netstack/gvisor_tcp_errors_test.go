@@ -68,7 +68,7 @@ func newFailingIMSTCPConn(t *testing.T, failure tcpip.Error) *imsTCPConn {
 	if err != nil {
 		t.Fatalf("NewEndpoint: %s", err)
 	}
-	conn := &imsTCPConn{gonet.NewTCPConn(queue, &failingTCPEndpoint{Endpoint: endpoint, failure: failure})}
+	conn := &imsTCPConn{TCPConn: gonet.NewTCPConn(queue, &failingTCPEndpoint{Endpoint: endpoint, failure: failure})}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }

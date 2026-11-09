@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -71,7 +70,7 @@ func dialTCPWithMSS(ctx context.Context, networkStack *stack.Stack, cfg tcpDialC
 		endpoint.Close()
 		return nil, err
 	}
-	return &imsTCPConn{gonet.NewTCPConn(&queue, endpoint)}, nil
+	return newIMSTCPConn(&queue, endpoint, cfg.remote), nil
 }
 
 func configureIMSTCPKeepalive(endpoint tcpip.Endpoint) error {
@@ -173,13 +172,14 @@ func (l *imsTCPListener) Accept() (net.Conn, error) {
 }
 
 func (l *imsTCPListener) acceptTCP() (net.Conn, tcpip.Endpoint, error) {
-	n, wq, err := l.ep.Accept(nil)
+	var peer tcpip.FullAddress
+	n, wq, err := l.ep.Accept(&peer)
 	if _, blocked := err.(*tcpip.ErrWouldBlock); blocked {
 		waitEntry, notifyCh := waiter.NewChannelEntry(waiter.ReadableEvents)
 		l.wq.EventRegister(&waitEntry)
 		defer l.wq.EventUnregister(&waitEntry)
 		for {
-			n, wq, err = l.ep.Accept(nil)
+			n, wq, err = l.ep.Accept(&peer)
 			if _, blocked = err.(*tcpip.ErrWouldBlock); !blocked {
 				break
 			}
@@ -199,7 +199,7 @@ func (l *imsTCPListener) acceptTCP() (net.Conn, tcpip.Endpoint, error) {
 		n.Close()
 		return nil, nil, kaErr
 	}
-	return &imsTCPConn{gonet.NewTCPConn(wq, n)}, n, nil
+	return newIMSTCPConn(wq, n, peer), n, nil
 }
 
 func tcpAddress(address tcpip.FullAddress) *net.TCPAddr {
