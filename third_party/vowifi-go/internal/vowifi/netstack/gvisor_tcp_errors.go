@@ -8,12 +8,27 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 // gonet flattens endpoint errors into strings, while its own timeoutError
 // represents a local read/write deadline. Restore that distinction only at
 // this adapter boundary, rather than guessing from arbitrary IMS errors.
-type imsTCPConn struct{ *gonet.TCPConn }
+//
+// gonet also asks the endpoint for its peer on every RemoteAddr call, which
+// fails once the endpoint is reset or timed out. Keep the peer the connection
+// was made with, as net.TCPConn does: port-s close handling matches a reset
+// against the old port_pc (hideck#90).
+type imsTCPConn struct {
+	*gonet.TCPConn
+	remote net.Addr
+}
+
+func newIMSTCPConn(queue *waiter.Queue, endpoint tcpip.Endpoint, remote tcpip.FullAddress) *imsTCPConn {
+	return &imsTCPConn{TCPConn: gonet.NewTCPConn(queue, endpoint), remote: tcpAddress(remote)}
+}
+
+func (c *imsTCPConn) RemoteAddr() net.Addr { return c.remote }
 
 func (c *imsTCPConn) Read(buffer []byte) (int, error) {
 	n, err := c.TCPConn.Read(buffer)

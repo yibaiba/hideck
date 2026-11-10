@@ -131,10 +131,11 @@ func (s *Service) recordPortSClosed(conn net.Conn, err error, now time.Time) boo
 	// Vodafone DE reset its flow from the old port_pc about 230 s after the
 	// switch with nothing over the new SAs yet (hideck#90). A reset or close
 	// it sent is that SA replacement, not a lost port-s; a timeout is only our
-	// side noticing silence and still counts as a failure.
+	// side noticing silence and still counts as a failure, even when our
+	// retirement swept the flow after the timeout had already ended it.
 	saRetiredVia := ""
 	switch {
-	case connection.saRetired:
+	case connection.saRetired && kind != portSCloseTimeout:
 		kind, saRetiredVia = portSCloseSARetired, "ue_retired"
 	case (kind == portSClosePeerReset || kind == portSCloseEOF) && s.onReplacedSAs(conn):
 		kind, saRetiredVia = portSCloseSARetired, "old_port_pc"

@@ -617,6 +617,29 @@ func TestPCSCFResetOfOldSAPortSAwaitsTheNewSAs(t *testing.T) {
 	}
 }
 
+// A timeout that ended an old-SA flow before our retirement swept it is still
+// a failure, not the SAs going.
+func TestOldSAPortSTimeoutBeforeRetirementSweepStaysAFailure(t *testing.T) {
+	svc, _, _, _, _ := switchRefreshService(t, 200, switchedSecurityServer)
+	if _, _, err := svc.runRegisterAttempt(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	pipe, pcscf := net.Pipe()
+	defer pcscf.Close()
+	portS := addressedConn{Conn: pipe,
+		local:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 41001},
+		remote: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 16381}}
+	if !svc.trackProtectedPortSConnection(portS, time.Now()) {
+		t.Fatal("port-s flow not tracked")
+	}
+	// The reader has its ETIMEDOUT but has not recorded it yet.
+	svc.retireReplacedSecurity(svc.saRetirement.Load(), "test")
+	svc.recordPortSClosed(portS, syscall.ETIMEDOUT, time.Now())
+	if got := svc.capturePortSSession().lastCloseKind; got != portSCloseTimeout {
+		t.Fatalf("close kind = %q, want %q", got, portSCloseTimeout)
+	}
+}
+
 // A failure of the port-s flow over the new SAs is kept when the old flow
 // goes with the old SAs afterwards.
 func TestOldSAPortSResetKeepsNewFlowFailure(t *testing.T) {
