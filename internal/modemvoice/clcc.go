@@ -2,10 +2,13 @@ package modemvoice
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 )
+
+var errCLCCRejectedSnapshot = errors.New("modem voice: CLCC snapshot ended in device error")
 
 // State values follow Quectel EC25/EC21 AT manual section 7.15 (TS 27.007).
 type State int
@@ -34,10 +37,14 @@ type Call struct {
 func ParseCLCC(response string) ([]Call, error) {
 	calls := make([]Call, 0)
 	seen := make(map[int]bool)
-	for _, raw := range strings.Split(strings.ReplaceAll(response, "\r", ""), "\n") {
+	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(response, "\r", "")), "\n")
+	for i, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" || line == "OK" || line == "AT+CLCC" {
 			continue
+		}
+		if len(calls) > 0 && i == len(lines)-1 && (line == "ERROR" || strings.HasPrefix(line, "+CME ERROR:")) {
+			return nil, errCLCCRejectedSnapshot
 		}
 		if !strings.HasPrefix(line, "+CLCC:") {
 			return nil, fmt.Errorf("modem voice: unexpected CLCC response line")

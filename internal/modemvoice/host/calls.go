@@ -85,6 +85,9 @@ func (c *Controller) AnswerIncomingCall(ctx context.Context, req voicehost.Answe
 	if err != nil {
 		return voicehost.AnswerResult{}, err
 	}
+	if d.call != current {
+		return c.answerWaiting(ctx, d, current, req.SDP)
+	}
 	if current.snapshot.State == "connected" {
 		return voicehost.AnswerResult{}, errors.New("通话已接听或正在接听")
 	}
@@ -106,10 +109,13 @@ func (c *Controller) AnswerIncomingCall(ctx context.Context, req voicehost.Answe
 func matchingCall(d *device, id string) (*call, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.call == nil || d.call.snapshot.CallID != id {
-		return nil, errors.New("模组通话已结束或已更换")
+	if d.call != nil && d.call.snapshot.CallID == id {
+		return d.call, nil
 	}
-	return d.call, nil
+	if other := d.otherCalls[id]; other != nil {
+		return other, nil
+	}
+	return nil, errors.New("模组通话已结束或已更换")
 }
 
 func (c *Controller) HangupCall(ctx context.Context, id, callID string) error {
@@ -133,7 +139,7 @@ func (c *Controller) hangup(ctx context.Context, d *device, current *call) error
 	if err != nil {
 		return err
 	}
-	if d.call != current {
+	if !ownsCall(d, current) {
 		return nil
 	}
 	if current.trackedID == "" {
@@ -151,7 +157,7 @@ func (c *Controller) hangup(ctx context.Context, d *device, current *call) error
 	if err != nil {
 		return err
 	}
-	if d.call == current {
+	if ownsCall(d, current) {
 		return errors.New("挂断命令已发送，但模组仍报告通话存在，请重试")
 	}
 	return nil

@@ -52,6 +52,7 @@ type device struct {
 	cleanupErr         error
 	cleanupTransferred bool // Protected by op after done; replacement owns pending resources.
 	call               *call
+	otherCalls         map[string]*call
 	resources          *Resources
 	session            *modemvoice.Session
 }

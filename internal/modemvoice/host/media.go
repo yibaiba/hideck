@@ -108,12 +108,13 @@ func (c *Controller) openMedia(ctx context.Context, d *device, current *call, sd
 		d.op.Lock()
 		defer d.op.Unlock()
 		d.mu.Lock()
-		active := d.call == current
+		foreground := d.call
+		active := foreground != nil && foreground.bridge == bridge
 		d.mu.Unlock()
 		if active && bridge.Err() != nil && d.ctx.Err() == nil {
 			d.setStatus("failed", bridge.Err())
 			c.publish(notification{event: voicehost.CallEvent{Type: "CallMediaUpdated", DeviceID: d.id,
-				CallID: current.snapshot.CallID, RecordingError: bridge.Err().Error(), Time: time.Now()}})
+				CallID: foreground.snapshot.CallID, RecordingError: bridge.Err().Error(), Time: time.Now()}})
 		}
 	}()
 	return nil

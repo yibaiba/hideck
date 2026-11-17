@@ -3,12 +3,12 @@ package modemvoice
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
 
 const (
+	clccRetryDelay     = 250 * time.Millisecond
 	queryTimeout       = 3 * time.Second
 	callCommandTimeout = 60 * time.Second
 )
@@ -56,11 +56,22 @@ func (c *Client) Calls(ctx context.Context) ([]Call, error) {
 }
 
 func (c *Client) calls(ctx context.Context) ([]Call, error) {
-	response, err := c.executor.ExecuteATContext(ctx, "AT+CLCC", queryTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("modem voice: CLCC: %w", err)
+	calls, err := c.queryCalls(ctx)
+	if !errors.Is(err, errCLCCRejectedSnapshot) {
+		return calls, err
 	}
-	return ParseCLCC(response)
+	timer := time.NewTimer(clccRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, errors.Join(err, ctx.Err())
+	case <-timer.C:
+	}
+	calls, retryErr := c.queryCalls(ctx)
+	if retryErr != nil {
+		return nil, errors.Join(err, retryErr)
+	}
+	return calls, nil
 }
 
 func dialCommand(number string) (string, error) {
@@ -101,9 +112,7 @@ func (c *Client) Dial(ctx context.Context, number string) error {
 	return err
 }
 
-// CHUP affects voice calls only (EC25/EC21 manual section 7.5), unlike ATH.
-// A fresh snapshot must still contain exactly the expected voice call so that
-// waiting calls are never rejected through a whole-voice-call command.
+// Control revalidates the expected call against a fresh CLCC snapshot.
 func (c *Client) Answer(ctx context.Context, expected Call) error {
 	return c.control(ctx, expected, true)
 }
@@ -121,16 +130,9 @@ func (c *Client) control(ctx context.Context, expected Call, answer bool) error 
 	if err != nil {
 		return err
 	}
-	calls = voiceControlCalls(calls)
-	if len(calls) != 1 || calls[0].Mode != 0 || calls[0].Multiparty || !sameCall(expected, calls[0]) {
-		return errors.New("modem voice: call changed or requires targeted control")
-	}
-	command := "AT+CHUP"
-	if answer {
-		if !calls[0].Inbound || calls[0].State != Incoming {
-			return errors.New("modem voice: call is not an incoming call")
-		}
-		command = "ATA"
+	command, err := controlCommand(calls, expected, answer)
+	if err != nil {
+		return err
 	}
 	_, err = c.executor.ExecuteATContext(ctx, command, callCommandTimeout)
 	return err

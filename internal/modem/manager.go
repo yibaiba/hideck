@@ -769,7 +769,11 @@ RespLoop:
 						"resp", logATResponse(req.cmd, strings.Join(fullResponse, " | ")),
 						"cost", time.Since(startTime).Truncate(time.Millisecond).String())
 				}
-				req.errChan <- fmt.Errorf("设备返回错误: %s", logATResponse(req.cmd, strings.Join(fullResponse, "\n")))
+				if req.cmd == "AT+CLCC" {
+					req.errChan <- &clccResponseError{response: strings.Join(fullResponse, "\n"), terminal: line}
+				} else {
+					req.errChan <- fmt.Errorf("设备返回错误: %s", logATResponse(req.cmd, strings.Join(fullResponse, "\n")))
+				}
 				break RespLoop
 			} else if strings.Contains(line, ">") {
 				m.resetATTimeoutWatchdog()

@@ -15,6 +15,21 @@ func (c *Controller) applyCall(d *device, change modemvoice.Change) error {
 	current := d.call
 	d.mu.Unlock()
 	if current == nil {
+		d.mu.Lock()
+		pending := otherCallLocked(d, change.Call.ID)
+		if pending != nil && change.Ended {
+			d.mu.Unlock()
+			c.applyOtherCall(d, change)
+			return nil
+		}
+		if pending != nil && !change.Ended {
+			d.call = pending
+			delete(d.otherCalls, pending.snapshot.CallID)
+			current = pending
+		}
+		d.mu.Unlock()
+	}
+	if current == nil {
 		if !change.Ended && change.Call.Call.Inbound {
 			c.incomingCall(d, change.Call)
 		}
@@ -24,6 +39,7 @@ func (c *Controller) applyCall(d *device, change modemvoice.Change) error {
 		current.trackedID = change.Call.ID
 	}
 	if current.trackedID != change.Call.ID {
+		c.applyOtherCall(d, change)
 		return nil
 	}
 	if change.Ended {
@@ -58,6 +74,7 @@ func (c *Controller) applyCall(d *device, change modemvoice.Change) error {
 	}
 	d.mu.Lock()
 	previous := current.snapshot.State
+	previousHeld := current.snapshot.Held
 	current.snapshot.State = state
 	current.snapshot.Held = change.Call.Call.State == modemvoice.Held
 	snapshot := current.snapshot
@@ -65,6 +82,9 @@ func (c *Controller) applyCall(d *device, change modemvoice.Change) error {
 	if previous != state {
 		c.publish(notification{event: voicehost.CallEvent{Type: kind, DeviceID: d.id, CallID: snapshot.CallID,
 			Direction: snapshot.Direction, State: state, Time: time.Now(), AudioCodec: "PCMU"}})
+	}
+	if previousHeld != snapshot.Held {
+		c.publish(notification{event: voicehost.CallEvent{Type: "CallMediaUpdated", DeviceID: d.id, CallID: snapshot.CallID, State: state, Held: snapshot.Held, Time: time.Now()}})
 	}
 	return nil
 }

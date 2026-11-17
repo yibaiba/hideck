@@ -51,15 +51,17 @@ func (s *Session) control(ctx context.Context, id string, answer bool) (Update, 
 	if !containsCallID(calls, id) {
 		return update, ErrCallChanged
 	}
-	if len(calls) != 1 || calls[0].Call.Mode != 0 || calls[0].Call.Multiparty {
-		return update, errors.New("modem voice: multiple calls require targeted control")
-	}
-	command := "AT+CHUP"
-	if answer {
-		if !calls[0].Call.Inbound || calls[0].Call.State != Incoming {
-			return update, errors.New("modem voice: call is not an incoming call")
+	var expected Call
+	var snapshot []Call
+	for _, call := range calls {
+		snapshot = append(snapshot, call.Call)
+		if call.ID == id {
+			expected = call.Call
 		}
-		command = "ATA"
+	}
+	command, err := controlCommand(snapshot, expected, answer)
+	if err != nil {
+		return update, err
 	}
 	return s.execute(opCtx, command, update)
 }

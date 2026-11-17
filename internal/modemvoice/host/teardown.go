@@ -30,6 +30,12 @@ func (c *Controller) Disable(ctx context.Context, id string) error {
 			return errors.New("挂断期间模组出现新的来电，请处理后重试停用")
 		}
 	}
+	for _, other := range d.otherCalls {
+		if err := c.hangup(ctx, d, other); err != nil {
+			d.op.Unlock()
+			return err
+		}
+	}
 	d.cancel()
 	d.op.Unlock()
 	select {
