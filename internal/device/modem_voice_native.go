@@ -33,13 +33,7 @@ func prepareNativeVoice(ctx context.Context, port *modemVoicePort) (*host.Resour
 	if err != nil {
 		return nil, errors.New("未找到 aplay，请安装 alsa-utils 后重试")
 	}
-	usbPath := port.worker.Config.USBPath
-	// 黑名单先行：DJI/百网 EC25 复合设备的 UAC 能枚举但一开就切 altsetting、
-	// 杀死同设备的 QMI，这种声卡宁可拒绝也不碰。
-	if modemUACUnusable(usbPath) {
-		return nil, errors.New("模组 USB 声卡不可用（打开会破坏 QMI），拒绝原生音频")
-	}
-	if _, err := audio.ResolveUSBPCM(usbPath); err != nil {
+	if _, err := port.resolveNativePCM(ctx); err != nil {
 		return nil, fmt.Errorf("未找到模组原生 USB 声卡，无法走原生音频: %w", err)
 	}
 	alsa := audio.ALSA{CaptureProgram: capture, PlaybackProgram: playback}
@@ -62,7 +56,7 @@ func prepareNativeVoice(ctx context.Context, port *modemVoicePort) (*host.Resour
 				},
 				Resolve: func() (audio.Endpoint, error) {
 					// 声卡号随枚举变化，每次现解析，与 QDC507 路径同一约定。
-					return audio.ResolveUSBPCM(usbPath)
+					return port.resolveNativePCM(port.pool.Context())
 				},
 				OpenPCM: func(ctx context.Context, endpoint audio.Endpoint) (media.PCM, error) {
 					return alsa.Open(ctx, endpoint)

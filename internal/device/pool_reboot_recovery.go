@@ -381,19 +381,10 @@ func (p *Pool) qmiRecoveryLiveCandidates(cfg config.DeviceConfig) ([]qmiRecovery
 	candidates := make([]qmiRecoveryLiveCandidate, 0, len(discovered))
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
 	for _, raw := range discovered {
-		dev := raw
-		imei := ""
-		if liveInfo, ok := liveWorkerIndex.Lookup(raw.ControlPath, raw.USBPath, raw.NetInterface); ok {
-			if liveInfo.IMEI != "" {
-				imei = liveInfo.IMEI
-			}
-			if containsPort(raw.ATPorts, liveInfo.ATPort) {
-				dev.ATPort = liveInfo.ATPort
-			}
+		if liveInfo, ok := liveWorkerIndex.Lookup(raw.ControlPath, raw.USBPath, raw.NetInterface); ok && containsPort(raw.ATPorts, liveInfo.ATPort) {
+			raw.ATPort = liveInfo.ATPort
 		}
-		if imei == "" {
-			dev, imei = enrichDiscoveredQMIDeviceATFirst(raw, 3*time.Second, true)
-		}
+		dev, imei := enrichDiscoveredQMIDeviceATFirst(raw, 3*time.Second, true)
 		logger.Debug("模组重启恢复：发现 QMI 候选",
 			"device", strings.TrimSpace(cfg.ID),
 			"imei", imei,

@@ -3,6 +3,7 @@ package modem
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 type imeiCacheItem struct {
 	IMEI string
 	TS   time.Time
+	Node os.FileInfo
 }
 
 // imeiCache 提供线程安全的内存 IMEI 映射缓存，避免频繁通过串口发起硬件查询
@@ -41,9 +43,10 @@ func ProbeIMEICachedContext(ctx context.Context, atPort string, timeout time.Dur
 		return imei, nil
 	}
 
+	node, _ := os.Stat(atPort)
 	imei, err := ProbeIMEIContext(ctx, atPort, timeout)
 	if err == nil && imei != "" {
-		storeCachedIMEI(atPort, imei)
+		storeCachedIMEI(atPort, imei, node)
 	}
 	return imei, err
 }
@@ -52,19 +55,24 @@ func loadCachedIMEI(atPort string) string {
 	imeiCache.mu.RLock()
 	defer imeiCache.mu.RUnlock()
 	item, ok := imeiCache.m[atPort]
-	if !ok || item.IMEI == "" || time.Since(item.TS) >= 10*time.Minute {
+	node, err := os.Stat(atPort)
+	if !ok || item.IMEI == "" || time.Since(item.TS) >= 10*time.Minute || err != nil || item.Node == nil || !os.SameFile(item.Node, node) || !item.Node.ModTime().Equal(node.ModTime()) {
 		return ""
 	}
 	return item.IMEI
 }
 
-func storeCachedIMEI(atPort, imei string) {
+func storeCachedIMEI(atPort, imei string, node os.FileInfo) {
+	current, err := os.Stat(atPort)
+	if err != nil || node == nil || !os.SameFile(node, current) || !node.ModTime().Equal(current.ModTime()) {
+		return
+	}
 	imeiCache.mu.Lock()
 	defer imeiCache.mu.Unlock()
 	if imeiCache.m == nil {
 		imeiCache.m = make(map[string]imeiCacheItem)
 	}
-	imeiCache.m[atPort] = imeiCacheItem{IMEI: imei, TS: time.Now()}
+	imeiCache.m[atPort] = imeiCacheItem{IMEI: imei, TS: time.Now(), Node: node}
 }
 
 // ProbeIMEI 通过打开底层 TTY 串口设备并执行 `AT+CGSN` 指令来实时探测模组的 IMEI 串号
