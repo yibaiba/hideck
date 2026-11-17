@@ -326,9 +326,11 @@ func buildFragmentSessionKey(identity fragmentSessionIdentity) string {
 	if bits != 16 {
 		bits = 8
 	}
-	return fmt.Sprintf("sender=%s|ref=%d|bits=%d|sc=%s|local=%s",
+	// Adjacent segments can arrive through different SMS centers. The center is
+	// transport metadata, not part of the concatenated message's identity.
+	return fmt.Sprintf("sender=%s|ref=%d|bits=%d|local=%s",
 		normalizeFragmentIdentity(identity.Sender), identity.Reference, bits,
-		normalizeFragmentIdentity(identity.ServiceCenter), normalizeFragmentIdentity(identity.Local))
+		normalizeFragmentIdentity(identity.Local))
 }
 
 func buildInterimFragmentSessionKey(identity fragmentSessionIdentity) string {

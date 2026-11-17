@@ -93,6 +93,40 @@ func TestSMSInboundFragmentsFollowSIMAcrossDeviceMove(t *testing.T) {
 	}
 }
 
+func TestSMSInboundFragmentScopeKeepsSIMsSeparate(t *testing.T) {
+	openTestDB(t)
+	owner := SMSInboundFragmentScope{
+		DeviceID: "wwan0", ICCID: "8944100000000000088", IMSI: "234150000000088",
+		SessionKey: "sender=testsender|ref=107|bits=8|local=+12025550100",
+	}
+	fragment := SMSInboundFragment{Reference: 107, ReferenceBits: 8, Total: 2, Sequence: 1,
+		Content: "synthetic fragment", ArrivedAt: time.Now()}
+	if _, err := SaveSMSInboundFragment(owner, fragment); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"iccid", "imsi"} {
+		t.Run(field, func(t *testing.T) {
+			other := owner
+			if field == "iccid" {
+				other.ICCID = "8944100000000000099"
+			} else {
+				other.IMSI = "234150000000099"
+			}
+			rows, err := LoadSMSInboundFragments(other)
+			if err != nil || len(rows) != 0 {
+				t.Fatalf("other SIM read %d fragments: %v", len(rows), err)
+			}
+			if err := DeleteSMSInboundFragments(other); err != nil {
+				t.Fatal(err)
+			}
+			rows, err = LoadSMSInboundFragments(owner)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("other SIM changed owner fragments: count=%d err=%v", len(rows), err)
+			}
+		})
+	}
+}
+
 func assertSMSInboundFragmentDuplicateAndCollision(
 	t *testing.T,
 	scope SMSInboundFragmentScope,
