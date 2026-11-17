@@ -97,7 +97,7 @@ func TestSMSInboundFragmentScopeKeepsSIMsSeparate(t *testing.T) {
 	openTestDB(t)
 	owner := SMSInboundFragmentScope{
 		DeviceID: "wwan0", ICCID: "8944100000000000088", IMSI: "234150000000088",
-		SessionKey: "sender=maya|ref=107|bits=8|local=+639000000000",
+		SessionKey: "sender=testsender|ref=107|bits=8|local=+12025550100",
 	}
 	fragment := SMSInboundFragment{Reference: 107, ReferenceBits: 8, Total: 2, Sequence: 1,
 		Content: "synthetic fragment", ArrivedAt: time.Now()}

@@ -18,7 +18,7 @@ func TestMixedSMSCenterFragmentsStillRejectCollisions(t *testing.T) {
 				t.Fatal(err)
 			}
 			conflict := first
-			conflict.serviceCenter = "+639000000002"
+			conflict.serviceCenter = "+12025550102"
 			if field == "total" {
 				conflict.total = 3
 			} else {
@@ -33,6 +33,7 @@ func TestMixedSMSCenterFragmentsStillRejectCollisions(t *testing.T) {
 	}
 }
 
+// All payloads and identities below are synthetic test fixtures.
 // A carrier may route adjacent segments through different SMS centers. They
 // must still produce one complete event, in either arrival order and storage mode.
 func TestMultipartSMSAssemblesAcrossSMSCenters(t *testing.T) {
@@ -49,7 +50,7 @@ func TestMultipartSMSAssemblesAcrossSMSCenters(t *testing.T) {
 				bus := NewEventBus()
 				sub := &captureIMSEventSubscriber{events: make(chan events.Event, 4)}
 				bus.Subscribe(sub)
-				cfg := &IMSConfig{DeviceID: "test-modem", IMSI: "515660000000001", ICCID: "test-card", EventBus: bus}
+				cfg := &IMSConfig{DeviceID: "test-modem", IMSI: "001010000000001", ICCID: "test-card", EventBus: bus}
 				if persistent {
 					cfg.DeliveryStore = newMemoryInboundFragmentStore()
 				}
@@ -58,12 +59,12 @@ func TestMultipartSMSAssemblesAcrossSMSCenters(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(service.StopCurrent)
-				first := persistedFragmentMessage(1, "Your code is 123456. ")
-				first.sender = "Maya"
-				first.serviceCenter = "+639000000001"
-				second := persistedFragmentMessage(2, "Never share.")
-				second.sender = "Maya"
-				second.serviceCenter = "+639000000002"
+				first := persistedFragmentMessage(1, "Simulated SMS part 1. ")
+				first.sender = "TestSender"
+				first.serviceCenter = "+12025550101"
+				second := persistedFragmentMessage(2, "Simulated SMS part 2.")
+				second.sender = "TestSender"
+				second.serviceCenter = "+12025550102"
 				parts := []inboundSMS{first, second}
 				if reversed {
 					parts = []inboundSMS{second, first}
@@ -79,13 +80,13 @@ func TestMultipartSMSAssemblesAcrossSMSCenters(t *testing.T) {
 				select {
 				case event := <-sub.events:
 					received, ok := event.(*events.EventSMSReceived)
-					if !ok || received.Content != "Your code is 123456. Never share." || received.Sender != "Maya" || received.Incomplete {
+					if !ok || received.Content != "Simulated SMS part 1. Simulated SMS part 2." || received.Sender != "TestSender" || received.Incomplete {
 						t.Fatalf("complete event=%#v", event)
 					}
 				case <-time.After(time.Second):
 					t.Fatal("both segments arrived but no complete SMS event")
 				}
-				second.serviceCenter = "+639000000003"
+				second.serviceCenter = "+12025550103"
 				if _, err := service.finalizeInboundSMSData(fragmentTestRequest("smsc-retry"), second, "SIP/2.0 200 OK\r\n\r\n"); err != nil {
 					t.Fatal(err)
 				}
@@ -99,7 +100,7 @@ func TestMixedSMSCenterFragmentsRecoverAfterRestart(t *testing.T) {
 	store := newMemoryInboundFragmentStore()
 	firstService, _ := newFragmentPersistenceService(t, store)
 	first := persistedFragmentMessage(1, "first ")
-	first.serviceCenter = "+639000000001"
+	first.serviceCenter = "+12025550101"
 	if _, err := firstService.finalizeInboundSMSData(fragmentTestRequest("before-restart"), first, "SIP/2.0 200 OK\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestMixedSMSCenterFragmentsRecoverAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := persistedFragmentMessage(2, "second")
-	second.serviceCenter = "+639000000002"
+	second.serviceCenter = "+12025550102"
 	if _, err := secondService.finalizeInboundSMSData(fragmentTestRequest("after-restart"), second, "SIP/2.0 200 OK\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestMixedSMSCenterFragmentsKeepRecipientAndReferenceIsolation(t *testing.T)
 			service, sub := newFragmentPersistenceService(t, newMemoryInboundFragmentStore())
 			first := persistedFragmentMessage(1, "first ")
 			second := persistedFragmentMessage(2, "other")
-			second.serviceCenter = "+639000000002"
+			second.serviceCenter = "+12025550102"
 			switch field {
 			case "sender":
 				second.sender = "Other"
@@ -169,7 +170,7 @@ func TestLegacySMSCenterFragmentGroupsStayIsolated(t *testing.T) {
 	}
 	assertNoIMSEvent(t, sub, "legacy seed")
 	second := persistedFragmentMessage(2, "new")
-	second.serviceCenter = "+639000000002"
+	second.serviceCenter = "+12025550102"
 	if _, err := restored.finalizeInboundSMSData(fragmentTestRequest("new-segment"), second, "SIP/2.0 200 OK\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
