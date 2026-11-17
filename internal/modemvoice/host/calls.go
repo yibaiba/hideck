@@ -86,7 +86,7 @@ func (c *Controller) AnswerIncomingCall(ctx context.Context, req voicehost.Answe
 		return voicehost.AnswerResult{}, err
 	}
 	if d.call != current {
-		return c.answerWaiting(ctx, d, current, req.SDP)
+		return c.answerWaiting(ctx, d, waitingAnswerRequest{current: current, sdp: req.SDP})
 	}
 	if current.snapshot.State == "connected" {
 		return voicehost.AnswerResult{}, errors.New("通话已接听或正在接听")

@@ -65,7 +65,13 @@ func (c *Controller) publishCallEnd(d *device, current *call, reason string) {
 	c.publish(notification{event: event})
 }
 
-func (c *Controller) answerWaiting(ctx context.Context, d *device, current *call, sdp string) (voicehost.AnswerResult, error) {
+type waitingAnswerRequest struct {
+	current *call
+	sdp     string
+}
+
+func (c *Controller) answerWaiting(ctx context.Context, d *device, request waitingAnswerRequest) (voicehost.AnswerResult, error) {
+	current, sdp := request.current, request.sdp
 	_, err := relay(sdp)
 	if err != nil {
 		return voicehost.AnswerResult{}, err

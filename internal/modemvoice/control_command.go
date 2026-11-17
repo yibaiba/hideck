@@ -8,27 +8,17 @@ import (
 // Select from a fresh CLCC snapshot; CHUP/ATA are only safe for a single call.
 func controlCommand(calls []Call, expected Call, answer bool) (string, error) {
 	calls = voiceControlCalls(calls)
-	var target *Call
-	for i := range calls {
-		if calls[i].Mode != 0 || calls[i].Multiparty {
-			return "", errors.New("modem voice: unsupported call composition")
-		}
-		if sameCall(expected, calls[i]) {
-			target = &calls[i]
-		}
-	}
-	if target == nil {
-		return "", ErrCallChanged
+	target, err := expectedControlCall(calls, expected)
+	if err != nil {
+		return "", err
 	}
 	if len(calls) == 1 {
-		if !answer {
-			return "AT+CHUP", nil
-		}
-		if target.Inbound && (target.State == Incoming || target.State == Waiting) {
-			return "ATA", nil
-		}
-		return "", errors.New("modem voice: call is not an incoming call")
+		return singleControlCommand(*target, answer)
 	}
+	return targetedControlCommand(calls, *target, answer)
+}
+
+func targetedControlCommand(calls []Call, target Call, answer bool) (string, error) {
 	if target.State == Active || target.State == Held {
 		if !answer {
 			return fmt.Sprintf("AT+CHLD=1%d", target.Index), nil
@@ -55,4 +45,30 @@ func singleWaitingCall(calls []Call) bool {
 		}
 	}
 	return waiting == 1
+}
+
+func expectedControlCall(calls []Call, expected Call) (*Call, error) {
+	var target *Call
+	for i := range calls {
+		if calls[i].Mode != 0 || calls[i].Multiparty {
+			return nil, errors.New("modem voice: unsupported call composition")
+		}
+		if sameCall(expected, calls[i]) {
+			target = &calls[i]
+		}
+	}
+	if target == nil {
+		return nil, ErrCallChanged
+	}
+	return target, nil
+}
+
+func singleControlCommand(target Call, answer bool) (string, error) {
+	if !answer {
+		return "AT+CHUP", nil
+	}
+	if target.Inbound && (target.State == Incoming || target.State == Waiting) {
+		return "ATA", nil
+	}
+	return "", errors.New("modem voice: call is not an incoming call")
 }
