@@ -547,7 +547,7 @@ func TestInboundFragmentTTLUsesLocalArrivalTime(t *testing.T) {
 		Reference: message.concatRef, RefBits: message.refBits, Total: message.total,
 	}
 	key := buildFragmentSessionKey(identity)
-	if key != "sender=giffgaff|ref=198|bits=8|sc=+447802000332|local=+447840844894" {
+	if key != "sender=giffgaff|ref=198|bits=8|local=+447840844894" {
 		t.Fatalf("fragment key=%q", key)
 	}
 	service.fragmentMu.Lock()
