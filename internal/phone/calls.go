@@ -58,6 +58,14 @@ func (s *Service) StartCall(request StartCallRequest) (CallView, error) {
 		hangupErr := s.gateway.HangupCall(s.ctx, call.view.DeviceID, call.view.CallID)
 		return CallView{}, errors.Join(bindErr, hangupErr)
 	}
+	// Modem backends already expose real RTP while dialing. Attach it now so
+	// ringback and carrier announcements reach the browser before answer.
+	if snapshot.ClientSDP != "" {
+		if attachErr := media.Attach(snapshot.ClientSDP); attachErr != nil {
+			err = errors.Join(err, attachErr)
+			s.failMediaAttachment(call.view.CallID, attachErr)
+		}
+	}
 	s.resumePendingMediaDrop(call.mediaID, pendingMediaDrop)
 	s.persist(call.record)
 	s.publish("call_started", call)
