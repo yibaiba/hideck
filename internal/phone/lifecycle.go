@@ -304,12 +304,18 @@ func (s *Service) finishCall(event voicehost.CallEvent) {
 	s.clearPendingMediaDropLocked(call.mediaID)
 	s.terminalSeen[event.CallID] = struct{}{}
 	mediaID := call.mediaID
+	// One browser owns one media session, and call waiting hands the same
+	// session to the second call. Ending the first call must not tear that
+	// session down while the other call still depends on it.
+	mediaShared := mediaID != "" && s.mediaUsedByOtherCallLocked(mediaID, call.view.CallID)
 	deviceID, peer, direction := call.view.DeviceID, call.view.Peer, call.view.Direction
 	s.mu.Unlock()
 	defer call.terminalOnce.Do(func() { close(call.terminalDone) })
 	s.stopMixedRecording(call)
-	if mediaID != "" {
+	if mediaID != "" && !mediaShared {
 		s.media.Remove(mediaID)
+	} else if mediaShared {
+		logger.Info("媒体仍被其他通话使用，保留会话", "media_id", mediaID, "ended_call", call.view.CallID)
 	}
 	s.mu.RLock()
 	record := call.record

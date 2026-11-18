@@ -134,28 +134,34 @@ func (s *Service) Answer(ctx context.Context, request ControlRequest) (CallView,
 }
 
 func (s *Service) Reject(request ControlRequest) error {
-	call, _, reservation, err := s.claimIncoming(request)
+	call, _, reservation, err := s.claimIncomingWithMedia(request, true)
 	if err != nil {
 		return err
 	}
 	defer s.releaseIncomingClaim(call)
 	defer s.releaseMediaReservation(reservation)
+	var pendingMediaDrop bool
 	s.mu.Lock()
 	if current := s.calls[request.CallID]; current != call || call.terminal {
 		s.mu.Unlock()
 		return errActiveCallNotFound
 	}
-	pendingMediaDrop, err := s.bindMediaLocked(request.CallID, reservation)
-	if err != nil {
-		s.mu.Unlock()
-		return err
+	// A reject with no media left is still a reject: the call is dropped at the
+	// modem, nothing needs an audio path.
+	if reservation != nil {
+		pendingMediaDrop, err = s.bindMediaLocked(request.CallID, reservation)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		call.owner, call.lease, call.mediaID = request.Owner, request.Lease, reservation.mediaID
+		call.view.MediaID = reservation.mediaID
 	}
 	call.userRejected = true
-	call.owner, call.lease, call.mediaID = request.Owner, request.Lease, reservation.mediaID
-	call.view.MediaID = reservation.mediaID
 	deviceID := call.view.DeviceID
+	mediaID := call.mediaID
 	s.mu.Unlock()
-	s.resumePendingMediaDrop(reservation.mediaID, pendingMediaDrop)
+	s.resumePendingMediaDrop(mediaID, pendingMediaDrop)
 	if err := s.gateway.RejectIncomingCall(voicehost.RejectRequest{
 		DeviceID: deviceID, CallID: request.CallID, StatusCode: 486,
 	}); err != nil {
@@ -257,9 +263,20 @@ func (s *Service) setCallHold(ctx context.Context, owner, callID, lease string, 
 }
 
 func (s *Service) claimIncoming(request ControlRequest) (*activeCall, *MediaSession, *mediaReservation, error) {
+	return s.claimIncomingWithMedia(request, false)
+}
+
+// claimIncomingWithMedia claims a pending inbound call. When allowMissingMedia
+// is set, a browser whose own media session was already released (the previous
+// call ended and took it with it) can still reject the waiting call: rejecting
+// needs no audio path, only the right to hang it up.
+func (s *Service) claimIncomingWithMedia(request ControlRequest, allowMissingMedia bool) (*activeCall, *MediaSession, *mediaReservation, error) {
 	media, reservation, err := s.reserveControlledMedia(request.Owner, request.MediaID, request.Lease)
 	if err != nil {
-		return nil, nil, nil, err
+		if !allowMissingMedia {
+			return nil, nil, nil, err
+		}
+		return s.claimIncomingWithoutMedia(request, err)
 	}
 	s.mu.Lock()
 	call := s.calls[request.CallID]
@@ -282,6 +299,30 @@ func (s *Service) claimIncoming(request ControlRequest) (*activeCall, *MediaSess
 	return call, media, reservation, nil
 }
 
+// claimIncomingWithoutMedia handles the reject path when the caller's media is
+// gone. It only applies to a call that no browser has bound yet; otherwise the
+// original lease error stands and nobody can silently take over a controlled
+// call.
+func (s *Service) claimIncomingWithoutMedia(request ControlRequest, cause error) (*activeCall, *MediaSession, *mediaReservation, error) {
+	s.mu.Lock()
+	call := s.calls[request.CallID]
+	if call == nil || call.terminal || call.view.Direction != "inbound" || call.controlPending {
+		s.mu.Unlock()
+		return nil, nil, nil, errors.New("phone: pending incoming call not found")
+	}
+	if call.lease != "" {
+		s.mu.Unlock()
+		return nil, nil, nil, cause
+	}
+	call.controlPending = true
+	if call.autoAnswerTimer != nil {
+		call.autoAnswerTimer.Stop()
+		call.autoAnswerTimer = nil
+	}
+	s.mu.Unlock()
+	return call, nil, nil, nil
+}
+
 func (s *Service) releaseIncomingClaim(call *activeCall) {
 	if call == nil {
 		return
@@ -301,7 +342,12 @@ func (s *Service) controlledCall(owner, callID, lease string) (*activeCall, erro
 		return nil, errActiveCallNotFound
 	}
 	if call.owner != owner || !secureEqual(call.lease, lease) {
-		return nil, errors.New("phone: control lease does not own this call")
+		// An unbound call (typically a ringing inbound call nobody has answered)
+		// has no lease to compare against. Requiring one turns "hang up the
+		// waiting call" into a permanent 403 and leaves the call stuck.
+		if !(call.lease == "" && call.owner == "") {
+			return nil, errors.New("phone: control lease does not own this call")
+		}
 	}
 	return call, nil
 }
