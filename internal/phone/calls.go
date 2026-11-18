@@ -108,11 +108,16 @@ func (s *Service) Answer(ctx context.Context, request ControlRequest) (CallView,
 	s.mu.RLock()
 	incomingSDP, deviceID, callID := call.incomingSDP, call.view.DeviceID, call.view.CallID
 	s.mu.RUnlock()
-	if err := media.Attach(incomingSDP); err != nil {
-		rejectErr := s.gateway.RejectIncomingCall(voicehost.RejectRequest{
-			DeviceID: deviceID, CallID: callID, StatusCode: 488,
-		})
-		return CallView{}, errors.Join(err, rejectErr)
+	// A modem-voice call never exchanges SDP: CLCC reports a line index, not an
+	// offer, so a waiting call has nothing to attach before it is answered. The
+	// backend opens the endpoint while answering and hands it back below.
+	if incomingSDP != "" {
+		if err := media.Attach(incomingSDP); err != nil {
+			rejectErr := s.gateway.RejectIncomingCall(voicehost.RejectRequest{
+				DeviceID: deviceID, CallID: callID, StatusCode: 488,
+			})
+			return CallView{}, errors.Join(err, rejectErr)
+		}
 	}
 	answer, err := s.gateway.AnswerIncomingCall(ctx, voicehost.AnswerRequest{
 		DeviceID: deviceID, CallID: callID, SDP: media.PlainSDP(),

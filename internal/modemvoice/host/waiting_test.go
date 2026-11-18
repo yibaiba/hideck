@@ -121,3 +121,32 @@ func testWaitingAnswer(t *testing.T, lostResponse bool) {
 		t.Fatal(err)
 	}
 }
+
+// An operator or the network can withdraw a waiting offer and let the call
+// alert again. Reporting it as "waiting" left the browser on a media recovery
+// panel that restores audio without ever answering the call.
+func TestWithdrawnWaitingCallIsReportedAsRinging(t *testing.T) {
+	c := New(Options{Listen: listenTest})
+	d := &device{id: "d", ctx: context.Background()}
+	waiting := &call{trackedID: "2", snapshot: voicehost.CallSnapshot{CallID: "modemvoice-2",
+		DeviceID: "d", Direction: "inbound", Peer: "10086", State: "waiting"}}
+	d.otherCalls = map[string]*call{"modemvoice-2": waiting}
+	events := make(chan voicehost.CallEvent, 4)
+	unsubscribe := c.SubscribeCallEvents(func(event voicehost.CallEvent) { events <- event })
+	defer unsubscribe()
+	c.applyOtherCall(d, modemvoice.Change{Call: modemvoice.TrackedCall{ID: "2",
+		Call: modemvoice.Call{Index: 2, Inbound: true, State: modemvoice.Incoming, Number: "10086"}}})
+	select {
+	case event := <-events:
+		if event.Type != "CallRinging" || event.State != "ringing" || event.CallID != "modemvoice-2" {
+			t.Fatalf("unexpected event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ringing transition was not published")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if waiting.snapshot.State != "ringing" {
+		t.Fatalf("state=%s", waiting.snapshot.State)
+	}
+}

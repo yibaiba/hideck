@@ -184,9 +184,16 @@ func (s *Service) dispatchCallEvent(event voicehost.CallEvent) {
 func (s *Service) updateRinging(callID string) {
 	s.mu.Lock()
 	call := s.calls[callID]
-	if call == nil || call.terminal || call.view.Status == StatusConnected || call.view.Status == StatusWaiting {
+	if call == nil || call.terminal || call.view.Status == StatusConnected {
 		s.mu.Unlock()
 		return
+	}
+	// A waiting offer can fall back to alerting when the network withdraws it,
+	// for example while the operator hangs another call up. It is answerable
+	// again, so it must leave "waiting" or the page keeps offering a media
+	// recovery that can never answer it.
+	if s.deviceWaiting[call.view.DeviceID] == call.view.CallID {
+		delete(s.deviceWaiting, call.view.DeviceID)
 	}
 	call.view.Status, call.record.Status = StatusRinging, StatusRinging
 	record := call.record
