@@ -114,3 +114,25 @@ func TestMuxMediaUpdatePropagatesNativeFailure(t *testing.T) {
 		t.Fatalf("legacy backend recovery changed: %v", err)
 	}
 }
+
+type attachingBackend struct {
+	*stubBackend
+	offer string
+}
+
+func (a *attachingBackend) AttachCallMedia(string, string, string) (string, error) {
+	return a.offer, nil
+}
+
+func TestMuxAttachesMediaThroughTheCallOwner(t *testing.T) {
+	modem := &attachingBackend{stubBackend: &stubBackend{name: "modem"}, offer: "v=0\r\n"}
+	mux := &Mux{IMS: &stubBackend{name: "ims"}, Modem: modem, IsModem: func(string) bool { return true }}
+	offer, err := mux.AttachCallMedia("d", "modemvoice-1", "")
+	if err != nil || offer != "v=0\r\n" {
+		t.Fatalf("offer=%q err=%v", offer, err)
+	}
+	// A backend without the capability keeps the phone service's own error.
+	if offer, err := mux.AttachCallMedia("d", "ims-1", ""); err != nil || offer != "" {
+		t.Fatalf("unexpected endpoint: %q %v", offer, err)
+	}
+}

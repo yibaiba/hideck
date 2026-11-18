@@ -40,6 +40,14 @@ type VoiceGateway interface {
 	StartCallCapture(string, string, string) error
 }
 
+// callMediaAttacher is implemented by backends that can build an audio path for
+// a call they already answered without the host having negotiated a media
+// endpoint first. sdp is the host-facing plain SDP of the browser media; the
+// returned offer is the backend's own endpoint to attach that media to.
+type callMediaAttacher interface {
+	AttachCallMedia(deviceID, callID, sdp string) (string, error)
+}
+
 type RecordStore interface {
 	Upsert(context.Context, CallRecord) error
 	List(context.Context, int) ([]CallRecord, error)
@@ -202,6 +210,14 @@ type activeCall struct {
 	terminalOnce    sync.Once
 	finalizedDone   chan struct{}
 	finalizedOnce   sync.Once
+}
+
+// unbound reports whether no browser has taken this call yet. A call the modem
+// answered on its own (a waiting call accepted while the previous one was hung
+// up) and a ringing inbound call both look like this: there is no owner to
+// protect, so a lease comparison would only lock the caller out.
+func (call *activeCall) unbound() bool {
+	return call != nil && call.owner == "" && call.lease == ""
 }
 
 func (call *activeCall) snapshot(lease string) CallView {

@@ -75,3 +75,20 @@ func (s *Service) bindMediaLocked(callID string, reservation *mediaReservation) 
 	s.mediaCalls[reservation.mediaID] = callID
 	return s.clearPendingMediaDropLocked(reservation.mediaID), nil
 }
+
+// mediaUsedByOtherCallLocked reports whether a live call still binds the given
+// browser media. Callers must hold s.mu.
+func (s *Service) mediaUsedByOtherCallLocked(mediaID, exceptCallID string) bool {
+	if mediaID == "" {
+		return false
+	}
+	for callID, call := range s.calls {
+		if callID == exceptCallID || call == nil || call.terminal {
+			continue
+		}
+		if call.mediaID == mediaID {
+			return true
+		}
+	}
+	return false
+}

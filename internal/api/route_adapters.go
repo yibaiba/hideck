@@ -143,6 +143,19 @@ func (s *Server) useDeviceVoWiFiPatch(c businessContext) {
 			mode = device.PhoneModeVoLTE
 			forceVoLTE = true
 		}
+		// Native VoLTE is driven over QMI (IMS clients, IMSA registration, VOICEDial).
+		// An AT-only device has none of that, so the enable pass is guaranteed to
+		// fail after this handler has already answered "VoLTE 已设置" and written
+		// the mode into the card policy. Refuse here so the caller gets a reason
+		// instead of a success message followed by a silent fall back.
+		if device.IsNativeVoLTEMode(mode) && !s.pool.HasQMIVoice(deviceID) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"status":  "error",
+				"message": "该设备没有 QMI 语音接口，无法启用 VoLTE，请改用模组直拨",
+				"device":  deviceID,
+			})
+			return
+		}
 		if device.PhoneModeCampsOnCell(mode) {
 			class, classifyErr := s.classifyLebaraUKForDevice(businessRequestContext(c), deviceID)
 			if rejectLebaraUKRFUnlock(c, class, classifyErr) {

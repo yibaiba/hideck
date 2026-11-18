@@ -7,7 +7,29 @@ import (
 	"strings"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/yibaiba/hideck/pkg/logger"
 )
+
+// qmiVoiceHost is implemented by hosts that carry voice over QMI. Backends
+// without QMI (an AT-only device) leave it unimplemented on purpose: there is
+// no QMI call state to reconcile, so a handoff must not try to query it.
+type qmiVoiceHost interface {
+	HasQMIVoice(deviceID string) bool
+}
+
+// qmiVoiceAvailable reports whether this device can be asked about QMI call
+// state at all. A session that failed to bring up IMS clients (the
+// "no QMI" path) is treated as unreconcilable for the same reason: its call
+// state was never owned by QMI, so querying it can only fail.
+func (c *Controller) qmiVoiceAvailable(deviceID string, s *session) bool {
+	if host, ok := c.host.(qmiVoiceHost); ok && !host.HasQMIVoice(deviceID) {
+		return false
+	}
+	if s != nil && s.status.QMIIMSUnavailable {
+		return false
+	}
+	return true
+}
 
 // DisableForHandoff confirms physical calls have ended before another backend
 // takes ownership. Control failure is not evidence that the modem hung up.
@@ -27,6 +49,17 @@ func (c *Controller) DisableForHandoff(ctx context.Context, deviceID string) err
 		s := c.sess[deviceID]
 		c.mu.Unlock()
 		if s == nil {
+			return nil
+		}
+		if !c.qmiVoiceAvailable(deviceID, s) {
+			// Nothing was ever dialled through QMI on this device, so there is
+			// no call to confirm. Drop the session instead of reporting a
+			// handoff failure that the operator cannot act on.
+			logger.Warn("无 QMI 语音能力，直接丢弃 VoLTE 会话", "device", deviceID)
+			c.mu.Lock()
+			s.gen++
+			delete(c.sess, deviceID)
+			c.mu.Unlock()
 			return nil
 		}
 		if err := c.endCallsForHandoff(ctx, deviceID); err != nil {
