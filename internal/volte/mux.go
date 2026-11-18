@@ -29,6 +29,12 @@ type callMediaUpdater interface {
 
 var _ callMediaUpdater = (*Controller)(nil)
 
+// callMediaAttacher opens an endpoint for a call that never negotiated one,
+// such as a waiting call the modem activated on its own.
+type callMediaAttacher interface {
+	AttachCallMedia(deviceID, callID, sdp string) (string, error)
+}
+
 type Mux struct {
 	BeforeDial func(context.Context, string, string) error
 	IMS        VoiceBackend
@@ -173,4 +179,14 @@ func (m *Mux) UpdateCallMedia(deviceID, callID, sdp string) error {
 	}
 	// Backends without explicit updates retain their existing media recovery path.
 	return nil
+}
+
+// AttachCallMedia delegates to the backend that owns the call. Backends that
+// cannot open an endpoint report an empty offer so the phone service keeps its
+// existing error instead of binding audio to nothing.
+func (m *Mux) AttachCallMedia(deviceID, callID, sdp string) (string, error) {
+	if backend, ok := m.pickCall(deviceID, callID).(callMediaAttacher); ok {
+		return backend.AttachCallMedia(deviceID, callID, sdp)
+	}
+	return "", nil
 }

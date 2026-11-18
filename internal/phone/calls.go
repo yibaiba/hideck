@@ -342,10 +342,10 @@ func (s *Service) controlledCall(owner, callID, lease string) (*activeCall, erro
 		return nil, errActiveCallNotFound
 	}
 	if call.owner != owner || !secureEqual(call.lease, lease) {
-		// An unbound call (typically a ringing inbound call nobody has answered)
-		// has no lease to compare against. Requiring one turns "hang up the
-		// waiting call" into a permanent 403 and leaves the call stuck.
-		if !(call.lease == "" && call.owner == "") {
+		// An unbound call (a ringing inbound call, or a waiting call the modem
+		// accepted on its own) has no lease to compare against. Requiring one
+		// turns "hang up the waiting call" into a permanent 403.
+		if !call.unbound() {
 			return nil, errors.New("phone: control lease does not own this call")
 		}
 	}
