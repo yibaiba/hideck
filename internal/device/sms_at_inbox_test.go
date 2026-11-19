@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -382,5 +383,83 @@ func TestATStoredSMSDuplicateRequiresReceiptIMSIForDeletion(t *testing.T) {
 	var count int64
 	if err := db.DB.Model(&db.SMS{}).Where("iccid = ?", identity.ICCID).Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("replay recreated removed history: count=%d, err=%v", count, err)
+	}
+}
+
+type storedSMSIdentityTestReader struct {
+	SMSIdentity
+	onIMSI func()
+}
+
+func (r storedSMSIdentityTestReader) QuerySIMInserted() (bool, error) { return true, nil }
+func (r storedSMSIdentityTestReader) QueryICCID() (string, error)     { return r.ICCID, nil }
+func (r storedSMSIdentityTestReader) QueryIMSI() (string, error) {
+	if r.onIMSI != nil {
+		r.onIMSI()
+	}
+	return r.IMSI, nil
+}
+
+func TestATStoredSMSLiveSwapSchedulesSIMConvergence(t *testing.T) {
+	p, w, be := newML307CIdentityWorker(t)
+	configureWorkerATSMS(w)
+	owner, err := w.storedSMSOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := SMSIdentity{ICCID: "card-new", IMSI: "imsi-new"}
+	be.liveICCID, be.liveIMSI = live.ICCID, live.IMSI
+	if err := owner.verifyLiveFrom(storedSMSIdentityTestReader{SMSIdentity: live}); !errors.Is(err, ErrSMSIdentityConflict) {
+		t.Fatalf("live swap returned %v", err)
+	}
+	if !w.SIMIdentityConvergenceMatches("", 0) || w.SIMIdentityGeneration() != owner.simGeneration+1 {
+		t.Fatal("live swap left old cached identity ready")
+	}
+	var messages []InboundSMS
+	if err := w.readStoredSMSInbox(owner, nil, &messages); !errors.Is(err, ErrSMSIdentityTransitioning) || len(messages) != 0 {
+		t.Fatalf("old owner could enter the inbox: messages=%+v, err=%v", messages, err)
+	}
+	p.simEventMu.Lock()
+	timer := p.simEventTimers[w.ID]
+	p.simEventMu.Unlock()
+	if timer == nil || !timer.Stop() {
+		t.Fatal("inbox mismatch did not schedule SIM status convergence")
+	}
+	p.confirmSIMRemovedForOwner(owner.workerLifecycleOwner, "test", timer)
+	current, err := w.storedSMSOwner()
+	if err != nil || current.SMSIdentity != live || current.simGeneration <= owner.simGeneration {
+		t.Fatalf("inbox did not converge to the live identity: %+v, %v", current.SMSIdentity, err)
+	}
+}
+
+func TestATStoredSMSStaleLiveReadLeavesNewerSIMReady(t *testing.T) {
+	p, w, _ := newML307CIdentityWorker(t)
+	configureWorkerATSMS(w)
+	owner, err := w.storedSMSOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := SMSIdentity{ICCID: "card-new", IMSI: "imsi-new"}
+	reader := storedSMSIdentityTestReader{
+		SMSIdentity: SMSIdentity{ICCID: "card-intermediate", IMSI: "imsi-intermediate"},
+		onIMSI: func() {
+			w.cacheMu.Lock()
+			defer w.cacheMu.Unlock()
+			setWorkerSMSIdentity(w, live)
+			w.state.Identity.Generation++
+		},
+	}
+	if err := owner.verifyLiveFrom(reader); !errors.Is(err, ErrSMSIdentityTransitioning) {
+		t.Fatalf("superseded read returned %v", err)
+	}
+	current, err := w.storedSMSOwner()
+	if err != nil || current.SMSIdentity != live || current.simGeneration != owner.simGeneration+1 {
+		t.Fatalf("superseded read altered the newer generation: %+v, %v", current.SMSIdentity, err)
+	}
+	p.simEventMu.Lock()
+	timer := p.simEventTimers[w.ID]
+	p.simEventMu.Unlock()
+	if timer != nil {
+		t.Fatal("superseded read scheduled a new SIM status check")
 	}
 }

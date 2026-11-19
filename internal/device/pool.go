@@ -685,19 +685,20 @@ func (w *Worker) refreshIdentityLiveWithPresence(ctx context.Context, reason str
 	}
 
 	strictSIMIdentity := w.atDeviceRules().strictSIMIdentity
+	var generation uint64
+	if strictSIMIdentity {
+		generation = w.SIMIdentityGeneration()
+	}
 	if strictSIMIdentity && !presenceConfirmed {
-		generation := w.SIMIdentityGeneration()
 		inserted, err := w.Backend.IsSimInserted(ctx)
 		if err != nil {
-			if errors.Is(err, modem.ErrSIMPINRequired) && (w.Pool == nil || !w.Pool.IsESIMSwitching(w.ID)) {
-				if w.markSIMPINRequired(generation) && w.Pool != nil {
-					owner := workerLifecycleOwner{worker: w, generation: w.generation}
-					w.Pool.handleSIMStatusEventForOwner(owner, reason, nil, "SIM PIN")
-				}
+			if errors.Is(err, modem.ErrSIMPINRequired) {
+				w.recordStrictSIMLock(generation, reason)
 			}
 			return liveSIMIdentityRefreshResult{}, err
 		}
 		if !inserted {
+			w.recordStrictSIMAbsence(generation, reason)
 			return liveSIMIdentityRefreshResult{}, errATNoSIM
 		}
 	}
@@ -708,6 +709,9 @@ func (w *Worker) refreshIdentityLiveWithPresence(ctx context.Context, reason str
 	if snapshotReader, supported := w.Backend.(liveSIMIdentitySnapshotReader); supported {
 		snapshot, err := snapshotReader.ReadSIMIdentityLive(ctx)
 		if err != nil {
+			if strictSIMIdentity {
+				w.degradeStrictSIMIdentity(generation, reason, err)
+			}
 			return liveSIMIdentityRefreshResult{}, err
 		}
 		iccid = strings.TrimSpace(snapshot.ICCID)
@@ -749,7 +753,9 @@ func (w *Worker) refreshIdentityLiveWithPresence(ctx context.Context, reason str
 		}
 	}
 	if strictSIMIdentity && (iccid == "" || imsi == "") {
-		return liveSIMIdentityRefreshResult{}, errors.New("live_identity_incomplete")
+		err := errors.New("live_identity_incomplete")
+		w.degradeStrictSIMIdentity(generation, reason, err)
+		return liveSIMIdentityRefreshResult{}, err
 	}
 	_, snapshotSupported := w.Backend.(liveSIMIdentitySnapshotReader)
 	if !snapshotSupported && (simMetadata == nil ||
@@ -813,6 +819,10 @@ func (w *Worker) refreshIdentityLiveWithPresence(ctx context.Context, reason str
 
 	now := time.Now()
 	w.cacheMu.Lock()
+	if strictSIMIdentity && w.state.Identity.Generation != generation {
+		w.cacheMu.Unlock()
+		return liveSIMIdentityRefreshResult{}, ErrSMSIdentityTransitioning
+	}
 	identityIncomplete := (iccid == "") != (imsi == "")
 	hasCachedIdentity := strings.TrimSpace(w.state.Identity.ICCID) != "" ||
 		strings.TrimSpace(w.state.Identity.IMSI) != ""
@@ -841,8 +851,10 @@ func (w *Worker) refreshIdentityLiveWithPresence(ctx context.Context, reason str
 		(imsi != "" && imsi != strings.TrimSpace(w.state.Identity.IMSI))
 	// Physical swaps do not necessarily pass through the eSIM transition hook.
 	// Retain a generation change even if the original ICCID later returns.
-	if iccid != "" && w.state.Identity.ICCID != "" &&
-		normalizeSIMIdentityForCompare(iccid) != normalizeSIMIdentityForCompare(w.state.Identity.ICCID) {
+	iccidChanged := iccid != "" && w.state.Identity.ICCID != "" &&
+		normalizeSIMIdentityForCompare(iccid) != normalizeSIMIdentityForCompare(w.state.Identity.ICCID)
+	if iccidChanged || (strictSIMIdentity && imsi != "" && w.state.Identity.IMSI != "" &&
+		imsi != strings.TrimSpace(w.state.Identity.IMSI)) {
 		w.state.Identity.Generation++
 	}
 	if iccid != "" {
@@ -1259,7 +1271,7 @@ func (p *Pool) confirmSIMStatusForOwner(owner workerLifecycleOwner, source strin
 		p.finishConfirmedSIMInsertion(owner, source, result)
 		return
 	}
-	p.handleConfirmedSIMRemoval(owner, source, baseCtx)
+	p.handleConfirmedSIMRemoval(owner, source, baseCtx, generation)
 	transition.Unlock()
 }
 
@@ -1323,7 +1335,7 @@ func (p *Pool) finishConfirmedSIMInsertion(owner workerLifecycleOwner, source st
 }
 
 // Caller holds the device policy transition lock.
-func (p *Pool) handleConfirmedSIMRemoval(owner workerLifecycleOwner, source string, baseCtx context.Context) {
+func (p *Pool) handleConfirmedSIMRemoval(owner workerLifecycleOwner, source string, baseCtx context.Context, generation uint64) {
 	if !p.workerLifecycleOwnerCurrent(owner) {
 		return
 	}
@@ -1332,7 +1344,9 @@ func (p *Pool) handleConfirmedSIMRemoval(owner workerLifecycleOwner, source stri
 	refreshCtx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
 	_ = w.RefreshRuntime(refreshCtx, "sim_removed")
 	cancel()
-	w.markSIMRemoved("sim_removed")
+	if !w.markSIMRemoved("sim_removed", generation) {
+		return
+	}
 	p.detachPersistedSIMBinding(w)
 	p.broadcastVoWiFiStateChange(deviceID)
 	p.clearDesiredVoWiFiRecoverState(deviceID)

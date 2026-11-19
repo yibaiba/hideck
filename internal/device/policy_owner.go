@@ -60,6 +60,10 @@ func (p *Pool) validatePolicyOwner(owner policyOwner, transition *policyTransiti
 	if strings.TrimSpace(identity.ICCID) != owner.iccid || identity.Generation != owner.identityGeneration {
 		return errPolicyOwnerChanged
 	}
+	if w.atDeviceRules().strictSIMIdentity && (!identity.Ready || identity.Phase != simIdentityPhaseReady ||
+		strings.TrimSpace(identity.ICCID) == "" || strings.TrimSpace(identity.IMSI) == "") {
+		return errPolicyOwnerChanged
+	}
 	p.switchMu.Lock()
 	switching, snapshot := p.switchingDevices[w.ID], p.switchContexts[w.ID]
 	p.switchMu.Unlock()

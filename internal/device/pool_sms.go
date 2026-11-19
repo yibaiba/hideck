@@ -410,10 +410,17 @@ func (w *Worker) SendSMSWithOptions(phone, message string, opts smscodec.SubmitO
 	}
 	defer release()
 	check := w.Pool.outboundOwnerCheck(w)
+	var intended SMSIdentity
+	if w.atDeviceRules().strictSIMIdentity {
+		intended, err = w.strictSMSSendIdentity()
+		if err != nil {
+			return err
+		}
+	}
 	if err := w.Pool.authorizeSMS(context.Background(), outboundSMSRequest{Worker: w, To: phone, Text: message, Options: opts}); err != nil {
 		return err
 	}
-	if err := check(); err != nil {
+	if err := w.confirmCSSMSIdentity(context.Background(), intended, check); err != nil {
 		return err
 	}
 	return w.sendSMSWithOptions(phone, message, opts)

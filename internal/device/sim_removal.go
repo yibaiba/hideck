@@ -11,15 +11,17 @@ import (
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
-func (w *Worker) markSIMRemoved(reason string) {
-	if w == nil {
-		return
-	}
+func (w *Worker) markSIMRemoved(reason string, generation uint64) bool {
 	now := time.Now()
 	w.cacheMu.Lock()
+	defer w.cacheMu.Unlock()
+	strict := w.atDeviceRules().strictSIMIdentity
+	if strict && w.state.Identity.Generation != generation {
+		return false
+	}
 	hadIdentity := strings.TrimSpace(w.state.Identity.ICCID) != "" ||
 		strings.TrimSpace(w.state.Identity.IMSI) != "" || w.state.Identity.Ready
-	if hadIdentity {
+	if hadIdentity || (strict && w.state.Identity.LastError != "sim_removed") {
 		w.state.Identity.Generation++
 	}
 	w.state.Identity.ICCID = ""
@@ -35,7 +37,43 @@ func (w *Worker) markSIMRemoved(reason string) {
 	w.state.Meta.IdentityUpdatedAt = now
 	w.state.Meta.RuntimeUpdatedAt = now
 	w.state.Meta.UpdatedAt = now
-	w.cacheMu.Unlock()
+	return true
+}
+
+func (w *Worker) scheduleSIMStatusCheck(source string, inserted *bool, state string) {
+	if w.Pool == nil {
+		return
+	}
+	owner := workerLifecycleOwner{worker: w, generation: w.generation}
+	w.Pool.handleSIMStatusEventForOwner(owner, source, inserted, state)
+}
+
+func (w *Worker) recordStrictSIMAbsence(generation uint64, source string) {
+	w.degradeStrictSIMIdentity(generation, source, errATNoSIM)
+	inserted := false
+	w.scheduleSIMStatusCheck(source, &inserted, "")
+}
+
+func (w *Worker) recordStrictSIMLock(generation uint64, source string) {
+	if w.Pool != nil && w.Pool.IsESIMSwitching(w.ID) {
+		return
+	}
+	if w.markSIMPINRequired(generation) {
+		w.scheduleSIMStatusCheck(source, nil, "SIM PIN")
+	}
+}
+
+func (w *Worker) degradeStrictSIMIdentity(generation uint64, reason string, err error) bool {
+	now := time.Now()
+	w.cacheMu.Lock()
+	defer w.cacheMu.Unlock()
+	if w.state.Identity.Generation != generation || !w.state.Identity.Ready ||
+		w.state.Identity.Phase == simIdentityPhaseTransitioning {
+		return false
+	}
+	w.markSIMIdentityDegradedLocked(reason, err, now)
+	w.state.Identity.Generation++
+	return true
 }
 
 func (w *Worker) markSIMPINRequired(generation uint64) bool {

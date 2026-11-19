@@ -78,6 +78,7 @@ func TestML307CPhonePolicyKeepsExplicitRadioSettings(t *testing.T) {
 			t.Cleanup(p.cancel)
 			w := p.GetWorker("ml307c")
 			w.Modem = newML307CPhoneTestModem(t, w.ID)
+			w.state.Identity.Phase = simIdentityPhaseReady
 			radio := &esimSwitchRestoreBackendStub{mode: backend.BackendAT, getMode: backend.ModeOnline}
 			w.Backend = radio
 			pol := cardpolicy.Policy{
@@ -124,6 +125,7 @@ func TestML307COneNZWiFiPolicyStillStarts(t *testing.T) {
 	t.Cleanup(p.cancel)
 	w := p.GetWorker("ml307c")
 	w.Modem = newML307CPhoneTestModem(t, w.ID)
+	w.state.Identity.Phase = simIdentityPhaseReady
 	p.SetPolicyResolver(&stubPolicyResolver{pol: cardpolicy.Policy{
 		ICCID: w.CurrentICCID(), PhoneMode: PhoneModeWiFi, VoWiFiEnabled: true,
 	}})
@@ -156,6 +158,7 @@ func TestML307CLebaraSavedVoLTERecoversEffectiveWiFi(t *testing.T) {
 	t.Cleanup(p.cancel)
 	w := p.GetWorker("ml307c")
 	w.Modem = newML307CPhoneTestModem(t, w.ID)
+	w.state.Identity.Phase = simIdentityPhaseReady
 	pol := cardpolicy.Policy{
 		ICCID: w.CurrentICCID(), PhoneMode: PhoneModeVoLTE, VoWiFiEnabled: true,
 	}

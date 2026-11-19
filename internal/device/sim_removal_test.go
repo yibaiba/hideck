@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -178,14 +179,160 @@ func TestConfirmedSIMRemovalCancelsStartingVoWiFi(t *testing.T) {
 type ml307cSIMBackendStub struct {
 	workerStartupIdentityBackendStub
 	simErr     error
+	simAbsent  bool
 	onSIMQuery func()
+	onICCID    func()
+	sends      int
 }
 
 func (s *ml307cSIMBackendStub) IsSimInserted(context.Context) (bool, error) {
 	if s.onSIMQuery != nil {
 		s.onSIMQuery()
 	}
-	return s.simErr == nil, s.simErr
+	return !s.simAbsent && s.simErr == nil, s.simErr
+}
+
+func (s *ml307cSIMBackendStub) GetICCIDLive(context.Context) (string, error) {
+	if s.onICCID != nil {
+		s.onICCID()
+	}
+	return s.liveICCID, nil
+}
+
+func (s *ml307cSIMBackendStub) SendSMS(context.Context, string, string) error {
+	s.sends++
+	return nil
+}
+
+func newML307CIdentityWorker(t *testing.T) (*Pool, *Worker, *ml307cSIMBackendStub) {
+	t.Helper()
+	p := NewPool(&config.Config{})
+	t.Cleanup(func() { _ = p.Shutdown() })
+	cfg := config.DeviceConfig{ID: "c", DeviceBackend: "at", ATPort: "/dev/ttyUSB8"}
+	m, err := modem.NewWithATProfile(cfg, modem.ATProfileML307C)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &ml307cSIMBackendStub{}
+	w := &Worker{ID: cfg.ID, Pool: p, Config: cfg, Modem: m, Backend: be}
+	setWorkerSMSIdentity(w, SMSIdentity{ICCID: "card-old", IMSI: "imsi-old"})
+	p.AttachWorkerForTest(w)
+	t.Cleanup(func() { p.cancelWorkerLifecycleTimers(w.ID) })
+	return p, w, be
+}
+
+func TestML307CIncompleteReadyIdentityBlocksOldCardAndRetries(t *testing.T) {
+	p, w, be := newML307CIdentityWorker(t)
+	before := w.SIMIdentityGeneration()
+	be.liveICCID = "card-new"
+	p.confirmSIMRemovedAndStopVoWiFi(w.ID, "test")
+	if !w.SIMIdentityConvergenceMatches("", 0) || w.SIMIdentityGeneration() <= before {
+		t.Fatal("incomplete live identity left the previous SIM ready")
+	}
+	p.SetPolicyResolver(&stubPolicyResolver{pol: cardpolicy.Policy{ICCID: "card-old"}})
+	if result := p.resolveAndApplyPolicy(w, "test"); result.Applied || !errors.Is(result.Err, errPolicyOwnerChanged) {
+		t.Fatalf("unready SIM applied cached policy: %+v", result)
+	}
+	p.SetPolicyResolver(nil)
+	be.liveIMSI = "imsi-new"
+	owner := p.captureWorkerLifecycleOwner(w.ID)
+	ready := true
+	p.handleSIMStatusEventForOwner(owner, "test", &ready, "")
+	p.simEventMu.Lock()
+	timer := p.simEventTimers[w.ID]
+	p.simEventMu.Unlock()
+	if timer == nil || !timer.Stop() {
+		t.Fatal("subsequent READY did not schedule an identity retry")
+	}
+	p.confirmSIMRemovedForOwner(owner, "test", timer)
+	if w.SIMIdentityConvergenceMatches("", 0) || w.CurrentICCID() != "card-new" || w.GetCachedIMSI() != "imsi-new" {
+		t.Fatal("subsequent READY did not settle on the new identity")
+	}
+	before = w.SIMIdentityGeneration()
+	be.liveIMSI = "imsi-rotated"
+	if err := w.RefreshIdentityLive(context.Background(), "test"); err != nil || w.SIMIdentityGeneration() <= before {
+		t.Fatalf("changed IMSI on a stable ICCID did not retire the old generation: %v", err)
+	}
+
+	w.BeginSIMIdentityTransition("target", "test")
+	be.liveICCID, be.liveIMSI = "", ""
+	if err := w.RefreshIdentityLive(context.Background(), "test"); err == nil {
+		t.Fatal("incomplete identity unexpectedly succeeded during the switch")
+	}
+	w.cacheMu.RLock()
+	phase, target := w.state.Identity.Phase, w.state.Identity.TargetICCID
+	w.cacheMu.RUnlock()
+	if phase != simIdentityPhaseTransitioning || target != "target" {
+		t.Fatalf("incomplete read interrupted eSIM identity transition: phase=%s target=%s", phase, target)
+	}
+}
+
+func TestML307CAbsentIdentityBlocksOldCardBeforeDebouncedCleanup(t *testing.T) {
+	p, w, be := newML307CIdentityWorker(t)
+	be.simAbsent = true
+	if err := w.RefreshIdentityLive(context.Background(), "test"); !errors.Is(err, errATNoSIM) {
+		t.Fatalf("absent SIM returned %v", err)
+	}
+	if !w.SIMIdentityConvergenceMatches("", 0) || w.CurrentICCID() != "card-old" {
+		t.Fatal("absent SIM should immediately become unready and keep its binding until confirmation")
+	}
+	p.simEventMu.Lock()
+	timer := p.simEventTimers[w.ID]
+	p.simEventMu.Unlock()
+	if timer == nil || !timer.Stop() {
+		t.Fatal("absent SIM did not schedule debounced cleanup")
+	}
+	p.confirmSIMRemovedForOwner(p.captureWorkerLifecycleOwner(w.ID), "test", timer)
+	if w.CurrentICCID() != "" {
+		t.Fatal("confirmed absence retained the previous identity")
+	}
+}
+
+func TestML307CAbsentConfirmationDoesNotClearNewerSIM(t *testing.T) {
+	p, w, be := newML307CIdentityWorker(t)
+	be.simAbsent = true
+	be.onSIMQuery = func() {
+		w.cacheMu.Lock()
+		defer w.cacheMu.Unlock()
+		setWorkerSMSIdentity(w, SMSIdentity{ICCID: "card-new", IMSI: "imsi-new"})
+		w.state.Identity.Generation++
+	}
+	p.confirmSIMRemovedAndStopVoWiFi(w.ID, "test")
+	if w.CurrentICCID() != "card-new" || w.SIMIdentityConvergenceMatches("", 0) {
+		t.Fatal("stale absence cleared the live SIM generation")
+	}
+}
+
+func TestML307CSlowIdentityCannotReviveOlderSIMGeneration(t *testing.T) {
+	for _, before := range []bool{false, true} {
+		name := "probe_presence"
+		if before {
+			name = "confirmed_presence"
+		}
+		t.Run(name, func(t *testing.T) {
+			_, w, be := newML307CIdentityWorker(t)
+			be.liveICCID, be.liveIMSI = "card-old", "imsi-old"
+			started, finish := make(chan struct{}), make(chan struct{})
+			be.onICCID = func() {
+				close(started)
+				<-finish
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := w.refreshIdentityLiveWithPresence(context.Background(), "old-read", before)
+				done <- err
+			}()
+			<-started
+			generation := w.BeginSIMIdentityTransition("target", "test")
+			close(finish)
+			if err := <-done; !errors.Is(err, ErrSMSIdentityTransitioning) {
+				t.Fatalf("superseded identity read returned %v", err)
+			}
+			if !w.SIMIdentityConvergenceMatches("target", generation) || currentSIMOwnership(w).iccid != "" {
+				t.Fatal("superseded read reset the current identity transition")
+			}
+		})
+	}
 }
 
 func confirmScheduledSIMPIN(t *testing.T, p *Pool, owner workerLifecycleOwner) {

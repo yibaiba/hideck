@@ -146,7 +146,7 @@ func (p *Pool) SendRoutedSMS(
 				return err
 			}
 			defer release()
-			if err := checkOwner(); err != nil {
+			if err := worker.confirmCSSMSIdentity(ctx, identity, checkOwner); err != nil {
 				return err
 			}
 			if sendCSHook != nil {

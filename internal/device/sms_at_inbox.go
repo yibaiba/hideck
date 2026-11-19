@@ -54,30 +54,49 @@ func (owner storedSMSOwner) check() error {
 	return nil
 }
 
+type storedSMSIdentityReader interface {
+	QuerySIMInserted() (bool, error)
+	QueryICCID() (string, error)
+	QueryIMSI() (string, error)
+}
+
 func (owner storedSMSOwner) verifyLive() error {
+	return owner.verifyLiveFrom(owner.worker.Modem)
+}
+
+func (owner storedSMSOwner) verifyLiveFrom(reader storedSMSIdentityReader) error {
 	if err := owner.check(); err != nil {
 		return err
 	}
-	w := owner.worker
-	inserted, err := w.Modem.QuerySIMInserted()
+	inserted, err := reader.QuerySIMInserted()
 	if err != nil {
 		return err
 	}
 	if !inserted {
 		return ErrSMSIdentityUnknown
 	}
-	iccid, err := w.Modem.QueryICCID()
+	iccid, err := reader.QueryICCID()
 	if err != nil {
 		return err
 	}
-	imsi, err := w.Modem.QueryIMSI()
+	imsi, err := reader.QueryIMSI()
 	if err != nil {
 		return err
 	}
-	if normalizeSMSIdentity(SMSIdentity{ICCID: iccid, IMSI: imsi}) != owner.SMSIdentity {
-		return ErrSMSIdentityConflict
+	if err := owner.check(); err != nil {
+		return err
 	}
-	return owner.check()
+	live := normalizeSMSIdentity(SMSIdentity{ICCID: iccid, IMSI: imsi})
+	switch {
+	case live.ICCID == "" || live.IMSI == "":
+		err = ErrSMSIdentityUnknown
+	case live != owner.SMSIdentity:
+		err = ErrSMSIdentityConflict
+	}
+	if err != nil && owner.worker.atDeviceRules().strictSIMIdentity {
+		return owner.worker.rejectLiveCSSMSIdentity(owner.simGeneration, "at_sms_inbox_identity", err)
+	}
+	return err
 }
 
 // A CMTI only proves provenance within the current worker and SIM generation.
