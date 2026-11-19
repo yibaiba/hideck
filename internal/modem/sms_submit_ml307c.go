@@ -16,8 +16,6 @@ const (
 	ml307cSMSResultTimeout = 60 * time.Second
 )
 
-var errML307CSMSResultUnknown = errors.New("短信已提交，结果未知，请勿自动重发")
-
 func (m *Manager) sendML307CSMSPart(req commandRequest) error {
 	select {
 	case <-m.stop:
@@ -62,7 +60,9 @@ func (m *Manager) handleML307CSMS(req commandRequest) {
 		if cms >= 0 {
 			fields = append(fields, "cms_code", cms)
 		}
-		if err != nil {
+		if errors.Is(err, ErrSMSSubmitUnknown) {
+			logger.Warn("ML307C 短信提交结果未知", append(fields, "err", err)...)
+		} else if err != nil {
 			logger.Warn("ML307C 短信提交失败", append(fields, "err", err)...)
 		} else {
 			logger.Info("ML307C 短信提交已确认", fields...)
@@ -98,7 +98,7 @@ func (m *Manager) handleML307CSMS(req commandRequest) {
 		select {
 		case <-timer.C:
 			if submitted {
-				fail(errML307CSMSResultUnknown, true, false)
+				fail(ErrSMSSubmitUnknown, true, false)
 			} else {
 				fail(errors.New("等待 CMGS 短信输入提示超时"), true, true)
 			}
@@ -106,7 +106,7 @@ func (m *Manager) handleML307CSMS(req commandRequest) {
 		case <-m.stop:
 			err := errors.New("AT 管理器停止")
 			if submitted {
-				err = errML307CSMSResultUnknown
+				err = ErrSMSSubmitUnknown
 			}
 			fail(err, false, false)
 			return
@@ -114,7 +114,7 @@ func (m *Manager) handleML307CSMS(req commandRequest) {
 			if message.Err != nil {
 				err := message.Err
 				if submitted {
-					err = errML307CSMSResultUnknown
+					err = ErrSMSSubmitUnknown
 				}
 				fail(err, true, false)
 				return
@@ -133,7 +133,7 @@ func (m *Manager) handleML307CSMS(req commandRequest) {
 					return
 				}
 				if err != nil {
-					fail(errML307CSMSResultUnknown, true, false)
+					fail(ErrSMSSubmitUnknown, true, false)
 					return
 				}
 				submitted = true
@@ -150,7 +150,7 @@ func (m *Manager) handleML307CSMS(req commandRequest) {
 					return
 				}
 				if mr < 0 {
-					fail(errML307CSMSResultUnknown, false, false)
+					fail(ErrSMSSubmitUnknown, false, false)
 					return
 				}
 				report(nil)

@@ -1,10 +1,12 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/yibaiba/hideck/internal/db"
 	"github.com/yibaiba/hideck/internal/device"
 	"github.com/yibaiba/hideck/pkg/smscodec"
 
@@ -64,6 +66,33 @@ func (s *Server) useSendSMS(c businessContext) {
 	}
 	messageID = strings.TrimSpace(routed.Outcome.MessageID)
 	if err != nil {
+		if routed.Via == device.RoutedSMSViaCS &&
+			(deliveryState == db.SMSDeliveryStateUnknown || deliveryState == db.SMSDeliveryStatePartialAck) {
+			if persistErr := saveRoutedSMSRecord(routedSMSRecord{
+				Identity: routed.Identity, Sender: worker.ID, Recipient: req.Phone,
+				Content: req.Message, Status: db.SMSStatusSubmitUnconfirmed,
+			}); persistErr != nil {
+				logger.Warn("短信提交状态未确认记录入库失败", "device", deviceID, "err", persistErr)
+			}
+			message := "短信发送结果未知，请勿重发整条"
+			if deliveryState == db.SMSDeliveryStatePartialAck {
+				message = fmt.Sprintf("短信仅确认提交 %d/%d 段，请勿重发整条", routed.PartsConfirmed, partsTotal)
+			} else if routed.PartsConfirmed > 0 {
+				message = fmt.Sprintf("短信已确认提交 %d/%d 段，整体结果未知，请勿重发整条", routed.PartsConfirmed, partsTotal)
+			}
+			c.JSON(http.StatusAccepted, gin.H{
+				"status":          "uncertain",
+				"message":         message,
+				"device":          deviceID,
+				"phone":           req.Phone,
+				"destination":     routed.Destination,
+				"message_id":      messageID,
+				"parts_total":     partsTotal,
+				"parts_confirmed": routed.PartsConfirmed,
+				"delivery_state":  deliveryState,
+			})
+			return
+		}
 		if routed.Via == device.RoutedSMSViaVoWiFi || routed.FellBackToCS {
 			deliveryState = "failed"
 			recordErr := device.RecordVoWiFiSMSSendFailure(s.pool, device.VoWiFiSMSSendFailure{

@@ -646,8 +646,12 @@ async function handleSendModal() {
       message: sendForm.value.message
     })
     if (!result.ok) throw new Error(result.error.message || '发送失败')
-    const parts = result.data.partsTotal
-    ElMessage.success(`短信已提交${parts > 1 ? `（${parts}段）` : ''}`)
+    if (result.data.submissionWarning) {
+      ElMessage.warning(result.data.submissionWarning)
+    } else {
+      const parts = result.data.partsTotal
+      ElMessage.success(`短信已提交${parts > 1 ? `（${parts}段）` : ''}`)
+    }
     showSendModal.value = false
     setTimeout(async () => {
       await fetchMessagesAndThread()
@@ -673,6 +677,9 @@ async function sendToCurrentThread() {
   try {
     const result = await smsStore.send({ iccid: t.iccid, phone: t.peer, message: text })
     if (!result.ok) throw new Error(result.error.message || '发送失败')
+    if (result.data.submissionWarning) {
+      ElMessage.warning(result.data.submissionWarning)
+    }
     composer.value = ''
     if (viewingTarget.value && selectedThreadKey.value === t.key) {
       showLatestMessages()

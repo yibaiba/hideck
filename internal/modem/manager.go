@@ -2136,6 +2136,25 @@ func (m *Manager) DeleteSMS(index uint32) error {
 	return err
 }
 
+// ErrSMSSubmitUnknown means the payload was written but acceptance is unconfirmed.
+var ErrSMSSubmitUnknown = errors.New("短信发送结果未知，请勿自动重发")
+
+// SMSSubmitError retains the segment counts when submission stopped early.
+type SMSSubmitError struct {
+	PartsTotal     int
+	PartsConfirmed int
+	Err            error
+}
+
+func (e *SMSSubmitError) Error() string {
+	if e.PartsConfirmed == 0 {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("短信已确认提交 %d/%d 段: %v", e.PartsConfirmed, e.PartsTotal, e.Err)
+}
+
+func (e *SMSSubmitError) Unwrap() error { return e.Err }
+
 // SendSMS 使用 PDU 模式发送短信
 func (m *Manager) SendSMS(phone, message string) error {
 	return m.SendSMSWithOptions(phone, message, smscodec.SubmitOptions{})
@@ -2182,7 +2201,11 @@ func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.Submit
 			req.timeout = ml307cSMSPromptTimeout
 			req.smsFinalTimeout = ml307cSMSResultTimeout
 			if err := m.sendML307CSMSPart(req); err != nil {
-				return fmt.Errorf("发送分片 %d: %w", i+1, err)
+				partErr := fmt.Errorf("发送分片 %d: %w", i+1, err)
+				if i > 0 || errors.Is(err, ErrSMSSubmitUnknown) {
+					return &SMSSubmitError{PartsTotal: len(pduHexList), PartsConfirmed: i, Err: partErr}
+				}
+				return partErr
 			}
 		} else {
 			logger.Debug(fmt.Sprintf("[%s] PDU 编码完成 (分片 %d/%d)", m.cfg.ID, i+1, len(pduHexList)), "pdu", pduHex, "tpdu_len", tpduLen)

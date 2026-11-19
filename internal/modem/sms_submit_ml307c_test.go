@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yibaiba/hideck/pkg/smscodec"
 )
 
 type smsSubmitWirePort struct {
@@ -42,7 +44,7 @@ func TestML307CSMSSubmitWire(t *testing.T) {
 		wantErr      error
 	}{
 		{name: "ML307C success", profile: ATProfileML307C},
-		{name: "ML307C result unknown", profile: ATProfileML307C, missingFinal: true, wantErr: errML307CSMSResultUnknown},
+		{name: "ML307C result unknown", profile: ATProfileML307C, missingFinal: true, wantErr: ErrSMSSubmitUnknown},
 		{name: "ML307C short payload write", profile: ATProfileML307C, short: true, wantErr: io.ErrShortWrite},
 		{name: "legacy CRLF", profile: ATProfileDefault},
 	}
@@ -136,6 +138,49 @@ func TestML307CSMSSubmitWire(t *testing.T) {
 			}
 			if !slices.Equal(writes, wantWire) {
 				t.Fatalf("serial writes = %q, want %q", writes, wantWire)
+			}
+		})
+	}
+}
+
+func TestML307CSMSSubmitPreservesConfirmedParts(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "unknown submit", err: ErrSMSSubmitUnknown},
+		{name: "explicit rejection", err: errors.New("modem rejected submit")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newRunningTestManager(t)
+			m.atProfile = ATProfileML307C
+			commands := make(chan []string, 1)
+			go func() {
+				var seen []string
+				for i := 0; i < 3; i++ {
+					req := <-m.cmdChanHigh
+					seen = append(seen, req.cmd)
+					if i == 2 {
+						req.errChan <- test.err
+					} else {
+						req.respChan <- "OK"
+					}
+				}
+				commands <- seen
+			}()
+			err := m.SendSMSWithOptions("777", strings.Repeat("A", 320), smscodec.SubmitOptions{})
+			var progress *SMSSubmitError
+			if !errors.Is(err, test.err) || !errors.As(err, &progress) || progress.PartsConfirmed != 1 || progress.PartsTotal != 3 {
+				t.Fatalf("send progress = %+v, err = %v", progress, err)
+			}
+			seen := <-commands
+			if seen[0] != "AT+CMGF=0" || !strings.HasPrefix(seen[1], "AT+CMGS=") || !strings.HasPrefix(seen[2], "AT+CMGS=") {
+				t.Fatalf("commands = %v", seen)
+			}
+			select {
+			case req := <-m.cmdChanHigh:
+				t.Fatalf("unexpected submission after a segment failed: %q", req.cmd)
+			default:
 			}
 		})
 	}
