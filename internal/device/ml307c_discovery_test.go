@@ -15,6 +15,56 @@ import (
 	"github.com/yibaiba/hideck/internal/modem"
 )
 
+func TestConfiguredATPortSelectsDialectWithoutIMEI(t *testing.T) {
+	port := filepath.Join(t.TempDir(), "ttyUSB8")
+	if err := os.WriteFile(port, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(filepath.Dir(port), "by-id")
+	if err := os.Symlink(port, alias); err != nil {
+		t.Fatal(err)
+	}
+	realPort, err := filepath.EvalSymlinks(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := discoverFallbackModemsFn
+	t.Cleanup(func() { discoverFallbackModemsFn = original })
+	discoverFallbackModemsFn = func() ([]CompatibleModem, error) {
+		return []CompatibleModem{{
+			VendorID: cmIoTVendorID, ProductID: ml307cProductID, ATPorts: []string{realPort},
+		}}, nil
+	}
+	configured, ok := configuredATDevice(config.DeviceConfig{ManagePort: alias})
+	if !ok || configured.ATProfile() != modem.ATProfileML307C || configured.ATPort != realPort {
+		t.Fatalf("aliased legacy port = %+v, %t", configured, ok)
+	}
+	if got, ok := configuredATDevice(config.DeviceConfig{ATPort: "/dev/ttyUSB2", ManagePort: alias}); ok {
+		t.Fatalf("unmatched AT port selected %+v", got)
+	}
+
+	// Simulate the same modem already managed over its other AT interface.
+	const managedPort = "/dev/ttyUSB9"
+	devices := discoverFallbackModemsFn
+	discoverFallbackModemsFn = func() ([]CompatibleModem, error) {
+		found, _ := devices()
+		found[0].ATPorts = append(found[0].ATPorts, managedPort)
+		return found, nil
+	}
+	p := NewPool(&config.Config{})
+	t.Cleanup(func() { _ = p.Shutdown() })
+	managed := config.DeviceConfig{ID: "active", DeviceBackend: "at", ATPort: managedPort}
+	m, err := modem.NewWithATProfile(managed, modem.ATProfileML307C)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.AttachWorkerForTest(&Worker{ID: managed.ID, Pool: p, Config: managed, Modem: m})
+	_, err = p.AddWorkerFromConfig(config.DeviceConfig{ID: "duplicate", DeviceBackend: "at", ManagePort: alias})
+	if err == nil || !strings.Contains(err.Error(), "已由现有设备接管") {
+		t.Fatalf("startup over a second AT interface returned %v", err)
+	}
+}
+
 func TestML307CDiscoveryAndRebind(t *testing.T) {
 	usbPath := filepath.Join(t.TempDir(), "1-1")
 	for _, node := range []string{"1-1:1.2/ttyUSB8", "1-1:1.3/ttyUSB2", "1-1:1.4/ttyUSB3"} {

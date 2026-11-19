@@ -291,11 +291,7 @@ func (idx WorkerDiscoveryIndex) observeLiveATIdentity(dev CompatibleModem, probe
 		return dev, nil
 	}
 	observation := &atScanObservation{usbPath: dev.USBPath, atPorts: dev.ATPorts}
-	for _, port := range dev.ATPorts {
-		owner := idx.atIdentityByPort[port]
-		if owner.query == nil {
-			continue
-		}
+	if port, owner := idx.ownedATPort(dev.ATPorts); port != "" {
 		dev.ATPort, dev.IMEI = port, ""
 		if imei, err := owner.query(); err == nil {
 			dev.IMEI = imei
@@ -309,6 +305,15 @@ func (idx WorkerDiscoveryIndex) observeLiveATIdentity(dev CompatibleModem, probe
 	resolved, imei := probe(dev)
 	resolved.IMEI = imei
 	return resolved, observation
+}
+
+func (idx WorkerDiscoveryIndex) ownedATPort(ports []string) (string, workerATIdentityReader) {
+	for _, port := range ports {
+		if owner := idx.atIdentityByPort[port]; owner.query != nil {
+			return port, owner
+		}
+	}
+	return "", workerATIdentityReader{}
 }
 
 type ConfiguredDeviceIndex struct {

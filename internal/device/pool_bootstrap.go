@@ -178,6 +178,29 @@ func configuredPortRequiresLiveATIdentity(cfg config.DeviceConfig, observations 
 	return false
 }
 
+// configuredATDevice finds the explicitly selected port before a legacy config
+// has learned its IMEI. Keep the real port for runtime ownership checks.
+func configuredATDevice(cfg config.DeviceConfig) (CompatibleModem, bool) {
+	port := strings.TrimSpace(cfg.ATPort)
+	if port == "" {
+		port = strings.TrimSpace(cfg.ManagePort)
+	}
+	if port == "" {
+		return CompatibleModem{}, false
+	}
+	port = resolveUSBPathForScan(port)
+	devices, err := discoverFallbackModemsFn()
+	if err == nil {
+		for _, dev := range devices {
+			if containsPort(dev.ATPorts, port) {
+				dev.ATPort = port
+				return dev, true
+			}
+		}
+	}
+	return CompatibleModem{}, false
+}
+
 type qmiBootstrapDiscoveryCache struct {
 	loaded bool
 	list   []QMIDevice
@@ -345,7 +368,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 				devCfg.ModemIMEI = resolved.Matched[0].BackfillIMEI
 				logger.Info(fmt.Sprintf("[%s] MBIM/AT 通过 USB 路径认领成功，回填实时 IMEI", devCfg.ID), "imei", devCfg.ModemIMEI)
 			}
-		} else if (strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "") ||
+		} else if (strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ManagePort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "") ||
 			(atIMEIConfigured && configuredPortRequiresLiveATIdentity(devCfg, atObservations)) {
 			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
 		}
@@ -420,6 +443,17 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 
 	backendMode := resolvedBackendMode(devCfg)
+	if backendMode == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) == "" && atProfile == modem.ATProfileDefault {
+		if hw, ok := configuredATDevice(devCfg); ok {
+			atProfile = hw.ATProfile()
+			if atDeviceRulesFor(atProfile).verifyLiveIMEI {
+				if port, _ := liveWorkerIndex.ownedATPort(hw.ATPorts); port != "" {
+					return nil, fmt.Errorf("AT 口 %s 已由现有设备接管", port)
+				}
+				devCfg.USBPath, devCfg.ATPort, devCfg.ManagePort = hw.USBPath, hw.ATPort, hw.ATPort
+			}
+		}
+	}
 	m, err := newWorkerModem(devCfg, backendMode, atProfile)
 	if err != nil {
 		return nil, fmt.Errorf("初始化 Modem 失败: %w", err)
