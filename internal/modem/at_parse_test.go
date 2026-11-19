@@ -214,3 +214,30 @@ func TestParseCOPSOperator(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCCHO(t *testing.T) {
+	tests := []struct {
+		name    string
+		resp    string
+		channel int
+	}{
+		{name: "prefixed", resp: "\r\n+CCHO: 2\r\nOK\r\n", channel: 2},
+		{name: "ML307C", resp: "\r\n2\r\nOK\r\n", channel: 2},
+		{name: "terminal stripped", resp: "2", channel: 2},
+		{name: "only OK", resp: "OK", channel: -1},
+		{name: "bare followed by ERROR", resp: "2\nERROR", channel: -1},
+		{name: "command rejected", resp: "+CME ERROR: 3", channel: -1},
+		{name: "multiple numbers", resp: "2\n3\nOK", channel: -1},
+		{name: "number with suffix", resp: "2,3\nOK", channel: -1},
+		{name: "basic channel", resp: "0\nOK", channel: -1},
+		{name: "out of range", resp: "258\nOK", channel: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channel, ok := parseCCHO(tt.resp)
+			if channel != tt.channel || ok != (tt.channel > 0) {
+				t.Fatalf("parseCCHO(%q) = (%d, %t), want (%d, %t)", tt.resp, channel, ok, tt.channel, tt.channel > 0)
+			}
+		})
+	}
+}

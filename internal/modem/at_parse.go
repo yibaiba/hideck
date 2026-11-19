@@ -548,11 +548,11 @@ func ParseUSBNetMode(resp string) (int, error) {
 }
 
 // parseCCHO 解析 AT+CCHO 响应，提取逻辑通道号
-// 响应格式: +CCHO: <channel>
+// 响应格式: +CCHO: <channel>。ML307C 返回单行裸通道号。
 func parseCCHO(resp string) (int, bool) {
 	line, ok := findLineWithPrefix(resp, "+CCHO:")
 	if !ok {
-		return -1, false
+		return parseBareCCHO(resp)
 	}
 	parts := strings.Split(line, ":")
 	if len(parts) < 2 {
@@ -564,6 +564,24 @@ func parseCCHO(resp string) (int, bool) {
 		return channel, true
 	}
 	return -1, false
+}
+
+func parseBareCCHO(resp string) (int, bool) {
+	var channel int
+	for _, line := range splitLines(resp) {
+		if line == "" || line == "OK" {
+			continue
+		}
+		value, err := strconv.ParseUint(line, 10, 8)
+		if channel != 0 || err != nil || value == 0 {
+			return -1, false
+		}
+		channel = int(value)
+	}
+	if channel == 0 {
+		return -1, false
+	}
+	return channel, true
 }
 
 // parseCGLA 解析 AT+CGLA 响应，提取 APDU 响应
