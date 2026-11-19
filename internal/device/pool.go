@@ -156,7 +156,8 @@ type Worker struct {
 	operatorScanCancel  context.CancelFunc
 	operatorScanActive  bool
 
-	reassembler *smscodec.Reassembler
+	reassembler      *smscodec.Reassembler
+	ml307cSMSNotices ml307cSMSNotices
 
 	// 短信工作模式：AT / QMI / VoWiFi（三模完全隔离）。MBIM 网络使用 AT 短信模式。
 	smsMode smsMode
