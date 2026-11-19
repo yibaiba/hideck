@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -60,21 +61,6 @@ func compactSQLiteDefinition(definition string) string {
 	return strings.ToLower(strings.Join(strings.Fields(definition), ""))
 }
 
-// LookupCompletedReceivedSMS finds an already committed receive session without
-// creating history for a storage slot with unknown provenance.
-func LookupCompletedReceivedSMS(iccid, imsi, sessionKey string) (SMS, bool, error) {
-	if DB == nil {
-		return SMS{}, false, errors.New("database not initialized")
-	}
-	var row SMS
-	err := DB.Where("iccid = ? AND imsi = ? AND fragment_session_key = ? AND incomplete = ?", CanonicalICCID(iccid), imsi, sessionKey, false).
-		First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return SMS{}, false, nil
-	}
-	return row, err == nil, err
-}
-
 func SaveReceivedMultipartSMS(input ReceivedMultipartSMS) (ReceivedMultipartSMSResult, error) {
 	if DB == nil {
 		return ReceivedMultipartSMSResult{}, errors.New("database not initialized")
@@ -84,6 +70,8 @@ func SaveReceivedMultipartSMS(input ReceivedMultipartSMS) (ReceivedMultipartSMSR
 		return ReceivedMultipartSMSResult{}, err
 	}
 	var result ReceivedMultipartSMSResult
+	recordATReceipt := !normalized.Incomplete && strings.HasPrefix(normalized.FragmentSessionKey, ATSMSInboundPrefix)
+	receipt := atSMSReceipt{ICCID: normalized.ICCID, IMSI: normalized.IMSI, SessionKey: normalized.FragmentSessionKey}
 	smsPublicationMu.Lock()
 	defer smsPublicationMu.Unlock()
 	err = DB.Transaction(func(tx *gorm.DB) error {
@@ -93,6 +81,16 @@ func SaveReceivedMultipartSMS(input ReceivedMultipartSMS) (ReceivedMultipartSMSR
 			normalized.ICCID, normalized.FragmentSessionKey,
 		).First(&existing).Error
 		if errors.Is(findErr, gorm.ErrRecordNotFound) {
+			if recordATReceipt {
+				insert := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&receipt)
+				if insert.Error != nil {
+					return insert.Error
+				}
+				if insert.RowsAffected == 0 {
+					result.Duplicate = true
+					return nil
+				}
+			}
 			created, createErr := createReceivedMultipartSMS(tx, normalized)
 			result = created
 			return createErr
@@ -102,7 +100,13 @@ func SaveReceivedMultipartSMS(input ReceivedMultipartSMS) (ReceivedMultipartSMSR
 		}
 		reconciled, reconcileErr := reconcileReceivedMultipartSMS(tx, existing, normalized)
 		result = reconciled
-		return reconcileErr
+		if reconcileErr != nil {
+			return reconcileErr
+		}
+		if recordATReceipt && existing.IMSI == normalized.IMSI {
+			return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&receipt).Error
+		}
+		return nil
 	})
 	if err == nil && (result.Created || result.Reconciled) {
 		publishIncomingSMSByID(result.SMSID)

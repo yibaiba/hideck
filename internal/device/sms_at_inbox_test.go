@@ -1,7 +1,9 @@
 package device
 
 import (
+	"context"
 	"encoding/hex"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,7 +11,28 @@ import (
 )
 
 func TestATStoredSMSPersistence(t *testing.T) {
-	initDevicePhoneNumberTestDB(t)
+	dbPath := filepath.Join(t.TempDir(), "at-sms.db")
+	open := func() {
+		t.Helper()
+		if err := db.Init(dbPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeDB := func() {
+		t.Helper()
+		sqlDB, err := db.DB.DB()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open()
+	t.Cleanup(func() {
+		closeDB()
+		db.DB = nil
+	})
 	identity := SMSIdentity{ICCID: "8988110000000000001", IMSI: "001010123456789"}
 	scope := db.SMSInboundFragmentScope{DeviceID: "c", ICCID: identity.ICCID, IMSI: identity.IMSI}
 	fragment := func(seq, minute, second byte, ch rune, observed time.Time, extraUDH ...byte) atInboxPart {
@@ -56,6 +79,13 @@ func TestATStoredSMSPersistence(t *testing.T) {
 		}
 	}
 
+	lookupHistory := func(key string) (db.SMS, bool, error) {
+		var row db.SMS
+		query := db.DB.Where("iccid = ? AND imsi = ? AND fragment_session_key = ?", scope.ICCID, scope.IMSI, key).
+			Limit(1).Find(&row)
+		return row, query.RowsAffected == 1, query.Error
+	}
+
 	observed := time.Now()
 	a1 := fragment(1, 0, 0, '甲', observed)
 	a2 := fragment(2, 0, 0, '乙', observed.Add(2*time.Second))
@@ -69,6 +99,22 @@ func TestATStoredSMSPersistence(t *testing.T) {
 	if len(state.groups) != 1 {
 		t.Fatalf("first fragment was not restored: %+v", state.groups)
 	}
+	// A stale ME slot from another SIM can have the same sender, reference,
+	// SCTS and total as this SIM's pending first part.
+	otherSIM := scope
+	otherSIM.ICCID = "8988110000000000003"
+	staleTail := fragment(2, 0, 0, '异', observed)
+	apply(load(otherSIM), staleTail, true, false, "")
+	apply(state, staleTail, false, false, "")
+	if len(state.groups) != 1 {
+		t.Fatal("unknown ME tail created another group")
+	}
+	for _, group := range state.groups {
+		if len(group) != 1 {
+			t.Fatal("unknown ME tail filled a pending sequence")
+		}
+	}
+
 	apply(state, b2, true, false, "") // Another message reused the ref inside the collection window.
 	if got := state.settledATFragments(observed.Add(time.Second)); len(got) != 0 {
 		t.Fatal("merged A1 and B2 before their exact partners arrived")
@@ -79,6 +125,33 @@ func TestATStoredSMSPersistence(t *testing.T) {
 		t.Fatal("already complete exact messages must not be merged")
 	}
 
+	state = load(scope)
+	// A different, unrecognised UDH IE leaves the decoded text and all
+	// grouping metadata equal but changes the raw PDU.
+	differentPDU := fragment(2, 0, 0, '乙', observed, 0x70, 1, 0x01)
+	if differentPDU.family != a2.family || differentPDU.key != a2.key || differentPDU.fingerprint == a2.fingerprint {
+		t.Fatalf("raw mismatch fixture: %+v", differentPDU)
+	}
+	apply(state, differentPDU, false, false, "")
+	exactKey := ""
+	for key, group := range state.groups {
+		if group[0].Content == a1.Content {
+			var err error
+			exactKey, _, err = completeATMultipart(key, group)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	exact, found, err := lookupHistory(exactKey)
+	if err != nil || !found {
+		t.Fatalf("exact archived SMS: %+v, %v, %v", exact, found, err)
+	}
+	if _, _, _, err := db.DeleteSMSByID(exact.ID); err != nil {
+		t.Fatal(err)
+	}
+	closeDB()
+	open()
 	state = load(scope)
 	apply(state, a2, false, true, "") // A failed deletion can retry from durable evidence.
 	if err := state.clearCompletedGroups(); err != nil {
@@ -112,7 +185,10 @@ func TestATStoredSMSPersistence(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	apply(load(scope), legacy2, false, true, "旧件")
+	apply(load(scope), legacy2, false, false, "")
+	apply(load(scope), legacy1, false, false, "")
+	apply(load(scope), legacy2, true, true, "旧件")
+	apply(load(scope), legacy1, false, false, "") // No raw PDU hash on the pre-upgrade row.
 
 	observed = observed.Add(5 * time.Minute)
 	c1 := fragment(1, 0x30, 0x95, '跨', observed)
@@ -145,14 +221,25 @@ func TestATStoredSMSPersistence(t *testing.T) {
 	if err != nil || len(messages) != 1 || messages[0].Content != content {
 		t.Fatalf("archive after restart: %+v, %v", messages, err)
 	}
-	if saved, found, err := db.LookupCompletedReceivedSMS(scope.ICCID, scope.IMSI, key); err != nil || !found || saved.Content != content {
+	saved, found, err := lookupHistory(key)
+	if err != nil || !found || saved.Content != content {
 		t.Fatalf("archived history: %+v, %v, %v", saved, found, err)
 	}
+	if err := db.DeleteArchivedRecords(context.Background(), db.DB, db.ArchiveDeleteRequest{SMSIDs: []uint{saved.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	closeDB()
+	open()
 	state = load(scope)
 	apply(state, c1, false, false, "")
 	apply(state, c2, false, false, "")
 	if messages, err := state.archiveSettledATFragments(observed.Add(4 * time.Minute)); err != nil || len(messages) != 0 {
 		t.Fatalf("repeat scan notified an archived SMS twice: %+v, %v", messages, err)
+	}
+	for _, deletedKey := range []string{exactKey, key} {
+		if _, found, err := lookupHistory(deletedKey); err != nil || found {
+			t.Fatalf("repeat scan recreated a removed history row: %s, %v, %v", deletedKey, found, err)
+		}
 	}
 
 	// A second possible first part within the same family/window makes the

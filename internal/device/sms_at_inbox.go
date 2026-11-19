@@ -411,8 +411,9 @@ func (state *atSMSParts) persist(part atInboxPart, sourceKnown bool) (bool, *Inb
 		return false, nil, nil
 	}
 	if !sourceKnown {
-		saved, found, err := db.LookupCompletedReceivedSMS(state.scope.ICCID, state.scope.IMSI, part.key)
-		return found && strings.TrimSpace(part.Content) == saved.Content, nil, err
+		// The single-part session key already hashes the full PDU.
+		found, err := db.HasATSMSReceipt(state.scope.ICCID, state.scope.IMSI, part.key)
+		return found, nil, err
 	}
 	return state.commit(part, part.Content)
 }
@@ -423,18 +424,31 @@ const (
 )
 
 func (state *atSMSParts) fragmentGroup(part atInboxPart, sourceKnown bool) (string, bool, error) {
+	fingerprint := hex.EncodeToString(part.fingerprint[:])
+	matches := func(saved db.SMSInboundFragment) bool {
+		if sourceKnown {
+			return saved.Content == part.Content
+		}
+		return saved.PDUFingerprint == fingerprint
+	}
 	// Older fragments only have the legacy exact-SCTS key. It remains valid
 	// for exact matches, but cannot prove the new metadata for a fuzzy join.
 	if fragments := state.groups[part.key]; len(fragments) != 0 {
 		for _, saved := range fragments {
 			if saved.Sequence == part.Concat.Seq {
-				if saved.Content != part.Content {
+				if matches(saved) {
+					return part.key, true, nil
+				}
+				if sourceKnown {
 					return "", false, db.ErrSMSInboundFragmentCollision
 				}
-				return part.key, true, nil
+				break
 			}
 		}
-		return part.key, false, nil
+		if sourceKnown {
+			return part.key, false, nil
+		}
+		return "", false, nil
 	}
 
 	prefix := atSMSPartGroupPrefix + part.family + ":" + part.SCTS + ":"
@@ -447,13 +461,14 @@ func (state *atSMSParts) fragmentGroup(part atInboxPart, sourceKnown bool) (stri
 		for _, saved := range fragments {
 			if saved.Sequence == part.Concat.Seq {
 				occupied = true
-				if saved.Content == part.Content {
+				if matches(saved) {
 					duplicates = append(duplicates, key)
 				}
 				break
 			}
 		}
-		if !occupied && len(fragments) < part.Concat.Total {
+		// An ME slot with no CMTI can retry only an already persisted PDU.
+		if sourceKnown && !occupied && len(fragments) < part.Concat.Total {
 			candidates = append(candidates, key)
 		}
 	}
@@ -486,6 +501,7 @@ func (state *atSMSParts) persistFragment(part atInboxPart, sourceKnown bool) (bo
 		result, err := db.SaveSMSInboundFragment(scope, db.SMSInboundFragment{
 			Sequence: concat.Seq, Reference: concat.Ref, ReferenceBits: concat.RefBits,
 			Total: concat.Total, Content: part.Content, ArrivedAt: part.Timestamp,
+			PDUFingerprint: hex.EncodeToString(part.fingerprint[:]),
 		})
 		if err != nil {
 			return false, nil, err
@@ -668,7 +684,7 @@ func (state *atSMSParts) clearCompletedGroups() error {
 		if err != nil {
 			return err
 		}
-		_, found, err := db.LookupCompletedReceivedSMS(state.scope.ICCID, state.scope.IMSI, completedKey)
+		found, err := db.HasATSMSReceipt(state.scope.ICCID, state.scope.IMSI, completedKey)
 		if err != nil {
 			return err
 		}

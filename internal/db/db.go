@@ -172,6 +172,7 @@ func Init(dbPath string) error {
 		&SMSDelivery{},
 		&SMSDeliveryPart{},
 		&SMSInboundFragment{},
+		&atSMSReceipt{},
 		&CommandExecution{},
 		&CommandEvent{},
 		&BalanceQuery{},
@@ -216,6 +217,9 @@ func Init(dbPath string) error {
 	// The fragment key now includes ICCID. Build its index only after every
 	// historical SMS row has had its canonical ICCID repaired.
 	if err := ensureSMSFragmentSessionUniqueIndex(DB); err != nil {
+		return err
+	}
+	if err := backfillATSMSReceipts(DB); err != nil {
 		return err
 	}
 	if err := MigrateCardPolicyCanonicalICCID(DB); err != nil {
