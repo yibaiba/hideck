@@ -20,6 +20,7 @@ func TestML307CATQueries(t *testing.T) {
 	fixtures := map[string][]string{
 		"AT+CGSN=1": {"+CGSN: 490154203237518", "OK"},
 		"AT+MCCID":  {"+MCCID: 8988110000000000001F", "OK"},
+		"AT+MSWVER": {"ML307C-DC-CN-MBRH0S00", "4.0.8.2506051839_release", "6c31ce603", "OK"},
 		"AT+CEREG?": {"+CEREG: 0,5", "OK"},
 		"AT+COPS?":  {"+COPS: 0,0,\"CHN-UNICOM\",7", "OK"},
 		"AT+CSQ":    {"+CSQ: 24,99", "OK"},
@@ -55,6 +56,9 @@ func TestML307CATQueries(t *testing.T) {
 	if imei, err := m.QueryIMEI(); err != nil || imei != "490154203237518" {
 		t.Fatalf("QueryIMEI() = %q, %v", imei, err)
 	}
+	if firmware, err := m.QueryFirmware(); err != nil || firmware != "4.0.8.2506051839_release / 6c31ce603" {
+		t.Fatalf("QueryFirmware() = %q, %v", firmware, err)
+	}
 	if iccid, err := m.QueryICCID(); err != nil || iccid != "8988110000000000001" {
 		t.Fatalf("QueryICCID() = %q, %v", iccid, err)
 	}
@@ -81,6 +85,15 @@ func TestML307CATQueries(t *testing.T) {
 	}
 	if ready, err := m.QuerySIMInserted(); ready || err == nil || !m.IsHealthy() {
 		t.Fatalf("failed CPIN = %v, %v, healthy=%v", ready, err, m.IsHealthy())
+	}
+}
+
+func TestML307CFirmwareParsingRejectsIncompleteReply(t *testing.T) {
+	if got := ATProfileML307C.parseFirmware("AT+MSWVER\nML307C-DC-CN-MBRH0S00\n+CPIN: READY\nOK"); got != "" {
+		t.Fatalf("incomplete MSWVER reply parsed as %q", got)
+	}
+	if got := ATProfileDefault.parseFirmware("EC20EFAR06A05M4G\nOK"); got != "EC20EFAR06A05M4G" {
+		t.Fatalf("default firmware parsed as %q", got)
 	}
 }
 

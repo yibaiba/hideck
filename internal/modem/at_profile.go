@@ -29,6 +29,32 @@ func (p ATProfile) parseIMEI(resp string) string {
 	return parseIMEI(resp)
 }
 
+func (p ATProfile) firmwareCommand() string {
+	if p == ATProfileML307C {
+		return "AT+MSWVER"
+	}
+	return "AT+CGMR"
+}
+
+func (p ATProfile) parseFirmware(resp string) string {
+	if p != ATProfileML307C {
+		return parseFirmware(resp)
+	}
+
+	// MSWVER reports model, firmware version and build on separate lines.
+	var fields []string
+	for _, line := range splitLines(resp) {
+		if line == "" || line == "OK" || line == "AT+MSWVER" || strings.HasPrefix(line, "+") {
+			continue
+		}
+		fields = append(fields, line)
+	}
+	if len(fields) != 3 {
+		return ""
+	}
+	return fields[1] + " / " + fields[2]
+}
+
 func (p ATProfile) iccidCommand() string {
 	if p == ATProfileML307C {
 		return "AT+MCCID"

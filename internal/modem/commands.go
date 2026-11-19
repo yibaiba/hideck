@@ -24,11 +24,11 @@ func (m *Manager) QueryIMEI() (string, error) {
 }
 
 func (m *Manager) QueryFirmware() (string, error) {
-	resp, err := m.ExecuteATSilent("AT+CGMR", 2*time.Second)
+	resp, err := m.ExecuteATSilent(m.atProfile.firmwareCommand(), 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return parseFirmware(resp), nil
+	return m.atProfile.parseFirmware(resp), nil
 }
 
 func (m *Manager) QuerySIMInserted() (bool, error) {
