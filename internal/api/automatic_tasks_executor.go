@@ -38,6 +38,11 @@ func (e *automaticTaskExecutor) Execute(
 	if worker == nil {
 		return "", fmt.Errorf("device %s is offline", task.DeviceID)
 	}
+	if task.TaskType == automation.TaskTypeCall && task.Environment == automation.EnvironmentCellular {
+		if err := worker.CheckPhoneModeSupported(device.PhoneModeVoLTE); err != nil {
+			return "", automation.Permanent(err)
+		}
+	}
 	owner := captureAutomaticTaskDeviceOwner(e.server.pool, worker)
 	profileAction, err := resolveAutomaticTaskProfile(task, worker.CurrentICCID())
 	if err != nil {

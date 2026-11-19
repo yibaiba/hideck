@@ -36,6 +36,9 @@ func (p *Pool) DialAuthorizedCellularCall(ctx context.Context, worker *Worker, n
 	if p == nil || worker == nil || worker.Modem == nil {
 		return errors.New("cellular calling requires an AT modem channel")
 	}
+	if err := worker.CheckPhoneModeSupported(PhoneModeVoLTE); err != nil {
+		return err
+	}
 	release, err := p.acquireOutboundOperation(worker)
 	if err != nil {
 		return err
