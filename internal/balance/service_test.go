@@ -23,11 +23,11 @@ type fakeGateway struct {
 }
 
 func (g *fakeGateway) Snapshot(string) (DeviceSnapshot, error) { return g.snapshot, nil }
-func (g *fakeGateway) SendVoWiFiSMS(context.Context, string, string, string) error {
+func (g *fakeGateway) SendVoWiFiSMS(context.Context, DeviceSnapshot, string, string) error {
 	g.wifiSMS++
 	return g.sendErr
 }
-func (g *fakeGateway) SendBackendSMS(context.Context, string, string, string) error {
+func (g *fakeGateway) SendBackendSMS(context.Context, DeviceSnapshot, string, string) error {
 	g.backendSMS++
 	if g.onBackendSMS != nil {
 		g.onBackendSMS()

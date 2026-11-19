@@ -66,11 +66,16 @@ func (s *Server) useSendSMS(c businessContext) {
 			logger.Warn("取消短信发送等待写入超时失败", "err", err)
 		}
 	}
-	routed, err := s.pool.SendRoutedSMS(businessRequestContext(c), worker, req.Phone, req.Message, sendOpts)
+	selector := device.SMSIdentity{ICCID: db.CanonicalICCID(req.ICCID), IMSI: strings.TrimSpace(req.IMSI)}
+	routed, err := s.pool.SendRoutedSMSForIdentity(businessRequestContext(c), worker, req.Phone, req.Message, sendOpts, selector)
 	if responseController != nil {
 		if err := responseController.SetWriteDeadline(time.Now().Add(managedHTTPWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			logger.Warn("恢复短信响应写入超时失败", "err", err)
 		}
+	}
+	if errors.Is(err, device.ErrSMSSelectorMismatch) {
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "message": err.Error()})
+		return
 	}
 	if respondOutboundLimit(c, err) {
 		return

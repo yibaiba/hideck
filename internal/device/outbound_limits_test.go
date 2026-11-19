@@ -195,3 +195,38 @@ func TestML307CCSSMSRejectsSilentSIMSwapDuringAuthorization(t *testing.T) {
 		t.Fatalf("wrong send or quota owner: sends=%d charges=%+v", be.sends, limiter.requests)
 	}
 }
+
+type directSMSSelectorBackend struct {
+	workerStatusBackendStub
+	sends int
+}
+
+func (b *directSMSSelectorBackend) SendSMS(context.Context, string, string) error {
+	b.sends++
+	return nil
+}
+
+func TestDirectSMSMatchesICCIDWithoutIMSI(t *testing.T) {
+	_, w, limiter := outboundTestWorker(t)
+	backend := &directSMSSelectorBackend{workerStatusBackendStub: workerStatusBackendStub{mode: "qmi"}}
+	w.Backend = backend
+	setWorkerSMSIdentity(w, SMSIdentity{ICCID: "123"})
+	err := w.SendSMSForIdentity(context.Background(), "10010", "test", smscodec.SubmitOptions{}, SMSIdentity{ICCID: "123f"})
+	if err != nil || backend.sends != 1 || len(limiter.requests) != 1 || limiter.requests[0].ICCID != "123" {
+		t.Fatalf("send error=%v, sends=%d, quota=%+v", err, backend.sends, limiter.requests)
+	}
+}
+
+func TestRoutedSMSReportsStaleSelectorBeforeFallback(t *testing.T) {
+	p, w, limiter := outboundTestWorker(t)
+	w.Config.VoWiFiEnabled, w.Config.PhoneMode = true, "wifi"
+	cs := false
+	p.SetRoutedSMSTestSenders(func(context.Context, string, string, string, smscodec.SubmitOptions) (messaging.SendOutcome, error) {
+		setWorkerSMSIdentity(w, SMSIdentity{ICCID: "456", IMSI: "234150123456789"})
+		return messaging.SendOutcome{}, messaging.ErrSMSNotReady
+	}, func(string, string, string) error { cs = true; return nil })
+	_, err := p.SendRoutedSMSForIdentity(context.Background(), w, "10010", "test", smscodec.SubmitOptions{}, SMSIdentity{ICCID: "123"})
+	if !errors.Is(err, ErrSMSSelectorMismatch) || cs || len(limiter.requests) != 1 || limiter.requests[0].ICCID != "123" {
+		t.Fatalf("fallback: error=%v CS sent=%v quota=%+v", err, cs, limiter.requests)
+	}
+}

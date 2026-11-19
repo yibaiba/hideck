@@ -74,6 +74,30 @@ func TestExecuteSMSDoesNotFallbackAfterIMSAccept(t *testing.T) {
 	}
 }
 
+func TestExecuteSMSRejectsChangedTaskProfile(t *testing.T) {
+	for _, environment := range []string{automation.EnvironmentVoWiFi, automation.EnvironmentCellular} {
+		t.Run(environment, func(t *testing.T) {
+			pool := device.NewPool(&config.Config{})
+			worker := &device.Worker{ID: "wwan0", Pool: pool}
+			original := device.SMSIdentity{ICCID: "8944000000000000501", IMSI: "234150000000501"}
+			pool.AttachWorkerWithSMSIdentityForTest(worker, original)
+			executor := &automaticTaskExecutor{server: &Server{pool: pool}}
+			_, err := executor.executeSMS(context.Background(), worker, automation.Task{
+				DeviceID: worker.ID, ProfileICCID: original.ICCID, Environment: environment,
+				Payload: automation.Payload{Phone: "888", Message: "BAL"},
+			}, func(string) error {
+				pool.AttachWorkerWithSMSIdentityForTest(worker, device.SMSIdentity{
+					ICCID: "8944000000000000502", IMSI: "234150000000502",
+				})
+				return nil
+			})
+			if !errors.Is(err, device.ErrSMSSelectorMismatch) {
+				t.Fatalf("submit SMS after changing profile: %v", err)
+			}
+		})
+	}
+}
+
 func TestVoWiFiReadyForSMSTaskUsesMOReadiness(t *testing.T) {
 	state := runtimehost.State{
 		IMSReady: true, SMSMOReady: true,

@@ -91,8 +91,8 @@ type Completion struct {
 
 type Gateway interface {
 	Snapshot(deviceID string) (DeviceSnapshot, error)
-	SendVoWiFiSMS(context.Context, string, string, string) error
-	SendBackendSMS(context.Context, string, string, string) error
+	SendVoWiFiSMS(context.Context, DeviceSnapshot, string, string) error
+	SendBackendSMS(context.Context, DeviceSnapshot, string, string) error
 	SendVoWiFiUSSD(context.Context, string, string) (USSDResponse, error)
 	SendBackendUSSD(context.Context, string, string) (USSDResponse, error)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/yibaiba/hideck/internal/db"
 	"github.com/yibaiba/hideck/internal/device"
 	"github.com/yibaiba/hideck/internal/modem"
+	"github.com/yibaiba/hideck/internal/outbound"
 	"github.com/yibaiba/hideck/pkg/smscodec"
 )
 
@@ -133,5 +134,85 @@ func TestRESTSMSUncertainResultSurvivesWriteTimeout(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted || result.DeliveryState != db.SMSDeliveryStateUnknown ||
 		result.PartsTotal != 3 || result.PartsConfirmed != 2 || !strings.Contains(result.Message, "请勿重发整条") || sends.Load() != 1 {
 		t.Fatalf("HTTP %d result=%+v CS sends=%d", resp.StatusCode, result, sends.Load())
+	}
+}
+
+type smsWriteDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+	onClear func()
+}
+
+func (r *smsWriteDeadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	if deadline.IsZero() {
+		r.onClear()
+	}
+	return nil
+}
+
+type smsSelectorTestBackend struct {
+	ussdDeviceBackendStub
+	imsi string
+}
+
+func (b *smsSelectorTestBackend) GetIMSI(context.Context) (string, error) {
+	return b.imsi, nil
+}
+
+type smsSelectorTestLimiter struct {
+	attempts int
+}
+
+func (l *smsSelectorTestLimiter) Consume(context.Context, outbound.Request) error {
+	l.attempts++
+	return nil
+}
+
+func TestSendSMSKeepsExplicitSIMSelectorThroughSubmission(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := device.SMSIdentity{ICCID: "8944000000000000601", IMSI: "234150000000601"}
+	for _, test := range []struct {
+		name, request string
+		active        device.SMSIdentity
+		wantStatus    int
+		wantSends     int
+	}{
+		{"matching ICCID", `"iccid":" 8944000000000000601f "`, original, http.StatusOK, 1},
+		{"matching IMSI", `"imsi":" 234150000000601 "`, original, http.StatusOK, 1},
+		{"stale ICCID", `"iccid":"8944000000000000601"`, device.SMSIdentity{ICCID: "8944000000000000602", IMSI: original.IMSI}, http.StatusConflict, 0},
+		{"stale IMSI", `"imsi":"234150000000601"`, device.SMSIdentity{ICCID: original.ICCID, IMSI: "234150000000602"}, http.StatusConflict, 0},
+		{"device selection follows active SIM", `"device_id":"sms-at"`, device.SMSIdentity{ICCID: "8944000000000000602", IMSI: "234150000000602"}, http.StatusOK, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			openTestDB(t)
+			pool := device.NewPool(&config.Config{})
+			backend := &smsSelectorTestBackend{imsi: original.IMSI}
+			worker := &device.Worker{ID: "sms-at", Backend: backend}
+			pool.AttachWorkerWithSMSIdentityForTest(worker, original)
+			limiter := &smsSelectorTestLimiter{}
+			pool.SetOutboundLimiter(limiter)
+			sends := 0
+			pool.SetRoutedSMSTestSenders(nil, func(string, string, string) error {
+				sends++
+				return nil
+			})
+			writer := &smsWriteDeadlineRecorder{ResponseRecorder: httptest.NewRecorder(), onClear: func() {
+				// The handler clears its write deadline after selecting a worker.
+				backend.imsi = test.active.IMSI
+				pool.AttachWorkerWithSMSIdentityForTest(worker, test.active)
+			}}
+			c, _ := gin.CreateTestContext(writer)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/sms/send", strings.NewReader(
+				`{`+test.request+`,"phone":"777","message":"test"}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			server := &Server{pool: pool}
+			server.handleSendSMS(c)
+			if writer.Code != test.wantStatus || limiter.attempts != test.wantSends || sends != test.wantSends {
+				t.Fatalf("HTTP %d: %s, quota attempts=%d, sends=%d", writer.Code, writer.Body, limiter.attempts, sends)
+			}
+			messages, err := db.GetSMSByICCID(test.active.ICCID, 10)
+			if err != nil || len(messages) != test.wantSends {
+				t.Fatalf("active SIM history = %+v, error = %v", messages, err)
+			}
+		})
 	}
 }

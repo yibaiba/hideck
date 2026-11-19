@@ -14,6 +14,7 @@ import (
 )
 
 var (
+	ErrSMSSelectorMismatch      = errors.New("所选 SIM 身份已变更，请重新选择")
 	ErrSMSIdentityUnknown       = errors.New("短信身份未知")
 	ErrSMSIdentityConflict      = errors.New("短信身份冲突")
 	ErrSMSIdentityTransitioning = errors.New("SIM 身份正在切换")
@@ -54,6 +55,34 @@ func (databaseSMSIdentityStore) SaveReceived(identity SMSIdentity, message inbou
 		Sender:   message.Sender, Content: message.Content,
 		Type: 1, Status: 0, Timestamp: message.Timestamp,
 	})
+}
+
+func (p *Pool) smsSendOwnerCheck(worker *Worker, selector SMSIdentity) func() error {
+	checkOwner := p.outboundOwnerCheck(worker)
+	if selector == (SMSIdentity{}) {
+		return checkOwner
+	}
+	return func() error {
+		if selector.IMSI != "" && worker.cachedSMSIdentity().IMSI != selector.IMSI {
+			return ErrSMSSelectorMismatch
+		}
+		if err := checkOwner(); err != nil {
+			return ErrSMSSelectorMismatch
+		}
+		return nil
+	}
+}
+
+func (w *Worker) cachedSMSIdentity() SMSIdentity {
+	w.cacheMu.RLock()
+	defer w.cacheMu.RUnlock()
+	return normalizeSMSIdentity(SMSIdentity{ICCID: w.state.Identity.ICCID, IMSI: w.state.Identity.IMSI})
+}
+
+func (selector SMSIdentity) matches(identity SMSIdentity) bool {
+	return selector != (SMSIdentity{}) &&
+		(selector.ICCID == "" || selector.ICCID == identity.ICCID) &&
+		(selector.IMSI == "" || selector.IMSI == identity.IMSI)
 }
 
 func (p *Pool) ResolveSMSIdentity(deviceID string) (SMSIdentity, error) {
