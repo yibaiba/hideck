@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/iniwex5/vowifi-go/runtimehost/messaging"
@@ -84,5 +86,52 @@ func TestSendSMSRecordsUnconfirmedSubmission(t *testing.T) {
 				t.Fatalf("SMS history = %+v, err = %v", messages, err)
 			}
 		})
+	}
+}
+
+func TestRESTSMSUncertainResultSurvivesWriteTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	openTestDB(t)
+	pool := device.NewPool(&config.Config{})
+	worker := &device.Worker{ID: "sms-at"}
+	pool.AttachWorkerWithSMSIdentityForTest(worker, device.SMSIdentity{
+		ICCID: "8944000000000000601", IMSI: "234150000000601",
+	})
+	const writeTimeout = 100 * time.Millisecond
+	var sends atomic.Int32
+	pool.SetRoutedSMSTestSenders(nil, func(string, string, string) error {
+		sends.Add(1)
+		time.Sleep(3 * writeTimeout)
+		return &modem.SMSSubmitError{PartsTotal: 3, PartsConfirmed: 2, Err: modem.ErrSMSSubmitUnknown}
+	})
+
+	server := &Server{pool: pool}
+	router := gin.New()
+	router.POST("/api/sms/send", server.handleSendSMS)
+	httpServer := httptest.NewUnstartedServer(router)
+	httpServer.Config.WriteTimeout = writeTimeout
+	httpServer.Start()
+	t.Cleanup(httpServer.Close)
+	client := httpServer.Client()
+	client.Timeout = 3 * time.Second
+
+	resp, err := client.Post(httpServer.URL+"/api/sms/send", "application/json", strings.NewReader(
+		`{"device_id":"sms-at","phone":"777","message":"test"}`))
+	if err != nil {
+		t.Fatalf("await SMS submission response: %v", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		DeliveryState  string `json:"delivery_state"`
+		PartsTotal     int    `json:"parts_total"`
+		PartsConfirmed int    `json:"parts_confirmed"`
+		Message        string `json:"message"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode HTTP %d: %v", resp.StatusCode, err)
+	}
+	if resp.StatusCode != http.StatusAccepted || result.DeliveryState != db.SMSDeliveryStateUnknown ||
+		result.PartsTotal != 3 || result.PartsConfirmed != 2 || !strings.Contains(result.Message, "请勿重发整条") || sends.Load() != 1 {
+		t.Fatalf("HTTP %d result=%+v CS sends=%d", resp.StatusCode, result, sends.Load())
 	}
 }

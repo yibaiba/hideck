@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -54,7 +55,23 @@ func (s *Server) useSendSMS(c businessContext) {
 	partsTotal := 1
 	deliveryState := "acked"
 
+	// A multi-part send can outlast the server's write deadline. Preserve a
+	// fresh write window for the result without changing modem timeouts.
+	var responseController *http.ResponseController
+	if rest, ok := c.(*gin.Context); ok {
+		controller := http.NewResponseController(rest.Writer)
+		if err := controller.SetWriteDeadline(time.Time{}); err == nil {
+			responseController = controller
+		} else if !errors.Is(err, http.ErrNotSupported) {
+			logger.Warn("取消短信发送等待写入超时失败", "err", err)
+		}
+	}
 	routed, err := s.pool.SendRoutedSMS(businessRequestContext(c), worker, req.Phone, req.Message, sendOpts)
+	if responseController != nil {
+		if err := responseController.SetWriteDeadline(time.Now().Add(managedHTTPWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			logger.Warn("恢复短信响应写入超时失败", "err", err)
+		}
+	}
 	if respondOutboundLimit(c, err) {
 		return
 	}
