@@ -54,6 +54,11 @@ func (p *Pool) resolveAndApplyPolicy(worker *Worker, reason string) policyApplyR
 	if err := validate(); err != nil {
 		return policyApplyResult{ICCID: iccid, Reason: "owner_changed", Err: err}
 	}
+	// Apply the unsupported mode as phone-off for this worker only. Keep the
+	// card's saved mode and explicit radio and network settings.
+	if worker.CheckPhoneModeSupported(pol.PhoneMode) != nil {
+		pol.VoWiFiEnabled = false
+	}
 	// Finish the old call before projecting a policy that disallows new calls.
 	// Failed hangup leaves the current session and policy available for retry.
 	var finishNativeTransition func()

@@ -227,7 +227,7 @@ func (p *Pool) currentCardPolicyAllowsVoWiFi(w *Worker, statusICCID, reason stri
 		p.clearDesiredVoWiFiRecoverState(deviceID)
 		return false
 	}
-	if !pol.VoWiFiEnabled {
+	if w.CheckPhoneModeSupported(pol.PhoneMode) != nil || !pol.VoWiFiEnabled {
 		p.clearDesiredVoWiFiRecoverState(deviceID)
 		// logger.Info("VoWiFi 目标态恢复跳过：当前卡策略未开启 VoWiFi",
 		// 	"event", "VOWIFI_DESIRED_RECOVER_SKIPPED_CARD_POLICY",

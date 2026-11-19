@@ -205,11 +205,16 @@ func (p *Pool) enableVoWiFi(deviceID string, lifecycleGeneration uint64) error {
 	if p.IsESIMSwitching(deviceID) {
 		return fmt.Errorf("设备 %s 正在切卡，暂不允许启动 VoWiFi", deviceID)
 	}
-	if w := p.GetWorker(deviceID); w != nil && IsNativeVoLTEMode(w.Config.PhoneMode) {
-		return p.EnableNativeVoLTE(deviceID)
-	}
-	if w := p.GetWorker(deviceID); w != nil && IsModemVoiceMode(w.Config.PhoneMode) {
-		return fmt.Errorf("设备 %s: %w", deviceID, ErrModemVoiceSoftwareIMS)
+	if w := p.GetWorker(deviceID); w != nil {
+		if err := w.CheckPhoneModeSupported(w.Config.PhoneMode); err != nil {
+			return err
+		}
+		if IsNativeVoLTEMode(w.Config.PhoneMode) {
+			return p.EnableNativeVoLTE(deviceID)
+		}
+		if IsModemVoiceMode(w.Config.PhoneMode) {
+			return fmt.Errorf("设备 %s: %w", deviceID, ErrModemVoiceSoftwareIMS)
+		}
 	}
 	p.stopNativeVoLTE(deviceID, "enable_vowifi")
 	if err := p.stopModemVoice(deviceID); err != nil {

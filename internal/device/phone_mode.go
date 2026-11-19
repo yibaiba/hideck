@@ -11,6 +11,8 @@ import (
 
 var ErrModemVoiceSoftwareIMS = errors.New("模组直拨模式不使用软件 IMS")
 
+var ErrML307CNativeVoiceUnavailable = errors.New("ML307C 在 HiDeck 中不支持原生 VoLTE 和模组直拨")
+
 const (
 	PhoneModeWiFi       = "wifi"
 	PhoneModeCellular   = "cellular"
@@ -51,8 +53,8 @@ func cellularAlwaysData(cfg config.DeviceConfig) bool {
 	return strings.TrimSpace(cfg.PhoneMode) == PhoneModeCellular && strings.TrimSpace(cfg.DataStrategy) == "always"
 }
 
-// WorkerSoftwareIMSBlocked reports China MCC 460/461, which has no ePDG
-// software IMS path in this stack. Phone service must use modem call control.
+// WorkerSoftwareIMSBlocked reports whether the SIM's MCC is blocked by the
+// software IMS policy. Phone service must use modem call control.
 func WorkerSoftwareIMSBlocked(w *Worker) bool {
 	if w == nil {
 		return false
@@ -66,6 +68,15 @@ func WorkerSoftwareIMSBlocked(w *Worker) bool {
 		return true
 	}
 	return false
+}
+
+// CheckPhoneModeSupported applies ML307C's native voice limit, including SIMs
+// whose carrier policy requires native call control.
+func (w *Worker) CheckPhoneModeSupported(mode string) error {
+	if w.isML307C() && (UsesModemPhoneControl(mode) || WorkerSoftwareIMSBlocked(w)) {
+		return ErrML307CNativeVoiceUnavailable
+	}
+	return nil
 }
 
 func forceSoftwareIMSBlockedToVoLTE(w *Worker, pol cardpolicy.Policy) {

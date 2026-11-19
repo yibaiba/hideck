@@ -61,6 +61,13 @@ func (s *Server) cardPolicyStore() cardPolicyStore {
 // patchCardPolicyForDevice 解析设备当前 ICCID，对 card_policies 行执行原地修改并落库。
 // mutate 在 resolve 后的副本上改字段（source 会被强制为 "user"）。
 func (s *Server) patchCardPolicyForDevice(deviceID string, mutate func(*db.CardPolicy)) (iccid string, applied bool, err error) {
+	return s.patchCardPolicyForDeviceChecked(deviceID, func(p *db.CardPolicy) error {
+		mutate(p)
+		return nil
+	})
+}
+
+func (s *Server) patchCardPolicyForDeviceChecked(deviceID string, mutate func(*db.CardPolicy) error) (iccid string, applied bool, err error) {
 	worker := s.pool.GetWorker(deviceID)
 	if worker == nil {
 		return "", false, fmt.Errorf("设备未找到")
@@ -73,7 +80,9 @@ func (s *Server) patchCardPolicyForDevice(deviceID string, mutate func(*db.CardP
 	if err != nil {
 		return iccid, false, fmt.Errorf("获取卡策略失败: %w", err)
 	}
-	mutate(&p)
+	if err := mutate(&p); err != nil {
+		return iccid, false, err
+	}
 	p.Source = "user"
 	db.NormalizeCardPolicy(&p)
 	if err := s.cardPolicyStore().Upsert(p); err != nil {
@@ -357,9 +366,15 @@ func normalizeCardPolicyIPVersion(value string) (string, error) {
 }
 
 func writeCardPolicyMutationError(c businessContext, err error) {
+	if writeLebaraUKRFLockError(c, err) {
+		return
+	}
 	status := http.StatusInternalServerError
-	if errors.Is(err, errCardPolicyIdentityUnavailable) {
+	switch {
+	case errors.Is(err, errCardPolicyIdentityUnavailable):
 		status = http.StatusConflict
+	case errors.Is(err, device.ErrML307CNativeVoiceUnavailable):
+		status = http.StatusUnprocessableEntity
 	}
 	c.JSON(status, gin.H{"status": "error", "message": err.Error()})
 }

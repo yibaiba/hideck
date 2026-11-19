@@ -93,10 +93,13 @@ func (p *Pool) stopNativeVoLTEForModemVoice(id string) error {
 // This constructor is the infrastructure boundary. Optional tools and bundles
 // are accessed only after the user explicitly selects modem_voice.
 func (p *Pool) prepareModemVoice(ctx context.Context, id string) (*host.Resources, error) {
+	w := p.GetWorker(id)
+	if err := w.CheckPhoneModeSupported(PhoneModeModemVoice); err != nil {
+		return nil, err
+	}
 	if runtime.GOOS != "linux" {
 		return nil, errors.New("模组直拨音频目前仅支持 Linux")
 	}
-	w := p.GetWorker(id)
 	if w == nil || w.CurrentICCID() == "" {
 		return nil, errors.New("模组直拨需要已识别的 SIM 卡")
 	}

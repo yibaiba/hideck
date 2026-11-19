@@ -57,6 +57,7 @@ const selected = computed(() => phone.devices.find((device) => device.id === sel
 const calleeError = computed(() => dialNumberError(callee.value, selected.value?.phone_region))
 const canPlaceCall = computed(() => !!callee.value && !calleeError.value
   && !!selected.value
+  && !selectedModeBlocked.value
   && (isDeviceReady(selected.value) || selected.value.phone_mode === 'cellular' || selected.value.phone_mode === 'volte')
   && !isDeviceBusy(selected.value))
 watch(call, (current) => {
@@ -115,6 +116,9 @@ function deviceModeLabel(device?: PhoneDevice) {
 function deviceStatus(device?: PhoneDevice) {
   if (!device) return '未选择设备'
   if (isDeviceBusy(device)) return '通话占用'
+  if (device.native_voice_unavailable_reason && phoneModeDisabledReason(device, device.phone_mode || 'wifi')) {
+    return '当前通话方式不可用'
+  }
   const mode = deviceModeLabel(device)
   if (device.phone_mode === 'modem_voice') {
     if (device.voice.phase === 'restarting') return `${mode} · 重启模组中`
@@ -147,6 +151,9 @@ const selectedMode = computed(() => {
   if (mode === 'cellular' || mode === 'volte' || mode === 'modem_voice') return mode
   return 'wifi'
 })
+const selectedModeBlocked = computed(() => selected.value?.native_voice_unavailable_reason
+  ? phoneModeDisabledReason(selected.value, selectedMode.value)
+  : undefined)
 const selectedStrategy = computed(() => selected.value?.data_strategy === 'always' ? 'always' : 'on_demand')
 const modePending = ref(false)
 
@@ -473,7 +480,7 @@ async function sendDTMF(digit: string) {
                 <el-radio-button value="modem_voice" :disabled="!!phoneModeDisabledReason(selected, 'modem_voice')" :title="phoneModeDisabledReason(selected, 'modem_voice')">模组直拨</el-radio-button>
               </el-radio-group>
               <el-select
-                v-if="selectedMode === 'cellular'"
+                v-if="selectedMode === 'cellular' && !selectedModeBlocked"
                 :model-value="selectedStrategy"
                 size="small"
                 style="width: 160px"
@@ -483,17 +490,20 @@ async function sendDTMF(digit: string) {
                 <el-option label="仅打电话时开" value="on_demand" />
                 <el-option label="长时间开启" value="always" />
               </el-select>
-              <p v-if="selectedMode === 'cellular'" class="phone-mode-hint">
+              <p v-if="selected?.native_voice_unavailable_reason" class="phone-mode-hint" role="status">
+                {{ selectedModeBlocked || selected.native_voice_unavailable_reason }}
+              </p>
+              <p v-if="selectedMode === 'cellular' && !selectedModeBlocked" class="phone-mode-hint">
                 {{ selected?.network_enabled
                   ? (selectedStrategy === 'always' ? '网络已开，数据会保持连接。' : '网络已开，只有拨号时才连数据，挂断后关闭。')
                   : '会正常驻网，待机不走流量。打蜂窝电话会临时打开数据。' }}
               </p>
-              <div v-if="selectedMode === 'modem_voice'" class="phone-mode-hint" role="status" aria-live="polite">
+              <div v-if="selectedMode === 'modem_voice' && !selectedModeBlocked" class="phone-mode-hint" role="status" aria-live="polite">
                 <p>使用 SIM 卡拨打和接听，声音通过网页传输。接通后可用键盘按键。</p>
                 <p v-if="selected?.voice.last_error" class="phone-mode-hint is-warn" role="alert">{{ selected.voice.last_error }}</p>
                 <el-button v-if="selected?.voice.phase === 'failed'" :loading="modePending" :disabled="!!call" @click="void changePhoneMode('modem_voice')">重新准备</el-button>
               </div>
-              <p v-if="selectedMode === 'volte'" class="phone-mode-hint">
+              <p v-if="selectedMode === 'volte' && !selectedModeBlocked" class="phone-mode-hint">
                 {{ selected?.software_ims_blocked
                   ? '这张卡需要使用模组驻网通话，可选择 VoLTE 或已适配的模组直拨。打开「网络」才会用上网流量。'
                   : selected?.native_volte?.uac_unusable
@@ -517,7 +527,7 @@ async function sendDTMF(digit: string) {
                 </span>
                 <el-switch
                   :model-value="selected?.vowifi_enabled === true"
-                  :disabled="!!call || modePending || lebaraIdentityBusy(selected)"
+                  :disabled="!!call || modePending || lebaraIdentityBusy(selected) || (!!selectedModeBlocked && !selected?.vowifi_enabled)"
                   :loading="modePending || lebaraIdentityBusy(selected)"
                   aria-label="启动 WiFi calling"
                   @change="toggleWifiCalling"
