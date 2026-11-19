@@ -176,6 +176,27 @@ func TestATStoredSMSPersistence(t *testing.T) {
 		t.Fatal("completed fragment groups were not collected")
 	}
 
+	// A new message can reuse the exact grouping fields and first-part text
+	// of a completed one. Its different PDU must have its own receipt.
+	first := fragment(1, 0x03, 0, '同', observed)
+	firstTail := fragment(2, 0x03, 0, '甲', observed.Add(time.Second))
+	second := fragment(1, 0x03, 0, '同', observed.Add(2*time.Second), 0x70, 1, 0x01)
+	secondTail := fragment(2, 0x03, 0, '乙', observed.Add(3*time.Second))
+	if first.key != second.key || first.family != second.family || first.fingerprint == second.fingerprint {
+		t.Fatal("fixture must share grouping fields and have distinct first-part PDUs")
+	}
+	state = load(scope)
+	apply(state, first, true, false, "")
+	apply(state, firstTail, true, true, "同甲")
+	state = load(scope)
+	apply(state, second, true, false, "")
+	apply(state, secondTail, true, true, "同乙")
+	state = load(scope)
+	apply(state, second, false, true, "")
+	if err := load(scope).clearCompletedGroups(); err != nil {
+		t.Fatal(err)
+	}
+
 	// Legacy groups can still finish after upgrade with their original key.
 	legacy1 := fragment(1, 0x05, 0, '旧', observed)
 	legacy2 := fragment(2, 0x05, 0, '件', observed)
@@ -190,6 +211,7 @@ func TestATStoredSMSPersistence(t *testing.T) {
 	apply(load(scope), legacy1, false, false, "")
 	apply(load(scope), legacy2, true, true, "旧件")
 	apply(load(scope), legacy1, false, false, "") // No raw PDU hash on the pre-upgrade row.
+	apply(load(scope), legacy1, true, true, "")   // Known sources can still match legacy rows by text.
 
 	observed = observed.Add(5 * time.Minute)
 	c1 := fragment(1, 0x30, 0x95, '跨', observed)

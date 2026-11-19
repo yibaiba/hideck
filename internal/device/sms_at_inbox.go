@@ -447,10 +447,10 @@ const (
 func (state *atSMSParts) fragmentGroup(part atInboxPart, sourceKnown bool) (string, bool, error) {
 	fingerprint := hex.EncodeToString(part.fingerprint[:])
 	matches := func(saved db.SMSInboundFragment) bool {
-		if sourceKnown {
-			return saved.Content == part.Content
+		if saved.PDUFingerprint != "" {
+			return saved.PDUFingerprint == fingerprint
 		}
-		return saved.PDUFingerprint == fingerprint
+		return sourceKnown && saved.Content == part.Content
 	}
 	// Older fragments only have the legacy exact-SCTS key. It remains valid
 	// for exact matches, but cannot prove the new metadata for a fuzzy join.
