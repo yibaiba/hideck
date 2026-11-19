@@ -50,9 +50,10 @@ type commandRequest struct {
 	highPriority bool
 
 	// 交互式模式支持
-	interactive bool   // 是否为交互式命令 (如发送短信)
-	waitPrompt  bool   // 是否等待 "> " 提示符
-	followUp    string // 后续指令 (当 waitPrompt=true 且收到提示符时发送)
+	interactive     bool          // 是否为交互式命令 (如发送短信)
+	waitPrompt      bool          // 是否等待 "> " 提示符
+	followUp        string        // 后续指令 (当 waitPrompt=true 且收到提示符时发送)
+	smsFinalTimeout time.Duration // ML307C CMGS budget after a complete Ctrl+Z write.
 }
 
 // Manager 管理单个 EC20 模块的 AT 指令通信
@@ -716,6 +717,10 @@ func (m *Manager) handleCommand(req commandRequest) {
 	}
 	if req.upload != nil {
 		m.handleFileUpload(req)
+		return
+	}
+	if m.atProfile == ATProfileML307C && req.smsFinalTimeout > 0 {
+		m.handleML307CSMS(req)
 		return
 	}
 	startTime := time.Now()
@@ -1879,6 +1884,7 @@ func (m *Manager) executeAT(cmd string, timeout time.Duration, silent, highPrior
 	req.interactive = false
 	req.waitPrompt = false
 	req.followUp = ""
+	req.smsFinalTimeout = 0
 
 	// 确保回收资源
 	defer func() {
@@ -2144,7 +2150,9 @@ func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.Submit
 	m.SetBusy(true)
 	defer m.SetBusy(false)
 
-	logger.Info(fmt.Sprintf("[%s] 准备发送短信 (PDU)", m.cfg.ID), "to", phone)
+	if m.atProfile != ATProfileML307C {
+		logger.Info(fmt.Sprintf("[%s] 准备发送短信 (PDU)", m.cfg.ID), "to", phone)
+	}
 
 	// 确保处于 PDU 模式
 	if _, err := m.ExecuteATHigh("AT+CMGF=0", 3*time.Second); err != nil {
@@ -2159,8 +2167,6 @@ func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.Submit
 
 	for i, pduHex := range pduHexList {
 		tpduLen := tpduLenList[i]
-		logger.Debug(fmt.Sprintf("[%s] PDU 编码完成 (分片 %d/%d)", m.cfg.ID, i+1, len(pduHexList)), "pdu", pduHex, "tpdu_len", tpduLen)
-
 		req := commandRequest{
 			cmd:          fmt.Sprintf("AT+CMGS=%d", tpduLen), // PDU 长度 (不含 SMSC)
 			respChan:     make(chan string, 1),
@@ -2172,23 +2178,32 @@ func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.Submit
 			followUp:     pduHex + "\x1A", // PDU + Ctrl+Z
 		}
 
-		// 使用高优先级通道原子执行
-		select {
-		case m.cmdChanHigh <- req:
-		case <-time.After(5 * time.Second):
-			return errors.New("command queue full")
-		}
-
-		// 等待最终响应 (OK)
-		select {
-		case resp := <-req.respChan:
-			if !strings.Contains(resp, "OK") && !strings.Contains(resp, "+CMGS:") {
-				return fmt.Errorf("发送分片 %d 失败: %s", i+1, resp)
+		if m.atProfile == ATProfileML307C {
+			req.timeout = ml307cSMSPromptTimeout
+			req.smsFinalTimeout = ml307cSMSResultTimeout
+			if err := m.sendML307CSMSPart(req); err != nil {
+				return fmt.Errorf("发送分片 %d: %w", i+1, err)
 			}
-		case err := <-req.errChan:
-			return fmt.Errorf("发送分片 %d 失败: %w", i+1, err)
-		case <-time.After(20 * time.Second):
-			return errors.New("发送超时")
+		} else {
+			logger.Debug(fmt.Sprintf("[%s] PDU 编码完成 (分片 %d/%d)", m.cfg.ID, i+1, len(pduHexList)), "pdu", pduHex, "tpdu_len", tpduLen)
+			// 使用高优先级通道原子执行
+			select {
+			case m.cmdChanHigh <- req:
+			case <-time.After(5 * time.Second):
+				return errors.New("command queue full")
+			}
+
+			// 等待最终响应 (OK)
+			select {
+			case resp := <-req.respChan:
+				if !strings.Contains(resp, "OK") && !strings.Contains(resp, "+CMGS:") {
+					return fmt.Errorf("发送分片 %d 失败: %s", i+1, resp)
+				}
+			case err := <-req.errChan:
+				return fmt.Errorf("发送分片 %d 失败: %w", i+1, err)
+			case <-time.After(20 * time.Second):
+				return errors.New("发送超时")
+			}
 		}
 
 		// 稍微等待下一段发信，防止模组队列溢出
