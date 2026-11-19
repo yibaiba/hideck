@@ -85,7 +85,12 @@ func (inbox *SMSInbox) Select(storage string) error {
 		return fmt.Errorf("unsupported SMS read store %q", storage)
 	}
 	if inbox.current == nil {
-		return errors.New("CPMS selection failed in this transaction")
+		// A failed CPMS may still have changed one or more locations.
+		actual, err := inbox.modem.smsStorageSelection()
+		if err != nil {
+			return err
+		}
+		inbox.current = actual
 	}
 	if inbox.current[0] == storage {
 		return nil

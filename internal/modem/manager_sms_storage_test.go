@@ -196,3 +196,67 @@ func TestReadSMSRetainsMessageWhenProcessorFails(t *testing.T) {
 		t.Fatalf("commands=%v, want read without delete", commands)
 	}
 }
+
+func TestML307CSMSInboxRecoversOtherStoreAfterSelectionFailure(t *testing.T) {
+	m := newRunningTestManager(t)
+	m.SetStoredSMSHandler(func(_, _ string) {})
+	m.atProfile = ATProfileML307C
+	const (
+		pdu     = "0004038177F7000862119121000000027532"
+		initial = `+CPMS: "SM",1,10,"ME",1,180,"ME",1,180`
+	)
+	selectErr := errors.New("ME selection failed")
+	done := make(chan []string, 1)
+	go func() {
+		selection := initial
+		done <- respondToCommands(t, m, 8, func(req commandRequest) {
+			switch req.cmd {
+			case "AT+CPMS?":
+				req.respChan <- selection
+			case `AT+CPMS="ME","ME","ME"`:
+				// The modem changed its read location despite returning an error.
+				selection = `+CPMS: "ME",1,180,"ME",1,180,"ME",1,180`
+				req.errChan <- selectErr
+			case `AT+CPMS="SM","SM","SM"`:
+				selection = `+CPMS: "SM",1,10,"SM",1,10,"SM",1,10`
+				req.respChan <- "OK"
+			case "AT+CMGL=4":
+				if selection != `+CPMS: "SM",1,10,"SM",1,10,"SM",1,10` {
+					req.errChan <- errors.New("listed the wrong store")
+					return
+				}
+				req.respChan <- "+CMGL: 7,0,,17\n" + pdu
+			case `AT+CPMS="SM","ME","ME"`:
+				selection = initial
+				req.respChan <- "OK"
+			default:
+				req.errChan <- errors.New("unexpected command " + req.cmd)
+			}
+		})
+	}()
+
+	err := m.WithSMSInbox(func(inbox *SMSInbox) error {
+		err := inbox.Select("ME")
+		if !errors.Is(err, selectErr) {
+			t.Fatalf("ME selection error = %v", err)
+		}
+		if err := inbox.Select("SM"); err != nil {
+			t.Fatal(err)
+		}
+		records, err := inbox.List()
+		if err != nil || len(records) != 1 || records[0].PDU != pdu || !records[0].Received() {
+			t.Fatalf("SM records = %+v, %v", records, err)
+		}
+		return selectErr
+	})
+	if !errors.Is(err, selectErr) {
+		t.Fatalf("WithSMSInbox() error = %v", err)
+	}
+	want := []string{
+		"AT+CPMS?", `AT+CPMS="ME","ME","ME"`, "AT+CPMS?", `AT+CPMS="SM","SM","SM"`,
+		"AT+CPMS?", "AT+CMGL=4", `AT+CPMS="SM","ME","ME"`, "AT+CPMS?",
+	}
+	if got := <-done; !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+}

@@ -338,3 +338,49 @@ func TestATStoredSMSNoticeSurvivesReadFailure(t *testing.T) {
 		t.Fatal("an old scan discarded a newer SIM generation's notice")
 	}
 }
+
+func TestATStoredSMSDuplicateRequiresReceiptIMSIForDeletion(t *testing.T) {
+	initDevicePhoneNumberTestDB(t)
+	identity := SMSIdentity{ICCID: "8988110000000000001", IMSI: "001010123456789"}
+	part, err := decodeATInboxPart(identity, "0004038177F7000862119121000000027532")
+	if err != nil || part.Concat.IsConcat || part.Content != "甲" {
+		t.Fatalf("single PDU fixture = %+v, %v", part, err)
+	}
+	scope := db.SMSInboundFragmentScope{DeviceID: "c", ICCID: identity.ICCID, IMSI: identity.IMSI}
+	original, err := loadATSMSParts(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored, inbound, err := original.persist(part, true); err != nil || !stored || inbound == nil {
+		t.Fatalf("initial persist = %t, %+v, %v", stored, inbound, err)
+	}
+	scope.IMSI = "001010123456788"
+	changed, err := loadATSMSParts(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRetry := func(state *atSMSParts, sourceKnown, wantDelete bool) {
+		t.Helper()
+		if stored, inbound, err := state.persist(part, sourceKnown); err != nil || stored != wantDelete || inbound != nil {
+			t.Fatalf("replay persist = %t, %+v, %v, want delete=%t", stored, inbound, err, wantDelete)
+		}
+	}
+	assertRetry(changed, true, false)
+	assertRetry(original, true, true)
+
+	var row db.SMS
+	if err := db.DB.Where("iccid = ? AND fragment_session_key = ?", identity.ICCID, part.key).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := db.DeleteSMSByID(row.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertRetry(changed, true, false)
+	assertRetry(changed, false, false)
+	assertRetry(original, true, true)
+	assertRetry(original, false, true)
+	var count int64
+	if err := db.DB.Model(&db.SMS{}).Where("iccid = ?", identity.ICCID).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("replay recreated removed history: count=%d, err=%v", count, err)
+	}
+}

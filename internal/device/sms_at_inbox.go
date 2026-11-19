@@ -250,7 +250,9 @@ func (w *Worker) readStoredSMSInbox(owner storedSMSOwner, notice *storedSMSNotic
 		scanIncomplete := false
 		for _, store := range storedSMSStores {
 			if err := inbox.Select(store); err != nil {
-				return errors.Join(scanErr, err)
+				scanErr = errors.Join(scanErr, err)
+				scanIncomplete = true
+				continue
 			}
 			// Only notices already observed before this snapshot can identify
 			// a listed PDU. A newer CMTI may refer to a reused slot.
@@ -662,7 +664,10 @@ func (state *atSMSParts) commit(part atInboxPart, content string) (bool, *Inboun
 		return false, nil, err
 	}
 	if !result.Created {
-		return true, nil, nil
+		// History dedup follows ICCID. Slot deletion also requires the
+		// receipt to attest the current IMSI.
+		found, err := db.HasATSMSReceipt(state.scope.ICCID, state.scope.IMSI, part.key)
+		return found, nil, err
 	}
 	return true, &InboundSMS{
 		DeviceID: state.scope.DeviceID, ICCID: state.scope.ICCID, IMSI: state.scope.IMSI,
