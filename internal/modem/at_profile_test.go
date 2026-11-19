@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/yibaiba/hideck/internal/config"
 )
@@ -77,8 +78,24 @@ func TestML307CATQueries(t *testing.T) {
 	if ready, err := m.QuerySIMInserted(); !ready || err != nil || !m.IsSimInserted() {
 		t.Fatalf("ready CPIN = %v, %v", ready, err)
 	}
+	simEvents := make(chan string, 2)
+	m.SetSIMStatusHandler(func(_ *bool, state string) { simEvents <- state })
+	m.handleURC("+CPIN: SIM PIN")
+	select {
+	case state := <-simEvents:
+		if state != "SIM PIN" || !m.IsSimInserted() {
+			t.Fatalf("PIN URC changed confirmed readiness: event=%q ready=%v", state, m.IsSimInserted())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PIN URC was not dispatched")
+	}
 	if ready, err := m.QuerySIMInserted(); ready || !errors.Is(err, ErrSIMPINRequired) || m.IsSimInserted() {
 		t.Fatalf("locked CPIN = %v, %v", ready, err)
+	}
+	select {
+	case state := <-simEvents:
+		t.Fatalf("live PIN query requeued a SIM callback: %q", state)
+	case <-time.After(50 * time.Millisecond):
 	}
 	if ready, err := m.QuerySIMInserted(); ready || err != nil {
 		t.Fatalf("absent CPIN = %v, %v", ready, err)

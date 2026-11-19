@@ -38,26 +38,33 @@ func (w *Worker) markSIMRemoved(reason string) {
 	w.cacheMu.Unlock()
 }
 
-func (w *Worker) markSIMPINRequired() {
+func (w *Worker) markSIMPINRequired(generation uint64) bool {
 	now := time.Now()
 	w.cacheMu.Lock()
 	defer w.cacheMu.Unlock()
+	if w.state.Identity.Generation != generation {
+		return false
+	}
 	if w.state.Identity.LastError == modem.ErrSIMPINRequired.Error() && !w.state.Identity.Ready {
-		return
+		return true
 	}
 	w.markSIMIdentityDegradedLocked("sim_pin_required", modem.ErrSIMPINRequired, now)
 	w.state.Identity.Generation++
 	w.state.Runtime.SimInserted = false
 	w.state.Meta.RuntimeUpdatedAt = now
+	return true
 }
 
-func (p *Pool) handleSIMPINRequired(owner workerLifecycleOwner) {
+// Caller holds the device policy transition lock.
+func (p *Pool) handleConfirmedSIMPINRequired(owner workerLifecycleOwner, generation uint64) {
 	if !p.workerLifecycleOwnerCurrent(owner) || p.IsESIMSwitching(owner.worker.ID) {
 		return
 	}
 	w := owner.worker
-	w.markSIMPINRequired()
-	if err := p.retirePhoneRuntimesForSIMChange(owner); err != nil {
+	if !w.markSIMPINRequired(generation) {
+		return
+	}
+	if err := p.retirePhoneRuntimesForSIMChangeLocked(owner); err != nil {
 		logger.Warn("SIM PIN 锁定后停止电话业务失败", "device", w.ID, "err", err)
 	}
 	p.broadcastVoWiFiStateChange(w.ID)
@@ -71,9 +78,14 @@ func (p *Pool) retirePhoneRuntimesForSIMChange(owner workerLifecycleOwner) error
 	transition := p.policyTransitionFor(deviceID)
 	transition.Lock()
 	defer transition.Unlock()
+	return p.retirePhoneRuntimesForSIMChangeLocked(owner)
+}
+
+func (p *Pool) retirePhoneRuntimesForSIMChangeLocked(owner workerLifecycleOwner) error {
 	if !p.workerLifecycleOwnerCurrent(owner) {
 		return errPolicyOwnerChanged
 	}
+	deviceID := owner.worker.ID
 	p.stopNativeVoLTE(deviceID, "sim_identity_changed")
 	if err := p.stopModemVoice(deviceID); err != nil {
 		return fmt.Errorf("stop modem voice: %w", err)

@@ -664,6 +664,10 @@ func (w *Worker) RefreshIdentityLive(ctx context.Context, reason string) error {
 }
 
 func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSIMIdentityRefreshResult, error) {
+	return w.refreshIdentityLiveWithPresence(ctx, reason, false)
+}
+
+func (w *Worker) refreshIdentityLiveWithPresence(ctx context.Context, reason string, presenceConfirmed bool) (liveSIMIdentityRefreshResult, error) {
 	if w == nil {
 		return liveSIMIdentityRefreshResult{}, fmt.Errorf("worker_nil")
 	}
@@ -681,11 +685,15 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 	}
 
 	strictSIMIdentity := w.atDeviceRules().strictSIMIdentity
-	if strictSIMIdentity {
+	if strictSIMIdentity && !presenceConfirmed {
+		generation := w.SIMIdentityGeneration()
 		inserted, err := w.Backend.IsSimInserted(ctx)
 		if err != nil {
 			if errors.Is(err, modem.ErrSIMPINRequired) && (w.Pool == nil || !w.Pool.IsESIMSwitching(w.ID)) {
-				w.markSIMPINRequired()
+				if w.markSIMPINRequired(generation) && w.Pool != nil {
+					owner := workerLifecycleOwner{worker: w, generation: w.generation}
+					w.Pool.handleSIMStatusEventForOwner(owner, reason, nil, "SIM PIN")
+				}
 			}
 			return liveSIMIdentityRefreshResult{}, err
 		}
@@ -1041,11 +1049,9 @@ func (p *Pool) handleSIMStatusEventForOwner(owner workerLifecycleOwner, source s
 		return
 	}
 	state = strings.ToUpper(strings.TrimSpace(state))
+	pinHint := false
 	if owner.worker.atDeviceRules().strictSIMIdentity {
-		if modem.IsSIMPINRequiredState(state) {
-			p.handleSIMPINRequired(owner)
-			return
-		}
+		pinHint = modem.IsSIMPINRequiredState(state)
 		if insertedHint != nil {
 			if *insertedHint && !owner.worker.SIMIdentityConvergenceMatches("", 0) {
 				return
@@ -1058,7 +1064,7 @@ func (p *Pool) handleSIMStatusEventForOwner(owner workerLifecycleOwner, source s
 					return
 				}
 			}
-		} else if state != "READY" && state != "SIM REMOVED" && state != "SIM NOT INSERTED" {
+		} else if !pinHint && state != "READY" && state != "SIM REMOVED" && state != "SIM NOT INSERTED" {
 			return
 		}
 	} else if (insertedHint != nil && *insertedHint) || state == "READY" {
@@ -1071,11 +1077,16 @@ func (p *Pool) handleSIMStatusEventForOwner(owner workerLifecycleOwner, source s
 		p.simEventTimers = make(map[string]*time.Timer)
 	}
 	if timer := p.simEventTimers[deviceID]; timer != nil {
+		// A pending status check will already detect a live PIN lock.
+		if pinHint {
+			p.simEventMu.Unlock()
+			return
+		}
 		timer.Stop()
 	}
 	var timer *time.Timer
 	timer = time.AfterFunc(1500*time.Millisecond, func() {
-		p.confirmSIMRemovedForOwner(owner, source, timer)
+		p.confirmSIMStatusForOwner(owner, source, timer, pinHint)
 	})
 	p.simEventTimers[deviceID] = timer
 	p.simEventMu.Unlock()
@@ -1188,6 +1199,10 @@ func (p *Pool) confirmSIMRemovedAndStopVoWiFi(deviceID, source string) {
 }
 
 func (p *Pool) confirmSIMRemovedForOwner(owner workerLifecycleOwner, source string, expected *time.Timer) {
+	p.confirmSIMStatusForOwner(owner, source, expected, false)
+}
+
+func (p *Pool) confirmSIMStatusForOwner(owner workerLifecycleOwner, source string, expected *time.Timer, pinHint bool) {
 	if p == nil || owner.worker == nil {
 		return
 	}
@@ -1222,17 +1237,23 @@ func (p *Pool) confirmSIMRemovedForOwner(owner workerLifecycleOwner, source stri
 	}
 	ctx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
 	defer cancel()
+	generation := w.SIMIdentityGeneration()
 	inserted, err := w.Backend.IsSimInserted(ctx)
 	if err != nil {
-		transition.Unlock()
 		if w.atDeviceRules().strictSIMIdentity && errors.Is(err, modem.ErrSIMPINRequired) {
-			p.handleSIMPINRequired(owner)
+			p.handleConfirmedSIMPINRequired(owner, generation)
+			transition.Unlock()
 			return
 		}
+		transition.Unlock()
 		logger.Warn("SIM 拔卡确认失败，跳过 VoWiFi 自动停止", "device", deviceID, "source", source, "err", err)
 		return
 	}
 	if inserted {
+		if pinHint && !w.SIMIdentityConvergenceMatches("", 0) {
+			transition.Unlock()
+			return
+		}
 		result := p.refreshConfirmedSIMInsertion(owner)
 		transition.Unlock()
 		p.finishConfirmedSIMInsertion(owner, source, result)
@@ -1262,7 +1283,7 @@ type simInsertionRefreshResult struct {
 func (p *Pool) refreshConfirmedSIMInsertion(owner workerLifecycleOwner) simInsertionRefreshResult {
 	w := owner.worker
 	previous := currentSIMOwnership(w)
-	_, err := p.refreshWorkerIdentityState(w, "sim_status_inserted")
+	_, err := p.refreshWorkerIdentityState(w, "sim_status_inserted", true)
 	return simInsertionRefreshResult{
 		current:         p.workerLifecycleOwnerCurrent(owner),
 		identityChanged: err == nil && currentSIMOwnership(w) != previous,
@@ -1277,10 +1298,6 @@ func (p *Pool) finishConfirmedSIMInsertion(owner workerLifecycleOwner, source st
 	}
 	p.broadcastVoWiFiStateChange(w.ID)
 	if result.err != nil {
-		if w.atDeviceRules().strictSIMIdentity && errors.Is(result.err, modem.ErrSIMPINRequired) {
-			p.handleSIMPINRequired(owner)
-			return
-		}
 		logger.Warn("SIM 插入后刷新身份失败", "device", w.ID, "source", source, "err", result.err)
 		return
 	}
@@ -1661,7 +1678,7 @@ func (p *Pool) refreshIdentityAndApplyCardPolicy(worker *Worker, reason string) 
 	if worker == nil {
 		return liveSIMIdentityRefreshResult{}, nil
 	}
-	result, identityErr := p.refreshWorkerIdentityState(worker, reason)
+	result, identityErr := p.refreshWorkerIdentityState(worker, reason, false)
 	refreshErr := identityErr
 
 	if p != nil {
@@ -1679,12 +1696,12 @@ func (p *Pool) refreshIdentityAndApplyCardPolicy(worker *Worker, reason string) 
 	return result, refreshErr
 }
 
-func (p *Pool) refreshWorkerIdentityState(worker *Worker, reason string) (liveSIMIdentityRefreshResult, error) {
+func (p *Pool) refreshWorkerIdentityState(worker *Worker, reason string, presenceConfirmed bool) (liveSIMIdentityRefreshResult, error) {
 	if worker == nil {
 		return liveSIMIdentityRefreshResult{}, fmt.Errorf("worker_nil")
 	}
 	_ = worker.RefreshRuntime(nil, reason)
-	result, err := worker.refreshIdentityLive(nil, reason)
+	result, err := worker.refreshIdentityLiveWithPresence(nil, reason, presenceConfirmed)
 	if p != nil {
 		p.PersistRuntimeState(worker)
 		p.PersistIdentityState(worker)

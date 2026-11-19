@@ -181,9 +181,6 @@ func (m *Manager) queryCPINSIMPresence(query *atCPINPresenceQuery) (bool, error)
 	if err == nil || errors.Is(err, ErrSIMPINRequired) {
 		m.cacheCPINSIMState(inserted, err)
 	}
-	if errors.Is(err, ErrSIMPINRequired) {
-		m.dispatchSIMStatusURC(nil, "SIM PIN")
-	}
 	return inserted, err
 }
 

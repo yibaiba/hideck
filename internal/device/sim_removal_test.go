@@ -177,11 +177,95 @@ func TestConfirmedSIMRemovalCancelsStartingVoWiFi(t *testing.T) {
 
 type ml307cSIMBackendStub struct {
 	workerStartupIdentityBackendStub
-	simErr error
+	simErr     error
+	onSIMQuery func()
 }
 
 func (s *ml307cSIMBackendStub) IsSimInserted(context.Context) (bool, error) {
+	if s.onSIMQuery != nil {
+		s.onSIMQuery()
+	}
 	return s.simErr == nil, s.simErr
+}
+
+func confirmScheduledSIMPIN(t *testing.T, p *Pool, owner workerLifecycleOwner) {
+	t.Helper()
+	p.simEventMu.Lock()
+	timer := p.simEventTimers[owner.worker.ID]
+	p.simEventMu.Unlock()
+	if timer == nil {
+		t.Fatal("PIN event did not schedule a SIM status check")
+	}
+	if !timer.Stop() {
+		t.Fatal("SIM status check ran before the test could confirm it")
+	}
+	p.confirmSIMStatusForOwner(owner, "test", timer, true)
+}
+
+func TestML307CDelayedPINKeepsCurrentSIMAndCall(t *testing.T) {
+	p := NewPool(&config.Config{})
+	t.Cleanup(func() { _ = p.Shutdown() })
+	cfg := config.DeviceConfig{ID: "c", DeviceBackend: "at", ATPort: "/dev/ttyUSB8"}
+	m, err := modem.NewWithATProfile(cfg, modem.ATProfileML307C)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &ml307cSIMBackendStub{}
+	be.liveICCID, be.liveIMSI = "card-new", "imsi-new"
+	w := &Worker{ID: cfg.ID, Pool: p, Config: cfg, Modem: m, Backend: be}
+	p.AttachWorkerForTest(w)
+	setWorkerSMSIdentity(w, SMSIdentity{ICCID: "card-old", IMSI: "imsi-old"})
+	w.state.Identity.Generation++
+	setWorkerSMSIdentity(w, SMSIdentity{ICCID: "card-new", IMSI: "imsi-new"})
+	w.state.Identity.Generation++
+	before := currentSIMOwnership(w)
+	owner := p.captureWorkerLifecycleOwner(w.ID)
+
+	instance := &runtimehost.Instance{}
+	p.voWiFiRuntimeStore().SetInstance(w.ID, instance)
+	t.Cleanup(func() { p.voWiFiRuntimeStore().DeleteInstance(w.ID, nil) })
+	stops := 0
+	p.voWiFiHost().LifecycleControllerForTest().TestRun = func(_ context.Context, _ vowifihost.LifecycleCommand) error {
+		stops++
+		return nil
+	}
+
+	p.handleSIMStatusEventForOwner(owner, "test", nil, "SIM PIN")
+	confirmScheduledSIMPIN(t, p, owner)
+	if got := currentSIMOwnership(w); got != before || w.SIMIdentityConvergenceMatches("", 0) {
+		t.Fatalf("stale PIN changed ready SIM ownership: before=%+v after=%+v", before, got)
+	}
+	if stops != 0 {
+		t.Fatalf("stale PIN stopped an active runtime %d times", stops)
+	}
+
+	p.switchMu.Lock()
+	p.switchingDevices[w.ID] = true
+	p.switchMu.Unlock()
+	be.simErr = modem.ErrSIMPINRequired
+	p.handleSIMStatusEventForOwner(owner, "test", nil, "SIM PIN")
+	confirmScheduledSIMPIN(t, p, owner)
+	if got := currentSIMOwnership(w); got != before || stops != 0 {
+		t.Fatalf("PIN during eSIM switch changed SIM ownership or stopped calls: before=%+v after=%+v stops=%d", before, got, stops)
+	}
+	p.switchMu.Lock()
+	delete(p.switchingDevices, w.ID)
+	p.switchMu.Unlock()
+
+	// A separate live identity refresh can publish a new generation while
+	// the PIN confirmation reads the backend.
+	be.onSIMQuery = func() {
+		w.cacheMu.Lock()
+		defer w.cacheMu.Unlock()
+		setWorkerSMSIdentity(w, SMSIdentity{ICCID: "card-newer", IMSI: "imsi-newer"})
+		w.state.Identity.Generation++
+	}
+	p.handleSIMStatusEventForOwner(owner, "test", nil, "SIM PIN")
+	confirmScheduledSIMPIN(t, p, owner)
+	if got := currentSIMOwnership(w); got.iccid != "card-newer" || got.generation != before.generation+1 ||
+		w.SIMIdentityConvergenceMatches("", 0) || stops != 0 {
+		t.Fatalf("old PIN result affected a newer SIM generation: ownership=%+v stops=%d", got, stops)
+	}
 }
 
 func TestML307CPINRecoveryRetriesIdentityOnRepeatedReady(t *testing.T) {
@@ -208,6 +292,7 @@ func TestML307CPINRecoveryRetriesIdentityOnRepeatedReady(t *testing.T) {
 	}
 
 	p.handleSIMStatusEventForOwner(owner, "test", nil, "SIM PUK")
+	confirmScheduledSIMPIN(t, p, owner)
 	select {
 	case command := <-commands:
 		if command.Kind != vowifihost.LifecycleCommandDisable {

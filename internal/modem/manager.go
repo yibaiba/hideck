@@ -1306,8 +1306,12 @@ func (m *Manager) RefreshStatus(onAlert func(msg string), onRecover func(msg str
 
 	// 检查 SIM 卡是否存活
 	simInserted, simErr := m.QuerySIMInserted()
-	if m.atProfile.dialect().cpinPresence != nil && simErr == nil {
-		m.dispatchSIMStatusURC(&simInserted, "")
+	if m.atProfile.dialect().cpinPresence != nil {
+		if errors.Is(simErr, ErrSIMPINRequired) {
+			m.dispatchSIMStatusURC(nil, "SIM PIN")
+		} else if simErr == nil {
+			m.dispatchSIMStatusURC(&simInserted, "")
+		}
 	}
 
 	if v, err := m.QueryOperator(); err == nil {
@@ -1455,9 +1459,6 @@ func (m *Manager) handleURC(line string) {
 				}
 				break
 			}
-		}
-		if m.atProfile.dialect().cpinPresence != nil && IsSIMPINRequiredState(state) {
-			m.cacheCPINSIMState(false, ErrSIMPINRequired)
 		}
 		m.dispatchSIMStatusURC(nil, state)
 	}
