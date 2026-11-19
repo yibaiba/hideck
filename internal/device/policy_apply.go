@@ -54,11 +54,12 @@ func (p *Pool) resolveAndApplyPolicy(worker *Worker, reason string) policyApplyR
 	if err := validate(); err != nil {
 		return policyApplyResult{ICCID: iccid, Reason: "owner_changed", Err: err}
 	}
-	// Apply the unsupported mode as phone-off for this worker only. Keep the
-	// card's saved mode and explicit radio and network settings.
-	if worker.CheckPhoneModeSupported(pol.PhoneMode) != nil {
-		pol.VoWiFiEnabled = false
+	class, err := ClassifyWorkerLebaraUK(worker)
+	if err != nil {
+		logger.Warn("识别 Lebara UK 射频策略失败", "device", worker.ID, "iccid", iccid, "err", err)
+		return policyApplyResult{ICCID: iccid, Reason: "apply_failed", Err: err}
 	}
+	pol = effectiveCardPhonePolicy(worker, pol, class)
 	// Finish the old call before projecting a policy that disallows new calls.
 	// Failed hangup leaves the current session and policy available for retry.
 	var finishNativeTransition func()
@@ -98,10 +99,7 @@ func (p *Pool) resolveAndApplyPolicy(worker *Worker, reason string) policyApplyR
 	if err := validate(); err != nil {
 		return policyApplyResult{ICCID: iccid, Reason: "owner_changed", Err: err}
 	}
-	if err := applyPolicyToWorker(worker, pol); err != nil {
-		logger.Warn("投影卡策略失败", "device", worker.ID, "iccid", iccid, "err", err)
-		return policyApplyResult{ICCID: iccid, Reason: "apply_failed", Err: err}
-	}
+	applyPolicyToWorker(worker, pol, class)
 	effective := worker.Config
 	logger.Info("已投影卡策略", "device", worker.ID, "iccid", iccid,
 		"network", effective.NetworkEnabled, "vowifi", effective.VoWiFiEnabled,

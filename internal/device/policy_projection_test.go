@@ -15,9 +15,18 @@ import (
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
+func applyTestCardPolicy(t *testing.T, w *Worker, pol cardpolicy.Policy) {
+	t.Helper()
+	class, err := ClassifyWorkerLebaraUK(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPolicyToWorker(w, effectiveCardPhonePolicy(w, pol, class), class)
+}
+
 func TestApplyPolicyCellularAirplaneKeepsSoftwarePhone(t *testing.T) {
 	w := &Worker{ID: "wwan0"}
-	applyPolicyToWorker(w, cardpolicy.Policy{
+	applyTestCardPolicy(t, w, cardpolicy.Policy{
 		ICCID: "x", VoWiFiEnabled: true, PhoneMode: "cellular",
 		AirplaneEnabled: true, NetworkEnabled: true, DataStrategy: "on_demand",
 	})
@@ -33,7 +42,7 @@ func TestApplyPolicyChinaUnicomForcesNativeVoLTE(t *testing.T) {
 	w := &Worker{ID: "wwan1"}
 	w.state.Identity.NativeMCC = "460"
 	w.state.Identity.IMSI = "460011234567890"
-	applyPolicyToWorker(w, cardpolicy.Policy{
+	applyTestCardPolicy(t, w, cardpolicy.Policy{
 		ICCID: "x", VoWiFiEnabled: true, PhoneMode: "cellular", DataStrategy: "on_demand",
 	})
 	if w.Config.PhoneMode != PhoneModeVoLTE {
@@ -46,7 +55,7 @@ func TestApplyPolicyChinaUnicomForcesNativeVoLTE(t *testing.T) {
 
 func TestApplyPolicyVoLTECampsWithoutForcingData(t *testing.T) {
 	w := &Worker{ID: "wwan1"}
-	applyPolicyToWorker(w, cardpolicy.Policy{
+	applyTestCardPolicy(t, w, cardpolicy.Policy{
 		ICCID: "x", VoWiFiEnabled: true, PhoneMode: "volte",
 	})
 	if w.Config.AirplaneEnabled || w.Config.NetworkEnabled || w.cellularRadioIsSuppressed() {
@@ -59,14 +68,14 @@ func TestApplyPolicyVoLTECampsWithoutForcingData(t *testing.T) {
 
 func TestApplyPolicyCellularIdleKeepsCamped(t *testing.T) {
 	w := &Worker{ID: "wwan0"}
-	applyPolicyToWorker(w, cardpolicy.Policy{
+	applyTestCardPolicy(t, w, cardpolicy.Policy{
 		ICCID: "x", VoWiFiEnabled: true, PhoneMode: "cellular", DataStrategy: "on_demand",
 	})
 	if w.Config.AirplaneEnabled || w.Config.NetworkEnabled || w.cellularRadioIsSuppressed() {
 		t.Fatalf("蜂窝未开流量应保持驻网: %+v suppressed=%v", w.Config, w.cellularRadioIsSuppressed())
 	}
 
-	applyPolicyToWorker(w, cardpolicy.Policy{
+	applyTestCardPolicy(t, w, cardpolicy.Policy{
 		ICCID: "x", VoWiFiEnabled: true, PhoneMode: "cellular", DataStrategy: "on_demand", NetworkEnabled: true,
 	})
 	if w.Config.AirplaneEnabled || !w.Config.NetworkEnabled || w.cellularRadioIsSuppressed() {
@@ -82,9 +91,7 @@ func TestApplyPolicyLocksLebaraUKRadioWithoutRewritingIntent(t *testing.T) {
 		ICCID: "8944000000000000087", AirplaneEnabled: false, NetworkEnabled: true,
 		PhoneMode: "cellular", VoWiFiEnabled: true, DataStrategy: "always",
 	}
-	if err := applyPolicyToWorker(w, pol); err != nil {
-		t.Fatal(err)
-	}
+	applyTestCardPolicy(t, w, pol)
 	if !w.Config.AirplaneEnabled || w.Config.NetworkEnabled || w.Config.PhoneMode != "wifi" {
 		t.Fatalf("Lebara 运行时应锁射频: %+v", w.Config)
 	}
@@ -125,7 +132,7 @@ func TestResolveAndApplyPolicyKeepsLebaraUKRadioOff(t *testing.T) {
 func TestApplyPolicyDoesNotLockBareVodafoneNL(t *testing.T) {
 	w := &Worker{ID: "wwan-nl"}
 	w.state.Identity.IMSI = "204040000000001"
-	applyPolicyToWorker(w, cardpolicy.Policy{
+	applyTestCardPolicy(t, w, cardpolicy.Policy{
 		ICCID: "x", AirplaneEnabled: false, NetworkEnabled: true, PhoneMode: "cellular",
 	})
 	if w.Config.AirplaneEnabled || !w.Config.NetworkEnabled || w.Config.PhoneMode != "cellular" {
@@ -135,7 +142,7 @@ func TestApplyPolicyDoesNotLockBareVodafoneNL(t *testing.T) {
 
 func TestApplyPolicyProjectsFields(t *testing.T) {
 	w := &Worker{ID: "wwan0"}
-	applyPolicyToWorker(w, cardpolicy.Policy{
+	applyTestCardPolicy(t, w, cardpolicy.Policy{
 		ICCID: "x", NetworkEnabled: true, VoWiFiEnabled: true,
 		AirplaneEnabled: true, IPVersion: "v4v6", APN: "ims",
 	})
@@ -293,7 +300,7 @@ func TestInitialCellularRadioSuppressionWaitsForLiveCardPolicy(t *testing.T) {
 
 	w := &Worker{ID: "wwan0"}
 	w.setCellularRadioSuppressed(p.initialCellularRadioSuppression(w.Config))
-	applyPolicyToWorker(w, cardpolicy.Policy{ICCID: "123", NetworkEnabled: true})
+	applyTestCardPolicy(t, w, cardpolicy.Policy{ICCID: "123", NetworkEnabled: true})
 	if w.cellularRadioIsSuppressed() {
 		t.Fatal("在线卡策略投影后必须解除蜂窝驻网抑制")
 	}

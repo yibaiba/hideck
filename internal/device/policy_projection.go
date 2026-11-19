@@ -42,15 +42,23 @@ func shouldEnterAirplaneOnDeviceBind(cfg config.DeviceConfig) bool {
 	return shouldSuppressCellularRadio(cfg)
 }
 
-// applyPolicyToWorker 把卡策略投影进 worker.Config 的运行时有效字段。
-// 不在此触发 re-apply，仅做纯投影，便于单测。
-func applyPolicyToWorker(w *Worker, p cardpolicy.Policy) error {
-	if w == nil {
-		return nil
+// effectiveCardPhonePolicy applies the RF lock before checking the mode.
+func effectiveCardPhonePolicy(w *Worker, p cardpolicy.Policy, class LebaraUKClass) cardpolicy.Policy {
+	if class.IsLebara {
+		p.PhoneMode = PhoneModeWiFi
+		p.AirplaneEnabled = true
+		p.NetworkEnabled = false
 	}
-	class, err := ClassifyWorkerLebaraUK(w)
-	if err != nil {
-		return fmt.Errorf("识别 Lebara UK 射频策略失败: %w", err)
+	if w.CheckPhoneModeSupported(p.PhoneMode) != nil {
+		p.VoWiFiEnabled = false
+	}
+	return p
+}
+
+// applyPolicyToWorker projects the effective policy without persisting it.
+func applyPolicyToWorker(w *Worker, p cardpolicy.Policy, class LebaraUKClass) {
+	if w == nil {
+		return
 	}
 	w.Config.NetworkEnabled = p.NetworkEnabled
 	w.Config.VoWiFiEnabled = p.VoWiFiEnabled
@@ -69,7 +77,9 @@ func applyPolicyToWorker(w *Worker, p cardpolicy.Policy) error {
 			w.Config.NetworkEnabled = false
 		}
 	}
-	forceSoftwareIMSBlockedToVoLTE(w, p)
+	if !class.IsLebara {
+		forceSoftwareIMSBlockedToVoLTE(w, p)
+	}
 	w.Config.IPVersion = strings.TrimSpace(p.IPVersion)
 	if w.Config.IPVersion == "" {
 		w.Config.IPVersion = "v4"
@@ -78,11 +88,7 @@ func applyPolicyToWorker(w *Worker, p cardpolicy.Policy) error {
 	w.Config.SMSEnabled = true // SMS 恒开
 	// 用投影后的有效网络开关。WiFi calling 已强制关流量，启动失败不得借此把射频拉回来。
 	w.restoreNetworkAfterVoWiFi = w.Config.NetworkEnabled
-	if class.IsLebara {
-		applyLebaraUKRFLock(w)
-	}
 	w.setCellularRadioSuppressed(shouldSuppressCellularRadio(w.Config))
-	return nil
 }
 
 func withConnectHoldRF(cfg config.DeviceConfig) config.DeviceConfig {

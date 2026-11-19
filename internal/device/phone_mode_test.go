@@ -103,7 +103,7 @@ func TestML307CPhonePolicyKeepsExplicitRadioSettings(t *testing.T) {
 			} else if len(radio.setCalls) != 0 || w.cellularRadioIsSuppressed() {
 				t.Fatalf("unsupported voice mode changed radio state: %v", radio.setCalls)
 			}
-			if resolver.pol != pol || p.currentCardPolicyAllowsVoWiFi(w, pol.ICCID, "test") {
+			if resolver.pol != pol || p.currentCardPolicyAllowsVoWiFi(w, pol.ICCID, "test", LebaraUKClass{}) {
 				t.Fatalf("card policy changed or still enables recovery: %+v", resolver.pol)
 			}
 			if tc.mode == PhoneModeWiFi || tc.mode == PhoneModeCellular {
@@ -138,7 +138,7 @@ func TestML307COneNZWiFiPolicyStillStarts(t *testing.T) {
 	if !w.Config.VoWiFiEnabled || !w.Config.AirplaneEnabled || w.Config.PhoneMode != PhoneModeWiFi {
 		t.Fatalf("WiFi policy changed: %+v", w.Config)
 	}
-	if !p.currentCardPolicyAllowsVoWiFi(w, w.CurrentICCID(), "test") {
+	if !p.currentCardPolicyAllowsVoWiFi(w, w.CurrentICCID(), "test", LebaraUKClass{}) {
 		t.Fatal("One NZ lost software IMS recovery")
 	}
 	select {
@@ -146,6 +146,39 @@ func TestML307COneNZWiFiPolicyStillStarts(t *testing.T) {
 		if cmd.DeviceID != w.ID {
 			t.Fatalf("unexpected recovery: %+v", cmd)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("WiFi recovery was not scheduled")
+	}
+}
+
+func TestML307CLebaraSavedVoLTERecoversEffectiveWiFi(t *testing.T) {
+	p := newDesiredVoWiFiTestPool(t, "ml307c", false, "234870000000001")
+	t.Cleanup(p.cancel)
+	w := p.GetWorker("ml307c")
+	w.Modem = newML307CPhoneTestModem(t, w.ID)
+	pol := cardpolicy.Policy{
+		ICCID: w.CurrentICCID(), PhoneMode: PhoneModeVoLTE, VoWiFiEnabled: true,
+	}
+	resolver := &stubPolicyResolver{pol: pol}
+	p.SetPolicyResolver(resolver)
+	commands := make(chan vowifihost.LifecycleCommand, 1)
+	p.voWiFiHost().LifecycleControllerForTest().TestRun = func(_ context.Context, command vowifihost.LifecycleCommand) error {
+		commands <- command
+		return nil
+	}
+	if result := p.resolveAndApplyPolicy(w, "test"); !result.Applied || result.Err != nil {
+		t.Fatalf("apply policy: %+v", result)
+	}
+	if !w.Config.VoWiFiEnabled || !w.Config.AirplaneEnabled || w.Config.NetworkEnabled ||
+		w.Config.PhoneMode != PhoneModeWiFi || resolver.pol != pol {
+		t.Fatalf("effective config = %+v, saved policy = %+v", w.Config, resolver.pol)
+	}
+	class, err := ClassifyWorkerLebaraUK(w)
+	if err != nil || !class.IsLebara || !p.currentCardPolicyAllowsVoWiFi(w, pol.ICCID, "test", class) {
+		t.Fatalf("saved native mode blocked effective WiFi recovery: %+v, %v", class, err)
+	}
+	select {
+	case <-commands:
 	case <-time.After(time.Second):
 		t.Fatal("WiFi recovery was not scheduled")
 	}
