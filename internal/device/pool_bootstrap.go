@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -154,37 +153,16 @@ func configuredDevicesATDiscovery(devices []config.DeviceConfig) compatibleATDis
 	return scope
 }
 
-func configuredPortRequiresLiveATIdentity(cfg config.DeviceConfig, observations []atScanObservation) bool {
-	if usb := strings.TrimSpace(cfg.USBPath); usb != "" {
-		profile := readUSBDeviceIdentity(resolveUSBPathForScan(usb)).atProfile()
-		if atDeviceRulesFor(profile).verifyLiveIMEI {
-			return true
-		}
+func configuredATPort(cfg config.DeviceConfig) string {
+	if port := strings.TrimSpace(cfg.ATPort); port != "" {
+		return port
 	}
-	for _, port := range []string{cfg.ATPort, cfg.ManagePort} {
-		port = strings.TrimSpace(port)
-		if port == "" {
-			continue
-		}
-		if target, err := filepath.EvalSymlinks(port); err == nil {
-			port = target
-		}
-		for _, observation := range observations {
-			if containsPort(observation.atPorts, port) {
-				return true
-			}
-		}
-	}
-	return false
+	return strings.TrimSpace(cfg.ManagePort)
 }
 
-// configuredATDevice finds the explicitly selected port before a legacy config
-// has learned its IMEI. Keep the real port for runtime ownership checks.
+// configuredATDevice finds which USB device owns the explicitly selected port.
 func configuredATDevice(cfg config.DeviceConfig) (CompatibleModem, bool) {
-	port := strings.TrimSpace(cfg.ATPort)
-	if port == "" {
-		port = strings.TrimSpace(cfg.ManagePort)
-	}
+	port := configuredATPort(cfg)
 	if port == "" {
 		return CompatibleModem{}, false
 	}
@@ -269,6 +247,8 @@ type apduArbiterAwareTransport interface {
 	SetAPDUArbiter(arbiter *apduarbiter.Arbiter)
 }
 
+var startWorkerModem = (*modem.Manager).StartWithExpectedIMEI
+
 func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) {
 	p.mu.Lock()
 	if _, exists := p.workers[devCfg.ID]; exists {
@@ -330,6 +310,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 
 	var matched *QMIDevice
 	var atProfile modem.ATProfile
+	explicitATIdentity := configuredATPort(devCfg) != "" && strings.TrimSpace(devCfg.ModemIMEI) != ""
 	discoveryCache := &qmiBootstrapDiscoveryCache{}
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
 	configuredIndex := BuildConfiguredDeviceIndex(config.ListDevices())
@@ -338,14 +319,18 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 		if scan == compatibleATDiscoveryNone && configuredDevicesATDiscovery(config.ListDevices()) == compatibleATDiscoveryAll {
 			scan = compatibleATDiscoveryAll
 		}
-		atIMEIConfigured := resolvedBackendMode(devCfg) == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) != ""
-		hardware, atObservations := p.collectRescanHardware(nil, liveWorkerIndex, scan)
+		hardware, _ := p.collectRescanHardware(nil, liveWorkerIndex, scan)
 		resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 
 		if len(resolved.Matched) > 0 {
 			hw := resolved.Matched[0].Hardware
 			atProfile = hw.ATProfile()
 			if atDeviceRulesFor(atProfile).verifyLiveIMEI {
+				if resolvedBackendMode(devCfg) == backend.BackendAT {
+					if port, _ := liveWorkerIndex.ownedATPort(hw.ATPorts); port != "" {
+						return nil, fmt.Errorf("AT 口 %s 已由现有设备接管", port)
+					}
+				}
 				devCfg.USBPath = hw.USBPath
 				devCfg.ATPort = hw.ATPort
 				devCfg.ManagePort = hw.ATPort
@@ -368,8 +353,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 				devCfg.ModemIMEI = resolved.Matched[0].BackfillIMEI
 				logger.Info(fmt.Sprintf("[%s] MBIM/AT 通过 USB 路径认领成功，回填实时 IMEI", devCfg.ID), "imei", devCfg.ModemIMEI)
 			}
-		} else if (strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ManagePort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "") ||
-			(atIMEIConfigured && configuredPortRequiresLiveATIdentity(devCfg, atObservations)) {
+		} else if configuredATPort(devCfg) == "" && strings.TrimSpace(devCfg.ControlDevice) == "" {
 			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
 		}
 	} else if hasManagedQMINetwork(devCfg) {
@@ -443,14 +427,23 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 
 	backendMode := resolvedBackendMode(devCfg)
-	if backendMode == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) == "" && atProfile == modem.ATProfileDefault {
+	if backendMode == backend.BackendAT && atProfile == modem.ATProfileDefault &&
+		(strings.TrimSpace(devCfg.ModemIMEI) == "" || explicitATIdentity) {
+		ports := []string{configuredATPort(devCfg)}
 		if hw, ok := configuredATDevice(devCfg); ok {
 			atProfile = hw.ATProfile()
+			ports = hw.ATPorts
 			if atDeviceRulesFor(atProfile).verifyLiveIMEI {
-				if port, _ := liveWorkerIndex.ownedATPort(hw.ATPorts); port != "" {
-					return nil, fmt.Errorf("AT 口 %s 已由现有设备接管", port)
-				}
 				devCfg.USBPath, devCfg.ATPort, devCfg.ManagePort = hw.USBPath, hw.ATPort, hw.ATPort
+			}
+		} else if usb := resolveUSBPathForScan(devCfg.USBPath); explicitATIdentity && usb != "" &&
+			atDeviceRulesFor(readUSBDeviceIdentity(usb).atProfile()).verifyLiveIMEI {
+			// The selected path is not a recognized AT interface of the attached modem.
+			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
+		}
+		if explicitATIdentity || atDeviceRulesFor(atProfile).verifyLiveIMEI {
+			if port, _ := liveWorkerIndex.ownedATPort(ports); port != "" {
+				return nil, fmt.Errorf("AT 口 %s 已由现有设备接管", port)
 			}
 		}
 	}
@@ -692,7 +685,11 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 	logger.Info(fmt.Sprintf("[%s] 短信模式已配置", w.ID), "sms_mode", w.smsMode.String(), "backend", backendMode)
 
-	if err := m.Start(); err != nil {
+	expectedOpenedIMEI := ""
+	if backendMode == backend.BackendAT && (explicitATIdentity || atDeviceRulesFor(atProfile).verifyLiveIMEI) {
+		expectedOpenedIMEI = strings.TrimSpace(devCfg.ModemIMEI)
+	}
+	if err := startWorkerModem(m, expectedOpenedIMEI); err != nil {
 		if qmiTransportLifecycle != nil {
 			_ = qmiTransportLifecycle.Stop()
 		}

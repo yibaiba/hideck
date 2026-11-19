@@ -522,6 +522,11 @@ func (m *Manager) tripATTimeoutWatchdog(cmd string, failures int) {
 
 // Start 启动 AT 管理器的后台协程
 func (m *Manager) Start() error {
+	return m.StartWithExpectedIMEI("")
+}
+
+// StartWithExpectedIMEI verifies the opened AT port before modem initialization.
+func (m *Manager) StartWithExpectedIMEI(expected string) error {
 	m.startStopMu.Lock()
 	defer m.startStopMu.Unlock()
 	select {
@@ -544,7 +549,7 @@ func (m *Manager) Start() error {
 
 	var err error
 	for attempt := 0; attempt < 8; attempt++ {
-		m.port, err = serial.Open(m.atPort, m.portMode)
+		m.port, err = openManagerSerialPort(m.atPort, m.portMode)
 		if err == nil {
 			break
 		}
@@ -557,6 +562,13 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("打开串口 %s 失败: %w", m.atPort, err)
 	}
 
+	if expected != "" {
+		if err := m.verifyOpenedIMEI(expected); err != nil {
+			_ = m.port.Close()
+			m.port = nil
+			return err
+		}
+	}
 	m.port.SetReadTimeout(100 * time.Millisecond)
 	m.setRunning(true)
 
@@ -592,6 +604,8 @@ func (m *Manager) Start() error {
 	logger.Info(fmt.Sprintf("[%s] AT 管理器已启动", m.cfg.ID), "port", m.atPort)
 	return nil
 }
+
+var openManagerSerialPort = serial.Open
 
 func isRetryableSerialOpenErr(err error) bool {
 	if err == nil {

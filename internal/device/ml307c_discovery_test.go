@@ -117,10 +117,10 @@ func TestML307CDiscoveryAndRebind(t *testing.T) {
 		t.Fatalf("unowned failed read retained a cached IMEI: %q, %v", active.IMEI, handled)
 	}
 
-	origProbe := probeProfileIMEICachedFn
-	t.Cleanup(func() { probeProfileIMEICachedFn = origProbe })
+	origProbe := probeProfileIMEIFn
+	t.Cleanup(func() { probeProfileIMEIFn = origProbe })
 	var probed []string
-	probeProfileIMEICachedFn = func(profile modem.ATProfile, _ context.Context, port string, _ time.Duration) (string, error) {
+	probeProfileIMEIFn = func(profile modem.ATProfile, _ context.Context, port string, _ time.Duration) (string, error) {
 		if profile != modem.ATProfileML307C {
 			t.Fatalf("IMEI probe profile = %v", profile)
 		}
@@ -244,10 +244,19 @@ func TestML307CBootstrapRejectsUnreadableIdentityOnConfiguredPort(t *testing.T) 
 		return dev, ""
 	}
 
+	prevStart := startWorkerModem
+	t.Cleanup(func() { startWorkerModem = prevStart })
+	startWorkerModem = func(m *modem.Manager, expected string) error {
+		if m.ATProfile() != modem.ATProfileML307C || m.ATPort() != port || expected != cfg.ModemIMEI {
+			t.Fatalf("unreadable discovered port lost its startup identity gate: port=%q profile=%v expected=%q", m.ATPort(), m.ATProfile(), expected)
+		}
+		return errors.New("无法验证")
+	}
+
 	p := NewPool(&config.Config{Devices: []config.DeviceConfig{cfg}})
 	t.Cleanup(p.cancel)
 	worker, err := p.AddWorkerFromConfig(cfg)
-	if worker != nil || err == nil || !strings.Contains(err.Error(), "未找到匹配的非 QMI 硬件") || probes != 1 {
+	if worker != nil || err == nil || !strings.Contains(err.Error(), "无法验证") || probes != 1 {
 		t.Fatalf("unverified ML307C port did not block startup: worker=%v err=%v probes=%d", worker, err, probes)
 	}
 }
@@ -289,5 +298,121 @@ func TestML307CRescanKeepsHealthyOwnerWhenIMEIUnavailable(t *testing.T) {
 
 	if err := p.RescanAndReconnect(); err != nil || p.GetWorker(cfg.ID) != worker {
 		t.Fatalf("rescan retired the healthy owner after its identity query failed: %v", err)
+	}
+}
+
+func TestBootstrapExplicitATIMEI(t *testing.T) {
+	const expectedIMEI = "490154203237518"
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := filepath.Join(dir, "ttyUSB8")
+	if err := os.WriteFile(port, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "by-id")
+	if err := os.Symlink(port, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	prevFallback, prevLive, prevStart := discoverFallbackModemsFn, probeProfileIMEIFn, startWorkerModem
+	t.Cleanup(func() {
+		discoverFallbackModemsFn, probeProfileIMEIFn, startWorkerModem = prevFallback, prevLive, prevStart
+	})
+	discoverFallbackModemsFn = func() ([]CompatibleModem, error) {
+		// The original ML307C is gone. An ordinary modem now has the same tty and USB path.
+		return []CompatibleModem{{
+			USBPath: dir, VendorID: 0x2c7c, ProductID: 0x0125,
+			Mode: "at", ATPort: port, ATPorts: []string{port},
+		}}, nil
+	}
+	probeProfileIMEIFn = func(modem.ATProfile, context.Context, string, time.Duration) (string, error) {
+		t.Fatal("explicit AT fallback opened a serial handle before manager startup")
+		return "", nil
+	}
+
+	for _, tc := range []struct {
+		name, expected, wantError string
+		owned                     bool
+	}{
+		{name: "same tty different vendor", expected: expectedIMEI, wantError: "实时 IMEI 与配置不匹配"},
+		{name: "legacy configuration", wantError: "打开串口"},
+		{name: "owned tty alias", expected: expectedIMEI, wantError: "已由现有设备接管", owned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startWorkerModem = func(m *modem.Manager, expected string) error {
+				if tc.owned || m.ATProfile() != modem.ATProfileDefault || m.ATPort() != alias || expected != tc.expected {
+					t.Fatalf("manager port=%q profile=%v expected=%q", m.ATPort(), m.ATProfile(), expected)
+				}
+				return errors.New(tc.wantError)
+			}
+
+			cfg := config.DeviceConfig{ID: "target", DeviceBackend: backend.BackendAT, ModemIMEI: tc.expected, USBPath: dir, ManagePort: alias}
+			p := NewPool(&config.Config{})
+			t.Cleanup(func() { _ = p.Shutdown() })
+			if tc.owned {
+				existing := config.DeviceConfig{ID: "active", DeviceBackend: backend.BackendAT, ATPort: alias}
+				m, err := modem.New(existing)
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.AttachWorkerForTest(&Worker{ID: existing.ID, Pool: p, Config: existing, Modem: m})
+			}
+			worker, err := p.AddWorkerFromConfig(cfg)
+			if worker != nil || err == nil || !strings.Contains(err.Error(), tc.wantError) || p.GetWorker(cfg.ID) != nil {
+				t.Fatalf("worker=%v err=%v, want %q", worker, err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestBootstrapDiscoveryProbesOnceBeforeOpen(t *testing.T) {
+	const imei = "490154203237518"
+	port := filepath.Join(t.TempDir(), "ttyUSB8")
+	if err := os.WriteFile(port, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DeviceConfig{ID: "ml307c", DeviceBackend: backend.BackendAT, ModemIMEI: imei}
+	prevFallback, prevLive, prevStart := discoverFallbackModemsFn, probeProfileIMEIFn, startWorkerModem
+	t.Cleanup(func() {
+		discoverFallbackModemsFn, probeProfileIMEIFn, startWorkerModem = prevFallback, prevLive, prevStart
+	})
+	discoverFallbackModemsFn = func() ([]CompatibleModem, error) {
+		return []CompatibleModem{{
+			USBPath: filepath.Dir(port), VendorID: cmIoTVendorID, ProductID: ml307cProductID,
+			Mode: "at", ATPort: port, ATPorts: []string{port},
+		}}, nil
+	}
+	probes := 0
+	probeProfileIMEIFn = func(profile modem.ATProfile, _ context.Context, path string, _ time.Duration) (string, error) {
+		probes++
+		if profile != modem.ATProfileML307C || path != port {
+			t.Fatalf("probe profile = %v, path = %q", profile, path)
+		}
+		return imei, nil
+	}
+
+	startWorkerModem = func(m *modem.Manager, expected string) error {
+		if m.ATPort() != port || m.ATProfile() != modem.ATProfileML307C || expected != imei {
+			t.Fatalf("strict discovery lost its startup identity gate: port=%q profile=%v expected=%q", m.ATPort(), m.ATProfile(), expected)
+		}
+		return errors.New("实时 IMEI 与配置不匹配")
+	}
+
+	for _, tc := range []struct{ name, path string }{
+		{name: "explicit path", path: port},
+		{name: "IMEI only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.ATPort = tc.path
+			probes = 0
+			p := NewPool(&config.Config{})
+			t.Cleanup(func() { _ = p.Shutdown() })
+			worker, err := p.AddWorkerFromConfig(cfg)
+			if worker != nil || err == nil || !strings.Contains(err.Error(), "实时 IMEI 与配置不匹配") || probes != 1 {
+				t.Fatalf("worker=%v err=%v probes=%d, want startup to reach identity gate after one discovery probe", worker, err, probes)
+			}
+		})
 	}
 }

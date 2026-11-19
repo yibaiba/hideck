@@ -11,7 +11,7 @@ import (
 // probeIMEICachedFn 允许测试替换底层 IMEI 探测实现。
 var probeIMEICachedFn = modem.ProbeIMEICached
 var probeIMEICachedContextFn = modem.ProbeIMEICachedContext
-var probeProfileIMEICachedFn = modem.ATProfile.ProbeIMEICached
+var probeProfileIMEIFn = modem.ATProfile.ProbeIMEI
 
 // orderedATPortCandidates 按“单设备定界”规则生成探测顺序。
 // 只允许在当前设备自己的 ATPorts 集合内排序和前置候选口；
@@ -117,7 +117,7 @@ func ResolveCompatibleModemATPortContext(
 		preferred := dev.ATPort
 		dev.ATPort, dev.IMEI = "", ""
 		for _, port := range orderedATPortCandidates(preferred, dev.ATPorts) {
-			imei, err := probeProfileIMEICachedFn(profile, ctx, port, timeout)
+			imei, err := probeProfileIMEIFn(profile, ctx, port, timeout)
 			if err == nil && imei != "" {
 				dev.ATPort, dev.IMEI = port, imei
 				return dev, imei

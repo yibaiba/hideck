@@ -3,20 +3,21 @@ package modem
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/yibaiba/hideck/internal/config"
 	"go.bug.st/serial"
 )
 
 // imeiCacheItem 存储 IMEI 缓存条目及对应的获取时间戳
 type imeiCacheItem struct {
-	IMEI    string
-	TS      time.Time
-	Node    os.FileInfo
-	Profile ATProfile
+	IMEI string
+	TS   time.Time
+	Node os.FileInfo
 }
 
 // imeiCache 提供线程安全的内存 IMEI 映射缓存，避免频繁通过串口发起硬件查询
@@ -32,10 +33,6 @@ func ProbeIMEICached(atPort string, timeout time.Duration) (string, error) {
 
 // ProbeIMEICachedContext 提供可取消的缓存 IMEI 探测。
 func ProbeIMEICachedContext(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
-	return ATProfileDefault.ProbeIMEICached(ctx, atPort, timeout)
-}
-
-func (profile ATProfile) ProbeIMEICached(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
 	atPort = strings.TrimSpace(atPort)
 	if atPort == "" {
 		return "", errors.New("empty at port")
@@ -44,30 +41,30 @@ func (profile ATProfile) ProbeIMEICached(ctx context.Context, atPort string, tim
 		ctx = context.Background()
 	}
 
-	if imei := loadCachedIMEIForProfile(atPort, profile); imei != "" {
+	if imei := loadCachedIMEI(atPort); imei != "" {
 		return imei, nil
 	}
 
 	node, _ := os.Stat(atPort)
-	imei, err := profile.probeIMEI(ctx, atPort, timeout)
+	imei, err := ProbeIMEIContext(ctx, atPort, timeout)
 	if err == nil && imei != "" {
-		storeCachedIMEIForProfile(atPort, imei, node, profile)
+		storeCachedIMEI(atPort, imei, node)
 	}
 	return imei, err
 }
 
-func loadCachedIMEIForProfile(atPort string, profile ATProfile) string {
+func loadCachedIMEI(atPort string) string {
 	imeiCache.mu.RLock()
 	defer imeiCache.mu.RUnlock()
 	item, ok := imeiCache.m[atPort]
 	node, err := os.Stat(atPort)
-	if !ok || item.Profile != profile || item.IMEI == "" || time.Since(item.TS) >= 10*time.Minute || err != nil || item.Node == nil || !os.SameFile(item.Node, node) || !item.Node.ModTime().Equal(node.ModTime()) {
+	if !ok || item.IMEI == "" || time.Since(item.TS) >= 10*time.Minute || err != nil || item.Node == nil || !os.SameFile(item.Node, node) || !item.Node.ModTime().Equal(node.ModTime()) {
 		return ""
 	}
 	return item.IMEI
 }
 
-func storeCachedIMEIForProfile(atPort, imei string, node os.FileInfo, profile ATProfile) {
+func storeCachedIMEI(atPort, imei string, node os.FileInfo) {
 	current, err := os.Stat(atPort)
 	if err != nil || node == nil || !os.SameFile(node, current) || !node.ModTime().Equal(current.ModTime()) {
 		return
@@ -77,7 +74,7 @@ func storeCachedIMEIForProfile(atPort, imei string, node os.FileInfo, profile AT
 	if imeiCache.m == nil {
 		imeiCache.m = make(map[string]imeiCacheItem)
 	}
-	imeiCache.m[atPort] = imeiCacheItem{IMEI: imei, TS: time.Now(), Node: node, Profile: profile}
+	imeiCache.m[atPort] = imeiCacheItem{IMEI: imei, TS: time.Now(), Node: node}
 }
 
 // ProbeIMEI 通过打开底层 TTY 串口设备并执行 `AT+CGSN` 指令来实时探测模组的 IMEI 串号
@@ -87,10 +84,11 @@ func ProbeIMEI(atPort string, timeout time.Duration) (string, error) {
 
 // ProbeIMEIContext 在取消时主动关闭串口，避免 USB 重枚举期间阻塞设备恢复。
 func ProbeIMEIContext(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
-	return ATProfileDefault.probeIMEI(ctx, atPort, timeout)
+	return ATProfileDefault.ProbeIMEI(ctx, atPort, timeout)
 }
 
-func (profile ATProfile) probeIMEI(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
+// ProbeIMEI reads the current IMEI with the selected AT dialect and bypasses the cache.
+func (profile ATProfile) ProbeIMEI(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
 	atPort = strings.TrimSpace(atPort)
 	if atPort == "" {
 		return "", errors.New("empty at port")
@@ -112,7 +110,7 @@ func (profile ATProfile) probeIMEI(ctx context.Context, atPort string, timeout t
 
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	p, err := openIMEISerialPort(probeCtx, atPort, mode)
+	p, err := openIMEISerialPortFn(probeCtx, atPort, mode)
 	if err != nil {
 		return "", err
 	}
@@ -170,6 +168,8 @@ type imeiSerialOpenResult struct {
 	err  error
 }
 
+var openIMEISerialPortFn = openIMEISerialPort
+
 func openIMEISerialPort(ctx context.Context, atPort string, mode *serial.Mode) (serial.Port, error) {
 	result := make(chan imeiSerialOpenResult, 1)
 	go func() {
@@ -198,4 +198,66 @@ func closeIMEISerialPortOnCancel(ctx context.Context, port serial.Port, stop <-c
 		_ = port.Close()
 	case <-stop:
 	}
+}
+
+// verifyOpenedIMEI consumes the entire identity reply before the manager starts
+// reading URCs or issuing initialization commands on this handle.
+func (m *Manager) verifyOpenedIMEI(expected string) error {
+	live, err := readOpenedIMEI(m.port, m.atProfile.dialect(), 1200*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("无法验证 AT 口 %s 的实时 IMEI: %w", m.atPort, err)
+	}
+	if !config.IMEIMatches(live, expected) {
+		return fmt.Errorf("AT 口 %s 的实时 IMEI 与配置不匹配", m.atPort)
+	}
+	return nil
+}
+
+func readOpenedIMEI(port serial.Port, dialect *atDialect, timeout time.Duration) (string, error) {
+	if err := port.SetReadTimeout(80 * time.Millisecond); err != nil {
+		return "", err
+	}
+	if err := port.ResetInputBuffer(); err != nil {
+		return "", err
+	}
+	cmd := dialect.imei.command + "\r\n"
+	n, err := port.Write([]byte(cmd))
+	if err != nil {
+		return "", err
+	}
+	if n != len(cmd) {
+		return "", errors.New("incomplete IMEI command write")
+	}
+
+	deadline := time.Now().Add(timeout)
+	var response strings.Builder
+	var pending string
+	buf := make([]byte, 1024)
+	for time.Now().Before(deadline) {
+		n, err := port.Read(buf)
+		if err != nil {
+			return "", err
+		}
+		pending += string(buf[:n])
+		for {
+			line, rest, complete := strings.Cut(pending, "\n")
+			if !complete {
+				break
+			}
+			pending = rest
+			line = strings.TrimSpace(line)
+			switch {
+			case line == "OK":
+				imei := dialect.imei.parse(response.String())
+				if imei == "" {
+					return "", errors.New("empty IMEI response")
+				}
+				return imei, nil
+			case line == "ERROR" || strings.HasPrefix(line, "+CME ERROR:") || strings.HasPrefix(line, "+CMS ERROR:"):
+				return "", fmt.Errorf("IMEI query failed: %s", line)
+			}
+			response.WriteString(line + "\n")
+		}
+	}
+	return "", errors.New("imei probe timeout")
 }
