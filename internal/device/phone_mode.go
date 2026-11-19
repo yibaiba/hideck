@@ -11,7 +11,13 @@ import (
 
 var ErrModemVoiceSoftwareIMS = errors.New("模组直拨模式不使用软件 IMS")
 
-var ErrML307CNativeVoiceUnavailable = errors.New("ML307C 在 HiDeck 中不支持原生 VoLTE 和模组直拨")
+type PhoneModeUnsupportedError struct {
+	Reason string
+}
+
+func (e *PhoneModeUnsupportedError) Error() string {
+	return e.Reason
+}
 
 const (
 	PhoneModeWiFi       = "wifi"
@@ -70,11 +76,12 @@ func WorkerSoftwareIMSBlocked(w *Worker) bool {
 	return false
 }
 
-// CheckPhoneModeSupported applies ML307C's native voice limit, including SIMs
-// whose carrier policy requires native call control.
+// CheckPhoneModeSupported checks native call control when selected or required
+// by the SIM's software IMS policy.
 func (w *Worker) CheckPhoneModeSupported(mode string) error {
-	if w.isML307C() && (UsesModemPhoneControl(mode) || WorkerSoftwareIMSBlocked(w)) {
-		return ErrML307CNativeVoiceUnavailable
+	if reason := w.atDeviceRules().nativeVoiceUnavailableReason; reason != "" &&
+		(UsesModemPhoneControl(mode) || WorkerSoftwareIMSBlocked(w)) {
+		return &PhoneModeUnsupportedError{Reason: reason}
 	}
 	return nil
 }

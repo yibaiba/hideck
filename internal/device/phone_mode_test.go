@@ -107,7 +107,8 @@ func TestML307CPhonePolicyKeepsExplicitRadioSettings(t *testing.T) {
 				t.Fatalf("card policy changed or still enables recovery: %+v", resolver.pol)
 			}
 			if tc.mode == PhoneModeWiFi || tc.mode == PhoneModeCellular {
-				if err := p.EnableVoWiFi(w.ID); !errors.Is(err, ErrML307CNativeVoiceUnavailable) {
+				var unsupported *PhoneModeUnsupportedError
+				if err := p.EnableVoWiFi(w.ID); !errors.As(err, &unsupported) {
 					t.Fatalf("direct software IMS start error = %v", err)
 				}
 				if len(radio.setCalls) != 0 || w.cellularRadioIsSuppressed() {

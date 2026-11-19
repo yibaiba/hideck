@@ -28,16 +28,8 @@ func atDeviceRulesFor(profile modem.ATProfile) atDeviceRules {
 }
 
 func (w *Worker) atDeviceRules() atDeviceRules {
-	return atDeviceRulesFor(w.atProfile())
-}
-
-func (w *Worker) atProfile() modem.ATProfile {
 	if w == nil || w.Modem == nil {
-		return modem.ATProfileDefault
+		return atDeviceRulesFor(modem.ATProfileDefault)
 	}
-	return w.Modem.ATProfile()
-}
-
-func (w *Worker) isML307C() bool {
-	return w.atProfile() == modem.ATProfileML307C
+	return atDeviceRulesFor(w.Modem.ATProfile())
 }

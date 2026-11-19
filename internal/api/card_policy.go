@@ -20,7 +20,6 @@ const cardPolicySavedMWIClearFailedCode = "card_policy_saved_mwi_clear_failed"
 
 type cardPolicyStore interface {
 	Get(string) (db.CardPolicy, error)
-	Resolve(string) (db.CardPolicy, error)
 	Upsert(db.CardPolicy) error
 	ClearMWIRejections(string) (bool, error)
 }
@@ -37,10 +36,6 @@ type databaseCardPolicyStore struct{}
 
 func (databaseCardPolicyStore) Get(iccid string) (db.CardPolicy, error) {
 	return db.GetCardPolicy(iccid)
-}
-
-func (databaseCardPolicyStore) Resolve(iccid string) (db.CardPolicy, error) {
-	return db.ResolveCardPolicy(iccid)
 }
 
 func (databaseCardPolicyStore) Upsert(policy db.CardPolicy) error {
@@ -76,8 +71,11 @@ func (s *Server) patchCardPolicyForDeviceChecked(deviceID string, mutate func(*d
 	if iccid == "" {
 		return "", false, errCardPolicyIdentityUnavailable
 	}
-	p, err := s.cardPolicyStore().Resolve(iccid)
-	if err != nil {
+	p, err := s.cardPolicyStore().Get(iccid)
+	if errors.Is(err, db.ErrCardPolicyNotFound) {
+		// Keep the default in memory until the mutation has been validated.
+		p = db.DefaultCardPolicy(iccid)
+	} else if err != nil {
 		return iccid, false, fmt.Errorf("获取卡策略失败: %w", err)
 	}
 	if err := mutate(&p); err != nil {
@@ -370,10 +368,11 @@ func writeCardPolicyMutationError(c businessContext, err error) {
 		return
 	}
 	status := http.StatusInternalServerError
+	var unsupportedMode *device.PhoneModeUnsupportedError
 	switch {
-	case errors.Is(err, errCardPolicyIdentityUnavailable):
+	case errors.Is(err, errCardPolicyIdentityUnavailable), errors.Is(err, errModemVoiceCallActive):
 		status = http.StatusConflict
-	case errors.Is(err, device.ErrML307CNativeVoiceUnavailable):
+	case errors.As(err, &unsupportedMode):
 		status = http.StatusUnprocessableEntity
 	}
 	c.JSON(status, gin.H{"status": "error", "message": err.Error()})
