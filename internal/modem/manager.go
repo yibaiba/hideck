@@ -733,12 +733,11 @@ func (m *Manager) handleCommand(req commandRequest) {
 		m.handleFileUpload(req)
 		return
 	}
-	dialect := m.atProfile.dialect()
-	if dialect.ownedSMSSubmit != nil && req.smsFinalTimeout > 0 {
+	if req.smsFinalTimeout > 0 {
 		m.handleML307CSMS(req)
 		return
 	}
-	cpinPresence := dialect.cpinPresence
+	cpinPresence := m.atProfile.dialect().cpinPresence
 	queryingPresence := cpinPresence != nil && req.cmd == cpinQuery
 	startTime := time.Now()
 
