@@ -237,7 +237,7 @@ func TestParseCCHO(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			channel, ok := parseCCHO(tt.resp, tt.profile)
+			channel, ok := tt.profile.dialect().parseCCHO(tt.resp)
 			if channel != tt.channel || ok != (tt.channel > 0) {
 				t.Fatalf("parseCCHO(%q) = (%d, %t), want (%d, %t)", tt.resp, channel, ok, tt.channel, tt.channel > 0)
 			}

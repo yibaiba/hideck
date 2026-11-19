@@ -89,10 +89,10 @@ func TestML307CATQueries(t *testing.T) {
 }
 
 func TestML307CFirmwareParsingRejectsIncompleteReply(t *testing.T) {
-	if got := ATProfileML307C.parseFirmware("AT+MSWVER\nML307C-DC-CN-MBRH0S00\n+CPIN: READY\nOK"); got != "" {
+	if got := ATProfileML307C.dialect().firmware.parse("AT+MSWVER\nML307C-DC-CN-MBRH0S00\n+CPIN: READY\nOK"); got != "" {
 		t.Fatalf("incomplete MSWVER reply parsed as %q", got)
 	}
-	if got := ATProfileDefault.parseFirmware("EC20EFAR06A05M4G\nOK"); got != "EC20EFAR06A05M4G" {
+	if got := ATProfileDefault.dialect().firmware.parse("EC20EFAR06A05M4G\nOK"); got != "EC20EFAR06A05M4G" {
 		t.Fatalf("default firmware parsed as %q", got)
 	}
 }
@@ -100,11 +100,11 @@ func TestML307CFirmwareParsingRejectsIncompleteReply(t *testing.T) {
 func TestML307CIMEIParsing(t *testing.T) {
 	profile := ATProfileML307C
 	for _, invalid := range []string{"20200X000000000000", "+CGSN: 4901542032375180", "+CGSN: 490154203237518,0"} {
-		if imei := profile.parseIMEI(invalid); imei != "" {
+		if imei := profile.dialect().imei.parse(invalid); imei != "" {
 			t.Fatalf("invalid CGSN response %q parsed as %q", invalid, imei)
 		}
 	}
-	if imei := profile.parseIMEI("490154203237518"); imei != "490154203237518" {
+	if imei := profile.dialect().imei.parse("490154203237518"); imei != "490154203237518" {
 		t.Fatalf("bare IMEI parsed as %q", imei)
 	}
 }

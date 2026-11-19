@@ -125,14 +125,7 @@ func (profile ATProfile) probeIMEI(ctx context.Context, atPort string, timeout t
 
 	buf := make([]byte, 1024)
 	var acc strings.Builder
-	readIMEI := func() string {
-		reply := acc.String()
-		if profile == ATProfileML307C {
-			// A serial read can end in the middle of an identifier.
-			reply = reply[:strings.LastIndexAny(reply, "\r\n")+1]
-		}
-		return profile.parseIMEI(reply)
-	}
+	dialect := profile.dialect()
 
 	write := func(s string) {
 		_, _ = p.Write([]byte(s))
@@ -141,14 +134,14 @@ func (profile ATProfile) probeIMEI(ctx context.Context, atPort string, timeout t
 	// 写入 AT 测试命令与查询 IMEI 的 AT+CGSN 命令
 	write("AT\r\n")
 	time.Sleep(40 * time.Millisecond)
-	write(profile.imeiCommand() + "\r\n")
+	write(dialect.imei.command + "\r\n")
 
 	// 在指定的截止时间内轮询并解析串口输出内容
 	for probeCtx.Err() == nil {
 		n, rerr := p.Read(buf)
 		if n > 0 {
 			acc.Write(buf[:n])
-			if imei := readIMEI(); imei != "" {
+			if imei := dialect.parseProbeIMEI(acc.String()); imei != "" {
 				return imei, nil
 			}
 		}
@@ -163,7 +156,7 @@ func (profile ATProfile) probeIMEI(ctx context.Context, atPort string, timeout t
 	}
 
 	// 最终尝试解析一次累积的串口缓冲区
-	if imei := readIMEI(); imei != "" {
+	if imei := dialect.parseProbeIMEI(acc.String()); imei != "" {
 		return imei, nil
 	}
 	if err := probeCtx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {

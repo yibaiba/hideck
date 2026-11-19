@@ -555,12 +555,9 @@ func ParseUSBNetMode(resp string) (int, error) {
 
 // parseCCHO 解析 AT+CCHO 响应，提取逻辑通道号
 // 响应格式: +CCHO: <channel>。ML307C 返回单行裸通道号。
-func parseCCHO(resp string, profile ATProfile) (int, bool) {
+func parseCCHO(resp string) (int, bool) {
 	line, ok := findLineWithPrefix(resp, "+CCHO:")
 	if !ok {
-		if profile == ATProfileML307C {
-			return parseBareCCHO(resp)
-		}
 		return -1, false
 	}
 	parts := strings.Split(line, ":")
@@ -575,7 +572,10 @@ func parseCCHO(resp string, profile ATProfile) (int, bool) {
 	return -1, false
 }
 
-func parseBareCCHO(resp string) (int, bool) {
+func parseML307CCCHO(resp string) (int, bool) {
+	if channel, ok := parseCCHO(resp); ok {
+		return channel, true
+	}
 	var channel int
 	for _, line := range splitLines(resp) {
 		if line == "" || line == "OK" {

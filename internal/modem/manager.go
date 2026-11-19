@@ -719,10 +719,13 @@ func (m *Manager) handleCommand(req commandRequest) {
 		m.handleFileUpload(req)
 		return
 	}
-	if m.atProfile == ATProfileML307C && req.smsFinalTimeout > 0 {
+	dialect := m.atProfile.dialect()
+	if dialect.ownedSMSSubmit != nil && req.smsFinalTimeout > 0 {
 		m.handleML307CSMS(req)
 		return
 	}
+	cpinPresence := dialect.cpinPresence
+	queryingPresence := cpinPresence != nil && req.cmd == cpinQuery
 	startTime := time.Now()
 
 	// 发送命令
@@ -784,7 +787,7 @@ RespLoop:
 						"resp", logATResponse(req.cmd, strings.Join(fullResponse, " | ")),
 						"cost", time.Since(startTime).Truncate(time.Millisecond).String())
 				}
-				if m.atProfile == ATProfileML307C && req.cmd == "AT+CPIN?" && isML307CNoSIMError(line) {
+				if queryingPresence && cpinPresence.isAbsentError(line) {
 					req.errChan <- errSIMNotInserted
 				} else if req.cmd == "AT+CLCC" {
 					req.errChan <- &clccResponseError{response: strings.Join(fullResponse, "\n"), terminal: line}
@@ -813,7 +816,7 @@ RespLoop:
 
 				req.respChan <- "> "
 				break RespLoop
-			} else if m.atProfile == ATProfileML307C && req.cmd == "AT+CPIN?" && strings.HasPrefix(line, "+CPIN:") {
+			} else if queryingPresence && strings.HasPrefix(line, cpinPrefix) {
 				fullResponse = append(fullResponse, line)
 			} else if m.isURC(line) {
 				// 对于确认为 URC 的行，始终分发出去
@@ -1029,7 +1032,8 @@ func (m *Manager) collectDeviceInfo() {
 			imsi = v
 		}
 	}
-	if simInserted || m.atProfile != ATProfileML307C {
+	tracksSIMByCPIN := m.atProfile.dialect().cpinPresence != nil
+	if simInserted || !tracksSIMByCPIN {
 		if v, err := m.QueryICCID(); err == nil {
 			iccid = v
 		}
@@ -1083,7 +1087,7 @@ func (m *Manager) collectDeviceInfo() {
 	if operator != "" {
 		m.operator = operator
 	}
-	if m.atProfile != ATProfileML307C {
+	if !tracksSIMByCPIN {
 		m.simInserted = simInserted
 	}
 	if signalDBM != -999 {
@@ -1302,7 +1306,7 @@ func (m *Manager) RefreshStatus(onAlert func(msg string), onRecover func(msg str
 
 	// 检查 SIM 卡是否存活
 	simInserted, simErr := m.QuerySIMInserted()
-	if m.atProfile == ATProfileML307C && simErr == nil {
+	if m.atProfile.dialect().cpinPresence != nil && simErr == nil {
 		m.dispatchSIMStatusURC(&simInserted, "")
 	}
 
@@ -1452,8 +1456,8 @@ func (m *Manager) handleURC(line string) {
 				break
 			}
 		}
-		if m.atProfile == ATProfileML307C && IsSIMPINRequiredState(state) {
-			m.cacheML307CSIMState(false, ErrSIMPINRequired)
+		if m.atProfile.dialect().cpinPresence != nil && IsSIMPINRequiredState(state) {
+			m.cacheCPINSIMState(false, ErrSIMPINRequired)
 		}
 		m.dispatchSIMStatusURC(nil, state)
 	}
@@ -2162,14 +2166,15 @@ func (m *Manager) SendSMS(phone, message string) error {
 
 // SendSMSWithOptions 使用 PDU 模式发送短信，并允许调用方指定文本编码策略。
 func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.SubmitOptions) error {
-	if m.atProfile == ATProfileML307C {
+	ownedSubmit := m.atProfile.dialect().ownedSMSSubmit
+	if ownedSubmit != nil {
 		m.smsStorageMu.Lock()
 		defer m.smsStorageMu.Unlock()
 	}
 	m.SetBusy(true)
 	defer m.SetBusy(false)
 
-	if m.atProfile != ATProfileML307C {
+	if ownedSubmit == nil {
 		logger.Info(fmt.Sprintf("[%s] 准备发送短信 (PDU)", m.cfg.ID), "to", phone)
 	}
 
@@ -2197,9 +2202,9 @@ func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.Submit
 			followUp:     pduHex + "\x1A", // PDU + Ctrl+Z
 		}
 
-		if m.atProfile == ATProfileML307C {
-			req.timeout = ml307cSMSPromptTimeout
-			req.smsFinalTimeout = ml307cSMSResultTimeout
+		if ownedSubmit != nil {
+			req.timeout = ownedSubmit.promptTimeout
+			req.smsFinalTimeout = ownedSubmit.finalTimeout
 			if err := m.sendML307CSMSPart(req); err != nil {
 				partErr := fmt.Errorf("发送分片 %d: %w", i+1, err)
 				if i > 0 || errors.Is(err, ErrSMSSubmitUnknown) {

@@ -12,35 +12,40 @@ import (
 )
 
 func (m *Manager) QueryIMEI() (string, error) {
-	resp, err := m.ExecuteATSilent(m.atProfile.imeiCommand(), 2*time.Second)
+	dialect := m.atProfile.dialect()
+	resp, err := m.ExecuteATSilent(dialect.imei.command, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	imei := m.atProfile.parseIMEI(resp)
-	if imei == "" && m.atProfile == ATProfileML307C {
-		return "", errors.New("invalid IMEI response")
+	imei := dialect.imei.parse(resp)
+	if imei == "" {
+		return "", dialect.missingIMEIError
 	}
 	return imei, nil
 }
 
 func (m *Manager) QueryFirmware() (string, error) {
-	resp, err := m.ExecuteATSilent(m.atProfile.firmwareCommand(), 2*time.Second)
+	query := m.atProfile.dialect().firmware
+	resp, err := m.ExecuteATSilent(query.command, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return m.atProfile.parseFirmware(resp), nil
+	return query.parse(resp), nil
 }
 
 func (m *Manager) QuerySIMInserted() (bool, error) {
-	if m.atProfile == ATProfileML307C {
-		return m.queryML307CSIMInserted()
+	dialect := m.atProfile.dialect()
+	if query := dialect.cpinPresence; query != nil {
+		return m.queryCPINSIMPresence(query)
 	}
-	if resp, err := m.ExecuteATSilent("AT+QSIMSTAT?", 2*time.Second); err == nil {
-		if inserted, ok := parseQSIMSTATInserted(resp); ok {
-			return inserted, nil
+	if cmd := dialect.simStatus; cmd != "" {
+		if resp, err := m.ExecuteATSilent(cmd, 2*time.Second); err == nil {
+			if inserted, ok := parseQSIMSTATInserted(resp); ok {
+				return inserted, nil
+			}
 		}
 	}
-	resp, err := m.ExecuteATSilent("AT+CPIN?", 2*time.Second)
+	resp, err := m.ExecuteATSilent(cpinQuery, 2*time.Second)
 	if err != nil {
 		return false, err
 	}
@@ -59,16 +64,17 @@ func (m *Manager) QueryIMSI() (string, error) {
 }
 
 func (m *Manager) QueryICCID() (string, error) {
-	resp, err := m.ExecuteATSilent(m.atProfile.iccidCommand(), 2*time.Second)
+	query := m.atProfile.dialect().iccid
+	resp, err := m.ExecuteATSilent(query.command, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return m.atProfile.parseICCID(resp), nil
+	return query.parse(resp), nil
 }
 
 func (m *Manager) QueryOperator() (string, error) {
-	if m.atProfile != ATProfileML307C {
-		_, _ = m.ExecuteATSilent("AT+COPS=3,2", 2*time.Second)
+	if cmd := m.atProfile.dialect().operatorFormat; cmd != "" {
+		_, _ = m.ExecuteATSilent(cmd, 2*time.Second)
 	}
 	resp, err := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
 	if err != nil {
@@ -78,15 +84,12 @@ func (m *Manager) QueryOperator() (string, error) {
 }
 
 func (m *Manager) QueryRegistration() (int, string, string, string, error) {
-	command, prefix := "AT+CREG?", "+CREG:"
-	if m.atProfile == ATProfileML307C {
-		command, prefix = "AT+CEREG?", "+CEREG:"
-	}
-	resp, err := m.ExecuteATSilent(command, 2*time.Second)
+	dialect := m.atProfile.dialect()
+	resp, err := m.ExecuteATSilent(dialect.registration, 2*time.Second)
 	if err != nil {
 		return 0, "", "", "", err
 	}
-	regStatus, lac, cellID, ok := parseRegistration(resp, prefix)
+	regStatus, lac, cellID, ok := parseRegistration(resp, dialect.registrationPrefix)
 	if !ok {
 		return 0, "", "", "", nil
 	}
@@ -114,10 +117,11 @@ func (m *Manager) QueryServingCellLTE() (int, int, error) {
 }
 
 func (m *Manager) QueryServingCellLTEInfo() (ServingCellLTEInfo, error) {
-	if m.atProfile == ATProfileML307C {
+	cmd := m.atProfile.dialect().servingCell
+	if cmd == "" {
 		return ServingCellLTEInfo{}, nil
 	}
-	resp, err := m.ExecuteATSilent("AT+QENG=\"servingcell\"", 3*time.Second)
+	resp, err := m.ExecuteATSilent(cmd, 3*time.Second)
 	if err != nil {
 		return ServingCellLTEInfo{}, err
 	}
@@ -137,10 +141,11 @@ func (m *Manager) QueryAPN() (string, error) {
 }
 
 func (m *Manager) QueryIMSStatus() (int, error) {
-	if m.atProfile == ATProfileML307C {
+	cmd := m.atProfile.dialect().imsStatus
+	if cmd == "" {
 		return 0, nil
 	}
-	resp, err := m.ExecuteATSilent("AT+QIMS?", 2*time.Second)
+	resp, err := m.ExecuteATSilent(cmd, 2*time.Second)
 	if err != nil {
 		return 0, err
 	}
@@ -154,19 +159,12 @@ func (m *Manager) QueryNetworkModeAndDuplex() (string, string, error) {
 }
 
 func (m *Manager) QueryNetworkRadio() (string, string, string, uint32, error) {
-	if m.atProfile == ATProfileML307C {
-		resp, err := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
-		if err != nil {
-			return "", "", "", 0, err
-		}
-		mode, _ := parseCOPSAct(resp)
-		return mode, "", "", 0, nil
-	}
-	resp, err := m.ExecuteATSilent("AT+QNWINFO", 2*time.Second)
+	query := m.atProfile.dialect().radio
+	resp, err := m.ExecuteATSilent(query.command, 2*time.Second)
 	if err != nil {
 		return "", "", "", 0, err
 	}
-	mode, duplex, band, channel := parseQNWInfoRadio(resp)
+	mode, duplex, band, channel := query.parse(resp)
 	return mode, duplex, band, channel, nil
 }
 
@@ -177,18 +175,19 @@ func (m *Manager) QueryNetworkMode() (string, error) {
 
 func (m *Manager) QueryNetworkModeFallbackAndDuplex() (string, string, error) {
 	networkMode, networkDuplex, err := m.QueryNetworkModeAndDuplex()
-	if m.atProfile == ATProfileML307C || (err == nil && networkMode != "") {
+	fallback := m.atProfile.dialect().radioFallback
+	if fallback.command == "" || (err == nil && networkMode != "") {
 		return networkMode, networkDuplex, err
 	}
-	resp, err2 := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
+	resp, err2 := m.ExecuteATSilent(fallback.command, 2*time.Second)
 	if err2 != nil {
 		if err != nil {
 			return "", "", err
 		}
 		return "", "", err2
 	}
-	mode, _ := parseCOPSAct(resp)
-	return mode, "", nil
+	mode, duplex, _, _ := fallback.parse(resp)
+	return mode, duplex, nil
 }
 
 func (m *Manager) QueryNetworkModeFallback() (string, error) {
@@ -326,10 +325,11 @@ func (m *Manager) QueryMSISDN() (string, error) {
 
 // QueryUSBNetMode 查询 USBNET 模式
 func (m *Manager) QueryUSBNetMode() (int, error) {
-	if m.atProfile == ATProfileML307C {
+	cmd := m.atProfile.dialect().usbnet
+	if cmd == "" {
 		return -1, nil
 	}
-	resp, err := m.ExecuteATSilent("AT+QCFG=\"usbnet\"?", 2*time.Second)
+	resp, err := m.ExecuteATSilent(cmd, 2*time.Second)
 	if err != nil {
 		return -1, err
 	}
@@ -393,7 +393,7 @@ func (m *Manager) openLogicalChannel(aid, leaseOwner, sessionOwner string, class
 	if err != nil {
 		return -1, fmt.Errorf("打开 logical channel 失败: %w", err)
 	}
-	channel, ok := parseCCHO(resp, m.atProfile)
+	channel, ok := m.atProfile.dialect().parseCCHO(resp)
 	if !ok {
 		return -1, fmt.Errorf("解析 logical channel 响应失败: %s", resp)
 	}

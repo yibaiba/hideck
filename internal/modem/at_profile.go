@@ -13,34 +13,99 @@ const (
 	ATProfileML307C
 )
 
-func (p ATProfile) imeiCommand() string {
-	if p == ATProfileML307C {
-		return "AT+CGSN=1"
-	}
-	return "AT+CGSN"
+type atTextQuery struct {
+	command string
+	parse   func(string) string
 }
 
-func (p ATProfile) parseIMEI(resp string) string {
-	if p == ATProfileML307C {
-		if line, ok := findLineWithPrefix(resp, "+CGSN:"); ok {
-			return parseIMEI(strings.TrimPrefix(line, "+CGSN:"))
-		}
+type atRadioQuery struct {
+	command string
+	parse   func(string) (mode, duplex, band string, channel uint32)
+}
+
+type atCPINPresenceQuery struct {
+	parse         func(string) (bool, error)
+	isAbsentError func(string) bool
+}
+
+type atOwnedSMSSubmit struct {
+	promptTimeout time.Duration
+	finalTimeout  time.Duration
+}
+
+type atDialect struct {
+	imei               atTextQuery
+	firmware           atTextQuery
+	iccid              atTextQuery
+	parseProbeIMEI     func(string) string
+	missingIMEIError   error
+	operatorFormat     string
+	registration       string
+	registrationPrefix string
+	radio              atRadioQuery
+	radioFallback      atRadioQuery
+	servingCell        string
+	imsStatus          string
+	usbnet             string
+	simStatus          string
+	cpinPresence       *atCPINPresenceQuery
+	parseCCHO          func(string) (int, bool)
+	voiceInit          []string
+	ownedSMSSubmit     *atOwnedSMSSubmit
+}
+
+var defaultATDialect = atDialect{
+	imei:               atTextQuery{"AT+CGSN", parseIMEI},
+	firmware:           atTextQuery{"AT+CGMR", parseFirmware},
+	iccid:              atTextQuery{"AT+QCCID", parseQCCID},
+	parseProbeIMEI:     parseIMEI,
+	operatorFormat:     "AT+COPS=3,2",
+	registration:       "AT+CREG?",
+	registrationPrefix: "+CREG:",
+	radio:              atRadioQuery{"AT+QNWINFO", parseQNWInfoRadio},
+	radioFallback:      atRadioQuery{"AT+COPS?", parseCOPSRadio},
+	servingCell:        "AT+QENG=\"servingcell\"",
+	imsStatus:          "AT+QIMS?",
+	usbnet:             "AT+QCFG=\"usbnet\"?",
+	simStatus:          "AT+QSIMSTAT?",
+	parseCCHO:          parseCCHO,
+	voiceInit:          []string{"AT+CLIP=1", "AT+QPCMV=1,2"},
+}
+
+var ml307cATDialect = atDialect{
+	imei:               atTextQuery{"AT+CGSN=1", parseML307CIMEI},
+	firmware:           atTextQuery{"AT+MSWVER", parseML307CFirmware},
+	iccid:              atTextQuery{"AT+MCCID", parseMCCID},
+	parseProbeIMEI:     parseML307CProbeIMEI,
+	missingIMEIError:   errors.New("invalid IMEI response"),
+	registration:       "AT+CEREG?",
+	registrationPrefix: "+CEREG:",
+	radio:              atRadioQuery{"AT+COPS?", parseCOPSRadio},
+	cpinPresence:       &atCPINPresenceQuery{parse: parseML307CCPIN, isAbsentError: isML307CNoSIMError},
+	parseCCHO:          parseML307CCCHO,
+	ownedSMSSubmit:     &atOwnedSMSSubmit{promptTimeout: ml307cSMSPromptTimeout, finalTimeout: ml307cSMSResultTimeout},
+}
+
+func (profile ATProfile) dialect() *atDialect {
+	if profile == ATProfileML307C {
+		return &ml307cATDialect
+	}
+	return &defaultATDialect
+}
+
+func parseML307CIMEI(resp string) string {
+	if line, ok := findLineWithPrefix(resp, "+CGSN:"); ok {
+		return parseIMEI(strings.TrimPrefix(line, "+CGSN:"))
 	}
 	return parseIMEI(resp)
 }
 
-func (p ATProfile) firmwareCommand() string {
-	if p == ATProfileML307C {
-		return "AT+MSWVER"
-	}
-	return "AT+CGMR"
+func parseML307CProbeIMEI(resp string) string {
+	// A serial read can end in the middle of an identifier.
+	return parseML307CIMEI(resp[:strings.LastIndexAny(resp, "\r\n")+1])
 }
 
-func (p ATProfile) parseFirmware(resp string) string {
-	if p != ATProfileML307C {
-		return parseFirmware(resp)
-	}
-
+func parseML307CFirmware(resp string) string {
 	// MSWVER reports model, firmware version and build on separate lines.
 	var fields []string
 	for _, line := range splitLines(resp) {
@@ -55,19 +120,19 @@ func (p ATProfile) parseFirmware(resp string) string {
 	return fields[1] + " / " + fields[2]
 }
 
-func (p ATProfile) iccidCommand() string {
-	if p == ATProfileML307C {
-		return "AT+MCCID"
-	}
-	return "AT+QCCID"
+func parseMCCID(resp string) string {
+	return parseICCID(resp, "+MCCID:")
 }
 
-func (p ATProfile) parseICCID(resp string) string {
-	if p == ATProfileML307C {
-		return parseICCID(resp, "+MCCID:")
-	}
-	return parseQCCID(resp)
+func parseCOPSRadio(resp string) (string, string, string, uint32) {
+	mode, _ := parseCOPSAct(resp)
+	return mode, "", "", 0
 }
+
+const (
+	cpinQuery  = "AT+CPIN?"
+	cpinPrefix = "+CPIN:"
+)
 
 var (
 	errSIMNotInserted = errors.New("SIM not inserted")
@@ -75,11 +140,11 @@ var (
 )
 
 func parseML307CCPIN(resp string) (bool, error) {
-	line, ok := findLineWithPrefix(resp, "+CPIN:")
+	line, ok := findLineWithPrefix(resp, cpinPrefix)
 	if !ok {
 		return false, errors.New("unrecognized CPIN response")
 	}
-	state := strings.TrimSpace(strings.TrimPrefix(line, "+CPIN:"))
+	state := strings.TrimSpace(strings.TrimPrefix(line, cpinPrefix))
 	if IsSIMPINRequiredState(state) {
 		return false, ErrSIMPINRequired
 	}
@@ -103,18 +168,18 @@ func IsSIMPINRequiredState(state string) bool {
 	}
 }
 
-func (m *Manager) queryML307CSIMInserted() (bool, error) {
-	resp, err := m.ExecuteATSilent("AT+CPIN?", 2*time.Second)
+func (m *Manager) queryCPINSIMPresence(query *atCPINPresenceQuery) (bool, error) {
+	resp, err := m.ExecuteATSilent(cpinQuery, 2*time.Second)
 	if errors.Is(err, errSIMNotInserted) {
-		m.cacheML307CSIMState(false, nil)
+		m.cacheCPINSIMState(false, nil)
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	inserted, err := parseML307CCPIN(resp)
+	inserted, err := query.parse(resp)
 	if err == nil || errors.Is(err, ErrSIMPINRequired) {
-		m.cacheML307CSIMState(inserted, err)
+		m.cacheCPINSIMState(inserted, err)
 	}
 	if errors.Is(err, ErrSIMPINRequired) {
 		m.dispatchSIMStatusURC(nil, "SIM PIN")
@@ -122,7 +187,7 @@ func (m *Manager) queryML307CSIMInserted() (bool, error) {
 	return inserted, err
 }
 
-func (m *Manager) cacheML307CSIMState(inserted bool, err error) {
+func (m *Manager) cacheCPINSIMState(inserted bool, err error) {
 	m.infoMu.Lock()
 	defer m.infoMu.Unlock()
 	m.simInserted = inserted
