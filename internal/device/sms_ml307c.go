@@ -177,8 +177,9 @@ func (w *Worker) handleML307CStoredSMS(storage, index string) {
 	go w.runML307CSMS(owner, notice)
 }
 
-func (w *Worker) scanML307CSMS() {
-	if !w.isML307C() || !w.Modem.StoredSMSReceiving() {
+// scanATSMS polls the stored inbox when the active AT SMS path enables it.
+func (w *Worker) scanATSMS() {
+	if w.Modem == nil || !w.Modem.StoredSMSReceiving() {
 		return
 	}
 	owner, err := w.ml307cSMSOwner()
