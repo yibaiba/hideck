@@ -39,6 +39,9 @@ type session struct {
 	lastVoiceAt     time.Time
 	qpcmvTried      bool
 	qpcmvOK         bool
+	handoffBound    bool
+	idleHandoff     IdleHandoff
+	qmiVoiceStarted bool // Sticky across failed initialization and retries.
 }
 
 const voiceUSBQuiet = 20 * time.Second
@@ -99,8 +102,9 @@ func (c *Controller) Enable(ctx context.Context, deviceID string) error {
 // EnableRequest validates external ownership while holding the same device
 // lock as Disable/DisableForHandoff, before installing a session or doing I/O.
 type EnableRequest struct {
-	DeviceID string
-	Validate func() error
+	DeviceID    string
+	Validate    func() error
+	IdleHandoff IdleHandoff
 }
 
 func (c *Controller) EnableChecked(ctx context.Context, request EnableRequest) error {
@@ -126,6 +130,10 @@ func (c *Controller) EnableChecked(ctx context.Context, request EnableRequest) e
 		if s == nil {
 			s = &session{status: Status{DeviceID: deviceID, Phase: PhaseEnabling}}
 			c.sess[deviceID] = s
+		}
+		if !s.handoffBound {
+			s.idleHandoff = request.IdleHandoff
+			s.handoffBound = true
 		}
 		s.gen++
 		gen := s.gen
@@ -606,6 +614,9 @@ func (c *Controller) ensureVoiceIndicationsForSession(ctx context.Context, devic
 	if !c.sessionGenerationLive(deviceID, s, gen) {
 		return errors.New("volte: native IMS session changed")
 	}
+	c.mu.Lock()
+	s.qmiVoiceStarted = true
+	c.mu.Unlock()
 	ensureCtx, cancel := context.WithTimeout(ctx, voiceIndicationTimeout)
 	defer cancel()
 	err := c.host.EnsureVoiceIndications(ensureCtx, deviceID)

@@ -29,17 +29,12 @@ func (c *Controller) DisableForHandoff(ctx context.Context, deviceID string) err
 		if s == nil {
 			return nil
 		}
-		if err := c.endCallsForHandoff(ctx, deviceID); err != nil {
+		s.voiceEnsure.Lock()
+		defer s.voiceEnsure.Unlock()
+		if err := c.confirmHandoffIdle(ctx, deviceID, s); err != nil {
 			return err
 		}
-		if err := c.host.ReleaseIMSClients(deviceID); err != nil {
-			return fmt.Errorf("volte: release IMS clients for handoff: %w", err)
-		}
-		c.mu.Lock()
-		s.gen++
-		delete(c.sess, deviceID)
-		c.mu.Unlock()
-		return nil
+		return c.releaseHandoffSession(deviceID, s)
 	})
 }
 
@@ -67,9 +62,6 @@ func (c *Controller) endCallsForHandoff(ctx context.Context, deviceID string) er
 		if call.State != qmiCallIdle && call.State != qmiCallEnd {
 			return fmt.Errorf("volte: call %d is still active; retry switching after it ends", call.ID)
 		}
-	}
-	if vs := c.sessionVoice(deviceID); vs != nil {
-		c.handleVoiceInfo(deviceID, vs, info)
 	}
 	return nil
 }

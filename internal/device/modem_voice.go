@@ -83,7 +83,11 @@ func (p *Pool) stopNativeVoLTEForModemVoice(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(p.Context(), 90*time.Second)
 	defer cancel()
-	return p.volteCtl.DisableForHandoff(ctx, id)
+	err := p.volteCtl.DisableForHandoff(ctx, id)
+	if err != nil {
+		logger.Warn("VoLTE 交接模组直拨失败", "device", id, "err", err)
+	}
+	return err
 }
 
 // This constructor is the infrastructure boundary. Optional tools and bundles

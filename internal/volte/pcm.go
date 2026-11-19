@@ -1,6 +1,7 @@
 package volte
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,7 @@ type PCMBridge struct {
 	listenOnly bool
 	closed     chan struct{}
 	closeOnce  sync.Once
+	closeErr   error // Written inside closeOnce; repeated Close preserves failures.
 	workers    sync.WaitGroup
 	seq        uint16
 	ts         uint32
@@ -89,14 +91,13 @@ func (b *PCMBridge) Stats() (toPCM, fromPCM, silent, lost, overflow uint64) {
 }
 
 func (b *PCMBridge) Close() error {
-	var err error
 	b.closeOnce.Do(func() {
 		close(b.closed)
 		if b.conn != nil {
-			err = b.conn.Close()
+			b.closeErr = b.conn.Close()
 		}
 		if b.pcm != nil {
-			_ = b.pcm.Close()
+			b.closeErr = errors.Join(b.closeErr, b.pcm.Close())
 		}
 		b.workers.Wait()
 		diagnostics := diagnosticsForPCM(b.pcm)
@@ -115,7 +116,7 @@ func (b *PCMBridge) Close() error {
 			"jitter_concealed", jitter.Concealed, "jitter_trimmed", jitter.Trimmed,
 			"jitter_rebuffers", jitter.Rebuffers, "jitter_restarts", jitter.Restarts)
 	})
-	return err
+	return b.closeErr
 }
 
 func (b *PCMBridge) downlink() {

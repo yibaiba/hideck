@@ -121,17 +121,21 @@ func (r *AudioRuntime) Stop(callID string) error {
 	callID = strings.TrimSpace(callID)
 	r.mu.Lock()
 	call, ok := r.calls[callID]
-	if ok {
-		delete(r.calls, callID)
-	}
 	r.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	if r.runner == nil || call.pid == 0 {
-		return nil
+	if r.runner != nil && call.pid != 0 {
+		if err := r.runner.Stop(call.pid); err != nil {
+			return err
+		}
 	}
-	return r.runner.Stop(call.pid)
+	r.mu.Lock()
+	if r.calls[callID] == call {
+		delete(r.calls, callID)
+	}
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *AudioRuntime) Owner(callID string) (audioCall, bool) {

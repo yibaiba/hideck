@@ -83,7 +83,8 @@ func (p *Pool) enableNativeVoLTE(deviceID string, start *nativeVoLTEStart) error
 	}
 	defer release()
 	if err := p.volteCtl.EnableChecked(start.ctx, volte.EnableRequest{DeviceID: deviceID,
-		Validate: func() error { return p.validateNativeVoLTEStart(deviceID, start) },
+		Validate:    func() error { return p.validateNativeVoLTEStart(deviceID, start) },
+		IdleHandoff: p.nativeIdleHandoff(start),
 	}); err != nil {
 		return err
 	}
