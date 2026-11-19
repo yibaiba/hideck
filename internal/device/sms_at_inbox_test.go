@@ -126,6 +126,9 @@ func TestATStoredSMSPersistence(t *testing.T) {
 	apply(state, c2, true, false, "")
 	state = load(scope) // Process restart before the follow-up full scan.
 	apply(state, c1, false, false, "")
+	if messages, err := state.archiveSettledATFragments(observed.Add(3 * time.Minute)); err != nil || len(messages) != 0 {
+		t.Fatalf("archived a cross-SCTS SMS using a DB-only group: %+v, %v", messages, err)
+	}
 	apply(state, c2, false, false, "")
 	if messages, err := state.archiveSettledATFragments(observed.Add(time.Minute)); err != nil || len(messages) != 0 {
 		t.Fatalf("cross-minute group settled before its collection window elapsed: %+v, %v", messages, err)

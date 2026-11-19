@@ -508,16 +508,14 @@ func (state *atSMSParts) persistFragment(part atInboxPart, sourceKnown bool) (bo
 func (state *atSMSParts) archiveSettledATFragments(now time.Time) ([]InboundSMS, error) {
 	var notifications []InboundSMS
 	for _, fragments := range state.settledATFragments(now) {
-		var sender string
-		for _, fragment := range fragments {
-			if sender = state.senders[fragment.SessionKey]; sender != "" {
-				break
-			}
-		}
-		if sender == "" {
-			// Sender information is available from an exact PDU in this scan.
+		// Each group must have an exact PDU in the current scan. A DB-only
+		// group can outlive its source slots and must not complete a new SMS.
+		if slices.ContainsFunc(fragments, func(fragment db.SMSInboundFragment) bool {
+			return state.senders[fragment.SessionKey] == ""
+		}) {
 			continue
 		}
+		sender := state.senders[fragments[0].SessionKey]
 		key, content, err := completeATMultipart(fragments[0].SessionKey, fragments)
 		if err != nil {
 			return notifications, err
