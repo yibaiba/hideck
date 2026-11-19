@@ -2,6 +2,7 @@ package device
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/iniwex5/vowifi-go/runtimehost/messaging"
@@ -95,6 +96,9 @@ func (vowifiDeliveryStore) LoadInboundFragments(
 	}
 	result := make([]messaging.StoredInboundFragment, 0, len(rows))
 	for _, row := range rows {
+		if strings.HasPrefix(row.SessionKey, db.ATSMSInboundPrefix) {
+			continue
+		}
 		// The rows already match the owner's canonical ICCID and IMSI. Hand
 		// the owner back as given so imscore's exact owner check accepts
 		// fragments saved on another device or under a padded ICCID.

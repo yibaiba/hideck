@@ -121,6 +121,8 @@ type Manager struct {
 	smsCallback            SMSCallback
 	smsProcessor           SMSProcessor
 	smsReadinessCheck      func() error
+	smsStorageMu           sync.Mutex
+	storedSMSHandler       func(storage, index string)
 	newSMSHandler          func(index string) // 处理新短信索引的回调 (用于 bubble up URC)
 	disableURCRead         bool               // 如果启用 QMI，禁用 AT 自动读取
 	simStatusHandler       func(inserted *bool, state string)
@@ -1496,7 +1498,15 @@ func (m *Manager) handleURC(line string) {
 		m.infoMu.RLock()
 		disabled := m.disableURCRead
 		handler := m.newSMSHandler
+		storedHandler := m.storedSMSHandler
 		m.infoMu.RUnlock()
+
+		if storedHandler != nil {
+			if !disabled {
+				storedHandler(storage, index)
+			}
+			return
+		}
 
 		if handler != nil {
 			go handler(index)
@@ -2127,6 +2137,10 @@ func (m *Manager) SendSMS(phone, message string) error {
 
 // SendSMSWithOptions 使用 PDU 模式发送短信，并允许调用方指定文本编码策略。
 func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.SubmitOptions) error {
+	if m.atProfile == ATProfileML307C {
+		m.smsStorageMu.Lock()
+		defer m.smsStorageMu.Unlock()
+	}
 	m.SetBusy(true)
 	defer m.SetBusy(false)
 

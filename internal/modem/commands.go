@@ -215,19 +215,54 @@ func (m *Manager) SMSReadPDU(index string) (string, error) {
 }
 
 type SMSPDURecord struct {
-	Index int
-	PDU   string
+	Index  int
+	Status int
+	PDU    string
 }
 
+func (r SMSPDURecord) Received() bool { return r.Status == 0 || r.Status == 1 }
+
 func (m *Manager) SMSListAllPDURecords() ([]SMSPDURecord, error) {
-	resp, err := m.ExecuteAT("AT+CMGL=4", 10*time.Second)
+	return m.smsListAllPDURecords(false)
+}
+
+func (m *Manager) smsListAllPDURecords(verify bool) ([]SMSPDURecord, error) {
+	execute := m.ExecuteAT
+	if verify {
+		execute = m.ExecuteATSilent
+	}
+	resp, err := execute("AT+CMGL=4", 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(resp) == "OK" {
 		return nil, nil
 	}
-	return extractSMSPDURecordsAfterPrefix(resp, "+CMGL:"), nil
+	records := extractSMSPDURecordsAfterPrefix(resp, "+CMGL:")
+	if verify {
+		headers, data := 0, 0
+		for _, line := range splitLines(resp) {
+			switch {
+			case line == "", line == "OK":
+			case strings.HasPrefix(line, "+CMGL:"):
+				headers++
+			default:
+				if _, err := hex.DecodeString(line); err != nil {
+					return nil, errors.New("unexpected CMGL response line")
+				}
+				data++
+			}
+		}
+		if headers != len(records) || data != len(records) {
+			return nil, errors.New("incomplete CMGL response")
+		}
+		for _, record := range records {
+			if record.Index < 0 || record.Status < 0 || record.Status > 3 {
+				return nil, errors.New("invalid CMGL record")
+			}
+		}
+	}
+	return records, nil
 }
 
 func (m *Manager) SMSListAllPDU() ([]string, error) {

@@ -8,6 +8,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const ATSMSInboundPrefix = "at:"
+
 var ErrSMSInboundFragmentCollision = errors.New("SMS inbound fragment collision")
 
 type SMSInboundFragmentScope struct {

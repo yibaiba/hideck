@@ -720,6 +720,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 		default:
 		}
 		worker.PreWarmCache()
+		worker.scanML307CSMS()
 		// 缓存预热完成后，触发一次状态广播，强制前端 SSE 推流更新最新设备数据
 		p.broadcastVoWiFiStateChange(worker.ID)
 	}(w)
@@ -763,6 +764,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			case <-ticker.C:
 				switch worker.smsMode {
 				case smsModeAT:
+					worker.scanML307CSMS()
 				case smsModeQMI:
 					if worker.QMICore != nil {
 						if err := worker.CheckAllSMSQMI(); err != nil {

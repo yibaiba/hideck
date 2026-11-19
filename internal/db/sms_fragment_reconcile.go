@@ -60,6 +60,21 @@ func compactSQLiteDefinition(definition string) string {
 	return strings.ToLower(strings.Join(strings.Fields(definition), ""))
 }
 
+// LookupCompletedReceivedSMS finds an already committed receive session without
+// creating history for a storage slot with unknown provenance.
+func LookupCompletedReceivedSMS(iccid, imsi, sessionKey string) (SMS, bool, error) {
+	if DB == nil {
+		return SMS{}, false, errors.New("database not initialized")
+	}
+	var row SMS
+	err := DB.Where("iccid = ? AND imsi = ? AND fragment_session_key = ? AND incomplete = ?", CanonicalICCID(iccid), imsi, sessionKey, false).
+		First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return SMS{}, false, nil
+	}
+	return row, err == nil, err
+}
+
 func SaveReceivedMultipartSMS(input ReceivedMultipartSMS) (ReceivedMultipartSMSResult, error) {
 	if DB == nil {
 		return ReceivedMultipartSMSResult{}, errors.New("database not initialized")

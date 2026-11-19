@@ -436,7 +436,13 @@ func extractSMSPDURecordsAfterPrefix(resp string, prefix string) []SMSPDURecord 
 			index, err := strconv.Atoi(strings.TrimSpace(fields[0]))
 			if err == nil {
 				pdu, _ := smscodec.TrimFullPDUHexByATHeader(next, lines[i])
-				out = append(out, SMSPDURecord{Index: index, PDU: pdu})
+				status := -1
+				if len(fields) > 1 {
+					if parsed, err := strconv.Atoi(fields[1]); err == nil {
+						status = parsed
+					}
+				}
+				out = append(out, SMSPDURecord{Index: index, Status: status, PDU: pdu})
 			}
 		}
 		i++

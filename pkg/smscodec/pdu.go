@@ -369,6 +369,35 @@ type ConcatInfo struct {
 	Seq      int  // 当前序号 (1-based)
 }
 
+type ATDeliverSMS struct {
+	Sender    string
+	Content   string
+	Timestamp time.Time
+	SCTS      string
+	Concat    ConcatInfo
+	Binary    bool
+}
+
+// DecodeATDeliverSMS decodes a full PDU from an AT storage slot, preserving
+// the original SCTS octets used to separate multipart sessions.
+func DecodeATDeliverSMS(fullPDU []byte) (ATDeliverSMS, error) {
+	if len(fullPDU) == 0 || 1+int(fullPDU[0]) >= len(fullPDU) {
+		return ATDeliverSMS{}, errors.New("invalid SMSC length")
+	}
+	tpduBytes := fullPDU[1+int(fullPDU[0]):]
+	_, _, udOffset, _, alphabet, ok := deliverTPDULayout(tpduBytes)
+	if !ok {
+		return ATDeliverSMS{}, errors.New("invalid SMS-DELIVER TPDU layout")
+	}
+	part := ATDeliverSMS{
+		SCTS:   hex.EncodeToString(tpduBytes[udOffset-8 : udOffset-1]),
+		Binary: alphabet == tpdu.Alpha8Bit,
+	}
+	var err error
+	part.Sender, part.Content, part.Timestamp, part.Concat, err = DecodeDeliverTPDU(tpduBytes)
+	return part, err
+}
+
 // DecodeDeliverTPDU 解码下行短信 TPDU，返回发送方号码、文本内容、发送时间、和 concat 分片信息。
 // 如果 TPDU 包含 UDH concatenation header（长短信分片），concat.IsConcat 为 true。
 func DecodeDeliverTPDU(tpduBytes []byte) (sender string, text string, ts time.Time, concat ConcatInfo, err error) {
