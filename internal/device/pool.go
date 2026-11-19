@@ -680,7 +680,8 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 		defer cancel()
 	}
 
-	if w.isML307C() {
+	strictSIMIdentity := atIdentityRulesFor(w.atProfile()).strictSIMIdentity
+	if strictSIMIdentity {
 		inserted, err := w.Backend.IsSimInserted(ctx)
 		if err != nil {
 			if errors.Is(err, modem.ErrSIMPINRequired) && (w.Pool == nil || !w.Pool.IsESIMSwitching(w.ID)) {
@@ -739,7 +740,7 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 			}
 		}
 	}
-	if w.isML307C() && (iccid == "" || imsi == "") {
+	if strictSIMIdentity && (iccid == "" || imsi == "") {
 		return liveSIMIdentityRefreshResult{}, errors.New("live_identity_incomplete")
 	}
 	_, snapshotSupported := w.Backend.(liveSIMIdentitySnapshotReader)
@@ -762,7 +763,7 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 		}
 	}
 	imei := ""
-	if (iccid == "" || imsi == "") && !w.isML307C() {
+	if (iccid == "" || imsi == "") && !strictSIMIdentity {
 		if ident, atErr := probeWorkerATIdentity(ctx, w); atErr == nil {
 			if iccid == "" {
 				iccid = strings.TrimSpace(ident.ICCID)
@@ -1040,7 +1041,7 @@ func (p *Pool) handleSIMStatusEventForOwner(owner workerLifecycleOwner, source s
 		return
 	}
 	state = strings.ToUpper(strings.TrimSpace(state))
-	if owner.worker.isML307C() {
+	if atIdentityRulesFor(owner.worker.atProfile()).strictSIMIdentity {
 		if modem.IsSIMPINRequiredState(state) {
 			p.handleSIMPINRequired(owner)
 			return
@@ -1221,7 +1222,7 @@ func (p *Pool) confirmSIMRemovedForOwner(owner workerLifecycleOwner, source stri
 	inserted, err := w.Backend.IsSimInserted(ctx)
 	if err != nil {
 		transition.Unlock()
-		if w.isML307C() && errors.Is(err, modem.ErrSIMPINRequired) {
+		if atIdentityRulesFor(w.atProfile()).strictSIMIdentity && errors.Is(err, modem.ErrSIMPINRequired) {
 			p.handleSIMPINRequired(owner)
 			return
 		}
@@ -1273,7 +1274,7 @@ func (p *Pool) finishConfirmedSIMInsertion(owner workerLifecycleOwner, source st
 	}
 	p.broadcastVoWiFiStateChange(w.ID)
 	if result.err != nil {
-		if w.isML307C() && errors.Is(result.err, modem.ErrSIMPINRequired) {
+		if atIdentityRulesFor(w.atProfile()).strictSIMIdentity && errors.Is(result.err, modem.ErrSIMPINRequired) {
 			p.handleSIMPINRequired(owner)
 			return
 		}
@@ -1951,12 +1952,7 @@ func (p *Pool) RescanAndReconnect() error {
 	return p.rescanAndReconnect(rescanReconnectOptions{})
 }
 
-type ml307cScanCandidate struct {
-	CompatibleModem
-	unreadableOwner *Worker
-}
-
-func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex WorkerDiscoveryIndex, scan compatibleATDiscoveryScope) (hardware []CompatibleModem, ml307cCandidates []ml307cScanCandidate) {
+func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex WorkerDiscoveryIndex, scan compatibleATDiscoveryScope) (hardware []CompatibleModem, atObservations []atScanObservation) {
 	for i := range discovered {
 		raw := discovered[i]
 		// Paths are attachment hints, never proof that the old worker still
@@ -1990,25 +1986,21 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 					seen[k] = true
 				}
 			}
+			probe := func(dev CompatibleModem) (CompatibleModem, string) {
+				return resolveDiscoveredCompatibleModemFn(dev, 1200*time.Millisecond)
+			}
 			for _, raw := range compatList {
-				isML307C := raw.ATProfile() == modem.ATProfileML307C
-				if scan == compatibleATDiscoveryML307C && !isML307C {
+				if scan == compatibleATDiscoveryLiveIdentity && !atIdentityRulesFor(raw.ATProfile()).verifyLiveIMEI {
 					continue
 				}
-				m, owned := liveWorkerIndex.ReadOwnedATIdentity(raw)
+				m, observation := liveWorkerIndex.observeLiveATIdentity(raw, probe)
 				imei := m.IMEI
-				if !owned {
-					m, imei = resolveDiscoveredCompatibleModemFn(raw, 1200*time.Millisecond)
+				if observation == nil {
+					m, imei = probe(raw)
+				} else {
+					atObservations = append(atObservations, *observation)
 				}
 				key := config.NormalizeIMEI(imei)
-				if isML307C {
-					// Bootstrap must recognize C ports even when IMEI is unreadable.
-					candidate := ml307cScanCandidate{CompatibleModem: raw}
-					if owned && key == "" {
-						candidate.unreadableOwner = liveWorkerIndex.atIdentityByPort[m.ATPort].worker
-					}
-					ml307cCandidates = append(ml307cCandidates, candidate)
-				}
 				if key == "" {
 					continue
 				}
@@ -2020,7 +2012,7 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 			}
 		}
 	}
-	return hardware, ml307cCandidates
+	return hardware, atObservations
 }
 
 func (p *Pool) rescanAndReconnect(opts rescanReconnectOptions) error {
@@ -2036,7 +2028,7 @@ func (p *Pool) rescanAndReconnect(opts rescanReconnectOptions) error {
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
 	managed := p.managedDevices()
 	modemDevices, pcscDevices := partitionManagedDevices(managed)
-	hardware, ml307cCandidates := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesATDiscovery(modemDevices))
+	hardware, atObservations := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesATDiscovery(modemDevices))
 	resolved := ResolveDeviceIdentities(hardware, modemDevices)
 
 	if len(resolved.Degraded) > 0 || len(resolved.Unmatched) > 0 {
@@ -2047,7 +2039,7 @@ func (p *Pool) rescanAndReconnect(opts rescanReconnectOptions) error {
 	}
 
 	for _, snapshot := range resolved.Offline {
-		p.reconcileOfflineRescanDevice(opts, snapshot, hardware, ml307cCandidates, managed)
+		p.reconcileOfflineRescanDevice(opts, snapshot, hardware, atObservations, managed)
 	}
 
 	return p.reconcilePCSCReaders(opts, managed, pcscDevices)
@@ -2736,10 +2728,7 @@ func (p *Pool) PersistRuntimeState(worker *Worker) {
 	}
 
 	// 更新 Device 表
-	model := "EC20"
-	if worker.isML307C() {
-		model = "ML307C"
-	}
+	model := atIdentityRulesFor(worker.atProfile()).model
 	if err := db.UpsertDevice(imei, worker.ID, model, worker.Config.ATPort); err != nil {
 		logger.Warn(fmt.Sprintf("[%s] 更新设备信息失败", worker.ID), "err", err)
 	}

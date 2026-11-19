@@ -6,7 +6,6 @@ import (
 
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/config"
-	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -88,7 +87,7 @@ func (p *Pool) reconcileHealthyRescanWorker(
 		})
 		return
 	}
-	usbChanged := hw.ATProfile() == modem.ATProfileML307C && hw.USBPath != "" && hw.USBPath != worker.Config.USBPath
+	usbChanged := atIdentityRulesFor(hw.ATProfile()).verifyLiveIMEI && hw.USBPath != "" && hw.USBPath != worker.Config.USBPath
 	portChanged := hw.ATPort != "" && hw.ATPort != worker.Config.ATPort
 	if (!usbChanged && !portChanged) || !opts.allowWorkerMutation(pair.Config.ID) {
 		return
@@ -212,7 +211,7 @@ func (p *Pool) reconcileOfflineRescanDevice(
 	opts rescanReconnectOptions,
 	snapshot config.DeviceConfig,
 	hardware []CompatibleModem,
-	ml307cCandidates []ml307cScanCandidate,
+	atObservations []atScanObservation,
 	fallback []config.DeviceConfig,
 ) {
 	releaseMutation := p.AcquireManagedDeviceMutation(snapshot.ID)
@@ -231,12 +230,12 @@ func (p *Pool) reconcileOfflineRescanDevice(
 		return
 	}
 	healthy := worker.IsDeviceHealthy()
-	if healthy && worker.isML307C() && config.IMEIMatches(worker.Config.ModemIMEI, current.ModemIMEI) {
+	if healthy && atIdentityRulesFor(worker.atProfile()).verifyLiveIMEI && config.IMEIMatches(worker.Config.ModemIMEI, current.ModemIMEI) {
 		usb := strings.TrimSpace(worker.Config.USBPath)
 		port := worker.ResolvedATPort()
-		for _, candidate := range ml307cCandidates {
-			if candidate.unreadableOwner == worker && usb != "" && candidate.USBPath == usb &&
-				containsPort(candidate.ATPorts, port) {
+		for _, candidate := range atObservations {
+			if candidate.unreadableOwner == worker && usb != "" && candidate.usbPath == usb &&
+				containsPort(candidate.atPorts, port) {
 				// Keep the existing owner until the next scan can verify its IMEI.
 				return
 			}

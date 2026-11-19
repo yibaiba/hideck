@@ -108,7 +108,7 @@ func (p *Pool) runtimeSMSIdentity(deviceID string) (smsIdentityCandidate, error)
 	}
 	worker.cacheMu.RLock()
 	defer worker.cacheMu.RUnlock()
-	if worker.isML307C() && (!worker.state.Identity.Ready || !worker.Modem.IsSimInserted()) {
+	if atIdentityRulesFor(worker.atProfile()).strictSIMIdentity && (!worker.state.Identity.Ready || !worker.Modem.IsSimInserted()) {
 		return smsIdentityCandidate{}, ErrSMSIdentityUnknown
 	}
 	phase := worker.state.Identity.Phase

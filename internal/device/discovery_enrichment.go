@@ -6,7 +6,6 @@ import (
 
 	qmiq "github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 	"github.com/yibaiba/hideck/internal/config"
-	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -222,7 +221,7 @@ func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) Wor
 		if worker.Modem != nil && worker.Modem.OwnsATRuntime() && worker.ResolvedATPort() != "" {
 			idx.atIdentityByPort[worker.ResolvedATPort()] = workerATIdentityReader{worker: worker, query: worker.Modem.QueryIMEI}
 		}
-		if includeRuntimeStatus && (worker.Modem == nil || worker.Modem.ATProfile() != modem.ATProfileML307C) {
+		if includeRuntimeStatus && !atIdentityRulesFor(worker.atProfile()).verifyLiveIMEI {
 			status := worker.GetDeviceStatus()
 			if imei := strings.TrimSpace(status.IMEI); imei != "" {
 				info.IMEI = imei
@@ -272,24 +271,44 @@ func (idx WorkerDiscoveryIndex) Lookup(controlPath, usbPath, iface string) (Work
 	return WorkerDiscoveryInfo{}, false
 }
 
-// ReadOwnedATIdentity queries the manager already holding a candidate port.
-// A failed query still counts as owned until the old worker is retired.
-func (idx WorkerDiscoveryIndex) ReadOwnedATIdentity(dev CompatibleModem) (CompatibleModem, bool) {
-	if dev.ATProfile() != modem.ATProfileML307C {
-		return dev, false
+// atScanObservation retains a static attachment even if its IMEI could not
+// be verified. Only the separate verified modem result can establish identity.
+type atScanObservation struct {
+	usbPath         string
+	atPorts         []string
+	unreadableOwner *Worker
+}
+
+// ResolveLiveATIdentity handles hardware that requires a live AT IMEI.
+// The caller retains its cache and transport fallback for other hardware.
+func (idx WorkerDiscoveryIndex) ResolveLiveATIdentity(dev CompatibleModem, probe func(CompatibleModem) (CompatibleModem, string)) (CompatibleModem, bool) {
+	resolved, observation := idx.observeLiveATIdentity(dev, probe)
+	return resolved, observation != nil
+}
+
+func (idx WorkerDiscoveryIndex) observeLiveATIdentity(dev CompatibleModem, probe func(CompatibleModem) (CompatibleModem, string)) (CompatibleModem, *atScanObservation) {
+	if !atIdentityRulesFor(dev.ATProfile()).verifyLiveIMEI {
+		return dev, nil
 	}
+	observation := &atScanObservation{usbPath: dev.USBPath, atPorts: dev.ATPorts}
 	for _, port := range dev.ATPorts {
-		query := idx.atIdentityByPort[port].query
-		if query == nil {
+		owner := idx.atIdentityByPort[port]
+		if owner.query == nil {
 			continue
 		}
 		dev.ATPort, dev.IMEI = port, ""
-		if imei, err := query(); err == nil {
+		if imei, err := owner.query(); err == nil {
 			dev.IMEI = imei
 		}
-		return dev, true
+		if config.NormalizeIMEI(dev.IMEI) == "" {
+			// Do not open a second reader while the worker owns the port.
+			observation.unreadableOwner = owner.worker
+		}
+		return dev, observation
 	}
-	return dev, false
+	resolved, imei := probe(dev)
+	resolved.IMEI = imei
+	return resolved, observation
 }
 
 type ConfiguredDeviceIndex struct {

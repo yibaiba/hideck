@@ -1220,41 +1220,42 @@ func (s *Server) useDeviceMgmtDiscovered(c businessContext) {
 			resolvedATPort := strings.TrimSpace(dev.ATPort)
 			imei := strings.TrimSpace(dev.IMEI)
 
-			if withIMEI && dev.ATProfile() == modem.ATProfileML307C {
-				var owned bool
-				dev, owned = managedIndex.ReadOwnedATIdentity(dev)
-				if !owned {
-					dev, _ = enrichDiscoveredCompatibleModemFn(dev, device.CompatibleModemEnrichOptions{
+			if withIMEI {
+				live, handled := managedIndex.ResolveLiveATIdentity(dev, func(raw device.CompatibleModem) (device.CompatibleModem, string) {
+					return enrichDiscoveredCompatibleModemFn(raw, device.CompatibleModemEnrichOptions{
 						EnableATProbe: true, ATProbeTimeout: 900 * time.Millisecond,
 					})
-				}
-				resolvedATPort, imei = dev.ATPort, dev.IMEI
-			} else if withIMEI {
-				managedMatch, hasManaged := managedIndex.Lookup(strings.TrimSpace(dev.ControlPath), strings.TrimSpace(dev.USBPath), strings.TrimSpace(dev.NetInterface))
-				if hasManaged {
-					if containsDiscoveredATPort(dev.ATPorts, managedMatch.ATPort) {
-						resolvedATPort = managedMatch.ATPort
-					}
-					if imei == "" {
-						imei = managedMatch.IMEI
-					}
+				})
+				if handled {
+					dev = live
+					resolvedATPort, imei = dev.ATPort, dev.IMEI
 				} else {
-					probed, discoveredIMEI := enrichDiscoveredCompatibleModemFn(dev, device.CompatibleModemEnrichOptions{
-						EnableATProbe:      true,
-						ATProbeTimeout:     900 * time.Millisecond,
-						EnableQMIIMEIProbe: strings.TrimSpace(dev.ControlPath) != "" && dev.Mode != "mbim",
-					})
-					dev = probed
-					if resolved := strings.TrimSpace(probed.ATPort); resolved != "" {
-						resolvedATPort = resolved
-					}
-					if imei == "" {
-						imei = discoveredIMEI
-					}
-					// MBIM 设备没有 AT 端口也不支持 QMI，使用 MBIM DeviceCaps 探测 IMEI
-					if imei == "" && dev.Mode == "mbim" && strings.TrimSpace(dev.ControlPath) != "" {
-						if mbimIMEI, err := probeIMEIViaMBIMForMgmtFn(dev.ControlPath); err == nil && mbimIMEI != "" {
-							imei = mbimIMEI
+					managedMatch, hasManaged := managedIndex.Lookup(strings.TrimSpace(dev.ControlPath), strings.TrimSpace(dev.USBPath), strings.TrimSpace(dev.NetInterface))
+					if hasManaged {
+						if containsDiscoveredATPort(dev.ATPorts, managedMatch.ATPort) {
+							resolvedATPort = managedMatch.ATPort
+						}
+						if imei == "" {
+							imei = managedMatch.IMEI
+						}
+					} else {
+						probed, discoveredIMEI := enrichDiscoveredCompatibleModemFn(dev, device.CompatibleModemEnrichOptions{
+							EnableATProbe:      true,
+							ATProbeTimeout:     900 * time.Millisecond,
+							EnableQMIIMEIProbe: strings.TrimSpace(dev.ControlPath) != "" && dev.Mode != "mbim",
+						})
+						dev = probed
+						if resolved := strings.TrimSpace(probed.ATPort); resolved != "" {
+							resolvedATPort = resolved
+						}
+						if imei == "" {
+							imei = discoveredIMEI
+						}
+						// MBIM 设备没有 AT 端口也不支持 QMI，使用 MBIM DeviceCaps 探测 IMEI
+						if imei == "" && dev.Mode == "mbim" && strings.TrimSpace(dev.ControlPath) != "" {
+							if mbimIMEI, err := probeIMEIViaMBIMForMgmtFn(dev.ControlPath); err == nil && mbimIMEI != "" {
+								imei = mbimIMEI
+							}
 						}
 					}
 				}

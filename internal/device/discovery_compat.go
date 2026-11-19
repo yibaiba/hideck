@@ -33,7 +33,11 @@ type CompatibleModem struct {
 }
 
 func (m CompatibleModem) ATProfile() modem.ATProfile {
-	if (usbDeviceIdentity{vendorID: m.VendorID, productID: m.ProductID}).isML307C() {
+	return (usbDeviceIdentity{vendorID: m.VendorID, productID: m.ProductID}).atProfile()
+}
+
+func (id usbDeviceIdentity) atProfile() modem.ATProfile {
+	if id.isML307C() {
 		return modem.ATProfileML307C
 	}
 	return modem.ATProfileDefault

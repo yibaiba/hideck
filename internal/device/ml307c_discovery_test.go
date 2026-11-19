@@ -40,7 +40,11 @@ func TestML307CDiscoveryAndRebind(t *testing.T) {
 	owned := WorkerDiscoveryIndex{atIdentityByPort: map[string]workerATIdentityReader{
 		"/dev/ttyUSB8": {query: func() (string, error) { return imei, nil }},
 	}}
-	active, ok := owned.ReadOwnedATIdentity(dev)
+	unexpectedProbe := func(raw CompatibleModem) (CompatibleModem, string) {
+		t.Fatal("unexpected independent AT probe")
+		return raw, ""
+	}
+	active, ok := owned.ResolveLiveATIdentity(dev, unexpectedProbe)
 	if !ok || active.IMEI != imei {
 		t.Fatalf("owned IMEI = %q, %v", active.IMEI, ok)
 	}
@@ -48,9 +52,19 @@ func TestML307CDiscoveryAndRebind(t *testing.T) {
 		query: func() (string, error) { return "", errors.New("old tty closed") },
 	}
 	dev.IMEI = imei
-	active, ok = owned.ReadOwnedATIdentity(dev)
+	active, ok = owned.ResolveLiveATIdentity(dev, unexpectedProbe)
 	if !ok || active.IMEI != "" {
 		t.Fatalf("stale owned tty = %q, %v", active.IMEI, ok)
+	}
+	ordinary := dev
+	ordinary.VendorID, ordinary.ProductID = 0, 0
+	if _, handled := owned.ResolveLiveATIdentity(ordinary, unexpectedProbe); handled {
+		t.Fatal("ordinary AT must retain the caller's existing fallback")
+	}
+	if active, handled := (WorkerDiscoveryIndex{}).ResolveLiveATIdentity(dev, func(raw CompatibleModem) (CompatibleModem, string) {
+		return raw, ""
+	}); !handled || active.IMEI != "" {
+		t.Fatalf("unowned failed read retained a cached IMEI: %q, %v", active.IMEI, handled)
 	}
 
 	origProbe := probeProfileIMEICachedFn

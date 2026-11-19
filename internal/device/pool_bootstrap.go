@@ -132,7 +132,7 @@ type compatibleATDiscoveryScope uint8
 
 const (
 	compatibleATDiscoveryNone compatibleATDiscoveryScope = iota
-	compatibleATDiscoveryML307C
+	compatibleATDiscoveryLiveIdentity
 	compatibleATDiscoveryAll
 )
 
@@ -146,17 +146,20 @@ func configuredDevicesATDiscovery(devices []config.DeviceConfig) compatibleATDis
 			return compatibleATDiscoveryAll
 		}
 		if resolvedBackendMode(dev) == backend.BackendAT {
-			// An enumerated tty is only an attachment hint for an ML307C.
-			// Other modems with explicit ports keep their existing probe behavior.
-			scope = compatibleATDiscoveryML307C
+			// Profiles that require live identity must verify even an
+			// explicitly configured tty. Other explicit ports do not expand discovery.
+			scope = compatibleATDiscoveryLiveIdentity
 		}
 	}
 	return scope
 }
 
-func configuredPortPointsToML307C(cfg config.DeviceConfig, candidates []ml307cScanCandidate) bool {
-	if usb := strings.TrimSpace(cfg.USBPath); usb != "" && readUSBDeviceIdentity(resolveUSBPathForScan(usb)).isML307C() {
-		return true
+func configuredPortRequiresLiveATIdentity(cfg config.DeviceConfig, observations []atScanObservation) bool {
+	if usb := strings.TrimSpace(cfg.USBPath); usb != "" {
+		profile := readUSBDeviceIdentity(resolveUSBPathForScan(usb)).atProfile()
+		if atIdentityRulesFor(profile).verifyLiveIMEI {
+			return true
+		}
 	}
 	for _, port := range []string{cfg.ATPort, cfg.ManagePort} {
 		port = strings.TrimSpace(port)
@@ -166,8 +169,8 @@ func configuredPortPointsToML307C(cfg config.DeviceConfig, candidates []ml307cSc
 		if target, err := filepath.EvalSymlinks(port); err == nil {
 			port = target
 		}
-		for _, hw := range candidates {
-			if containsPort(hw.ATPorts, port) {
+		for _, observation := range observations {
+			if containsPort(observation.atPorts, port) {
 				return true
 			}
 		}
@@ -313,13 +316,13 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			scan = compatibleATDiscoveryAll
 		}
 		atIMEIConfigured := resolvedBackendMode(devCfg) == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) != ""
-		hardware, ml307cCandidates := p.collectRescanHardware(nil, liveWorkerIndex, scan)
+		hardware, atObservations := p.collectRescanHardware(nil, liveWorkerIndex, scan)
 		resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 
 		if len(resolved.Matched) > 0 {
 			hw := resolved.Matched[0].Hardware
 			atProfile = hw.ATProfile()
-			if atProfile == modem.ATProfileML307C {
+			if atIdentityRulesFor(atProfile).verifyLiveIMEI {
 				devCfg.USBPath = hw.USBPath
 				devCfg.ATPort = hw.ATPort
 				devCfg.ManagePort = hw.ATPort
@@ -343,7 +346,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 				logger.Info(fmt.Sprintf("[%s] MBIM/AT 通过 USB 路径认领成功，回填实时 IMEI", devCfg.ID), "imei", devCfg.ModemIMEI)
 			}
 		} else if (strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "") ||
-			(atIMEIConfigured && configuredPortPointsToML307C(devCfg, ml307cCandidates)) {
+			(atIMEIConfigured && configuredPortRequiresLiveATIdentity(devCfg, atObservations)) {
 			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
 		}
 	} else if hasManagedQMINetwork(devCfg) {
@@ -618,9 +621,9 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			p.scheduleATDisconnectRecovery(owner, reason)
 		})
 		p.bindModemReadyIndications(w)
-		if atProfile == modem.ATProfileML307C {
+		if source := atIdentityRulesFor(atProfile).simStatusSource; source != "" {
 			m.SetSIMStatusHandler(func(inserted *bool, state string) {
-				p.handleSIMStatusEventForOwner(owner, "ml307c_sim_status", inserted, state)
+				p.handleSIMStatusEventForOwner(owner, source, inserted, state)
 			})
 		}
 	}
