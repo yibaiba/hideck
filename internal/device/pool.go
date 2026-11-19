@@ -1192,13 +1192,19 @@ func (p *Pool) confirmSIMRemovedForOwner(owner workerLifecycleOwner, source stri
 		return
 	}
 	deviceID := owner.worker.ID
+	if expected != nil && !p.consumeSIMEventTimer(deviceID, expected) {
+		return
+	}
 	releaseMutation := p.AcquireManagedDeviceMutation(deviceID)
 	defer releaseMutation()
 	transition := p.policyTransitionFor(deviceID)
 	transition.Lock()
-	if !p.workerLifecycleOwnerCurrent(owner) || !p.consumeSIMEventTimer(deviceID, expected) {
+	if !p.workerLifecycleOwnerCurrent(owner) {
 		transition.Unlock()
 		return
+	}
+	if expected == nil {
+		p.consumeSIMEventTimer(deviceID, nil)
 	}
 	if p.IsESIMSwitching(deviceID) {
 		transition.Unlock()

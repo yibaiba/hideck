@@ -57,14 +57,27 @@ func TestStaleSIMConfirmationKeepsCurrentWorkerTimer(t *testing.T) {
 	p.simEventTimers = map[string]*time.Timer{w.ID: timer}
 	p.simEventMu.Unlock()
 
-	old := &Worker{ID: w.ID, Pool: p}
-	p.confirmSIMRemovedForOwner(workerLifecycleOwner{worker: old}, "at_startup", nil)
+	old := workerLifecycleOwner{worker: &Worker{ID: w.ID, Pool: p}}
+	oldTimer := time.NewTimer(time.Hour)
+	t.Cleanup(func() { oldTimer.Stop() })
+	p.confirmSIMRemovedForOwner(old, "at_startup", nil)
+	p.confirmSIMRemovedForOwner(old, "sim_event", oldTimer)
 
 	p.simEventMu.Lock()
 	current := p.simEventTimers[w.ID]
+	p.simEventTimers[w.ID] = oldTimer
 	p.simEventMu.Unlock()
 	if current != timer {
 		t.Fatal("stale worker consumed the current worker's SIM status timer")
+	}
+
+	// An expired callback can still consume the exact timer it was scheduled for.
+	p.confirmSIMRemovedForOwner(old, "sim_event", oldTimer)
+	p.simEventMu.Lock()
+	current = p.simEventTimers[w.ID]
+	p.simEventMu.Unlock()
+	if current != nil {
+		t.Fatal("expired callback left its own timer registered")
 	}
 }
 
