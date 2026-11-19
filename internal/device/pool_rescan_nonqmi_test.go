@@ -75,7 +75,7 @@ func TestRescanReconnectsNonQMIDeviceByIMEI(t *testing.T) {
 	// 验证 resolver 把它放进 Matched 而非 Offline
 	discovered, _ := discoverQMIDevicesFn()
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
-	hardware := p.collectRescanHardware(discovered, liveWorkerIndex)
+	hardware := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesNeedCompatibleATDiscovery(config.ListDevices()))
 	managed := config.ListDevices()
 	resolved := ResolveDeviceIdentities(hardware, managed)
 

@@ -679,6 +679,19 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 		defer cancel()
 	}
 
+	if w.isML307C() {
+		inserted, err := w.Backend.IsSimInserted(ctx)
+		if err != nil {
+			if errors.Is(err, modem.ErrSIMPINRequired) && (w.Pool == nil || !w.Pool.IsESIMSwitching(w.ID)) {
+				w.markSIMPINRequired()
+			}
+			return liveSIMIdentityRefreshResult{}, err
+		}
+		if !inserted {
+			return liveSIMIdentityRefreshResult{}, errATNoSIM
+		}
+	}
+
 	iccid, imsi, nativeSPN := "", "", ""
 	var simMetadata *backend.SIMMetadata
 	spnReadOK, metadataReadOK := false, false
@@ -725,6 +738,9 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 			}
 		}
 	}
+	if w.isML307C() && (iccid == "" || imsi == "") {
+		return liveSIMIdentityRefreshResult{}, errors.New("live_identity_incomplete")
+	}
 	_, snapshotSupported := w.Backend.(liveSIMIdentitySnapshotReader)
 	if !snapshotSupported && (simMetadata == nil ||
 		strings.TrimSpace(simMetadata.NativeMCC) == "" ||
@@ -745,7 +761,7 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 		}
 	}
 	imei := ""
-	if iccid == "" || imsi == "" {
+	if (iccid == "" || imsi == "") && !w.isML307C() {
 		if ident, atErr := probeWorkerATIdentity(ctx, w); atErr == nil {
 			if iccid == "" {
 				iccid = strings.TrimSpace(ident.ICCID)
@@ -1022,10 +1038,28 @@ func (p *Pool) handleSIMStatusEventForOwner(owner workerLifecycleOwner, source s
 	if p == nil || owner.worker == nil || !p.workerLifecycleOwnerCurrent(owner) {
 		return
 	}
-	if insertedHint != nil && *insertedHint {
-		return
-	}
-	if strings.EqualFold(strings.TrimSpace(state), "READY") {
+	state = strings.ToUpper(strings.TrimSpace(state))
+	if owner.worker.isML307C() {
+		if modem.IsSIMPINRequiredState(state) {
+			p.handleSIMPINRequired(owner)
+			return
+		}
+		if insertedHint != nil {
+			if *insertedHint && !owner.worker.SIMIdentityConvergenceMatches("", 0) {
+				return
+			}
+			if !*insertedHint {
+				owner.worker.cacheMu.RLock()
+				confirmedAbsent := owner.worker.state.Identity.LastError == "sim_removed"
+				owner.worker.cacheMu.RUnlock()
+				if confirmedAbsent {
+					return
+				}
+			}
+		} else if state != "READY" && state != "SIM REMOVED" && state != "SIM NOT INSERTED" {
+			return
+		}
+	} else if (insertedHint != nil && *insertedHint) || state == "READY" {
 		return
 	}
 	deviceID := owner.worker.ID
@@ -1186,6 +1220,10 @@ func (p *Pool) confirmSIMRemovedForOwner(owner workerLifecycleOwner, source stri
 	inserted, err := w.Backend.IsSimInserted(ctx)
 	if err != nil {
 		transition.Unlock()
+		if w.isML307C() && errors.Is(err, modem.ErrSIMPINRequired) {
+			p.handleSIMPINRequired(owner)
+			return
+		}
 		logger.Warn("SIM 拔卡确认失败，跳过 VoWiFi 自动停止", "device", deviceID, "source", source, "err", err)
 		return
 	}
@@ -1234,6 +1272,10 @@ func (p *Pool) finishConfirmedSIMInsertion(owner workerLifecycleOwner, source st
 	}
 	p.broadcastVoWiFiStateChange(w.ID)
 	if result.err != nil {
+		if w.isML307C() && errors.Is(result.err, modem.ErrSIMPINRequired) {
+			p.handleSIMPINRequired(owner)
+			return
+		}
 		logger.Warn("SIM 插入后刷新身份失败", "device", w.ID, "source", source, "err", result.err)
 		return
 	}
@@ -1908,7 +1950,7 @@ func (p *Pool) RescanAndReconnect() error {
 	return p.rescanAndReconnect(rescanReconnectOptions{})
 }
 
-func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex WorkerDiscoveryIndex) []CompatibleModem {
+func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex WorkerDiscoveryIndex, scanCompatibleAT bool) []CompatibleModem {
 	var hardware []CompatibleModem
 	for i := range discovered {
 		raw := discovered[i]
@@ -1935,8 +1977,7 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 		})
 	}
 
-	managed := config.ListDevices()
-	if configuredDevicesNeedCompatibleATDiscovery(managed) {
+	if scanCompatibleAT {
 		if compatList, err := DiscoverCompatibleModemsFromQMI(discovered); err == nil {
 			seen := map[string]bool{}
 			for _, hw := range hardware {
@@ -1945,7 +1986,11 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 				}
 			}
 			for _, raw := range compatList {
-				m, imei := resolveDiscoveredCompatibleModemFn(raw, 1200*time.Millisecond)
+				m, owned := liveWorkerIndex.ReadOwnedATIdentity(raw)
+				imei := m.IMEI
+				if !owned {
+					m, imei = resolveDiscoveredCompatibleModemFn(raw, 1200*time.Millisecond)
+				}
 				if config.NormalizeIMEI(imei) == "" {
 					continue
 				}
@@ -1971,7 +2016,7 @@ func (p *Pool) rescanAndReconnect(opts rescanReconnectOptions) error {
 	}
 
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
-	hardware := p.collectRescanHardware(discovered, liveWorkerIndex)
+	hardware := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesNeedCompatibleATDiscovery(config.ListDevices()))
 	managed := p.managedDevices()
 	modemDevices, pcscDevices := partitionManagedDevices(managed)
 	resolved := ResolveDeviceIdentities(hardware, modemDevices)
@@ -2673,7 +2718,11 @@ func (p *Pool) PersistRuntimeState(worker *Worker) {
 	}
 
 	// 更新 Device 表
-	if err := db.UpsertDevice(imei, worker.ID, "EC20", worker.Config.ATPort); err != nil {
+	model := "EC20"
+	if worker.isML307C() {
+		model = "ML307C"
+	}
+	if err := db.UpsertDevice(imei, worker.ID, model, worker.Config.ATPort); err != nil {
 		logger.Warn(fmt.Sprintf("[%s] 更新设备信息失败", worker.ID), "err", err)
 	}
 }

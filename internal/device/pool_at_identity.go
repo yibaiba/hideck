@@ -10,6 +10,11 @@ import (
 )
 
 var errATIdentityUnavailable = errors.New("at identity unavailable")
+var errATNoSIM = errors.New("AT modem has no SIM")
+
+func (w *Worker) isML307C() bool {
+	return w != nil && w.Modem != nil && w.Modem.ATProfile() == modem.ATProfileML307C
+}
 
 var probeATIdentityFn = modem.ProbeATIdentity
 

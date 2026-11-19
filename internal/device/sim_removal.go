@@ -7,6 +7,7 @@ import (
 
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/db"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -35,6 +36,31 @@ func (w *Worker) markSIMRemoved(reason string) {
 	w.state.Meta.RuntimeUpdatedAt = now
 	w.state.Meta.UpdatedAt = now
 	w.cacheMu.Unlock()
+}
+
+func (w *Worker) markSIMPINRequired() {
+	now := time.Now()
+	w.cacheMu.Lock()
+	defer w.cacheMu.Unlock()
+	if w.state.Identity.LastError == modem.ErrSIMPINRequired.Error() && !w.state.Identity.Ready {
+		return
+	}
+	w.markSIMIdentityDegradedLocked("sim_pin_required", modem.ErrSIMPINRequired, now)
+	w.state.Identity.Generation++
+	w.state.Runtime.SimInserted = false
+	w.state.Meta.RuntimeUpdatedAt = now
+}
+
+func (p *Pool) handleSIMPINRequired(owner workerLifecycleOwner) {
+	if !p.workerLifecycleOwnerCurrent(owner) || p.IsESIMSwitching(owner.worker.ID) {
+		return
+	}
+	w := owner.worker
+	w.markSIMPINRequired()
+	if err := p.retirePhoneRuntimesForSIMChange(owner); err != nil {
+		logger.Warn("SIM PIN 锁定后停止电话业务失败", "device", w.ID, "err", err)
+	}
+	p.broadcastVoWiFiStateChange(w.ID)
 }
 
 func (p *Pool) retirePhoneRuntimesForSIMChange(owner workerLifecycleOwner) error {

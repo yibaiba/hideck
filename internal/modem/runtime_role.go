@@ -25,7 +25,7 @@ func (m *Manager) initializationCommands() []string {
 		"AT+CMGF=0",
 		"AT+CNMI=2,1,0,0,0",
 	}
-	if m.role == runtimeRoleSMSAuxiliary {
+	if m.role == runtimeRoleSMSAuxiliary || m.atProfile == ATProfileML307C {
 		return commands
 	}
 	return append(commands,

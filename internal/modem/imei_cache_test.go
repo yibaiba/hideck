@@ -15,8 +15,8 @@ func TestIMEICacheRejectsReusedSerialNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeCachedIMEI(path, "111111111111111", node)
-	if got := loadCachedIMEI(path); got != "111111111111111" {
+	storeCachedIMEIForProfile(path, "111111111111111", node, ATProfileDefault)
+	if got := loadCachedIMEIForProfile(path, ATProfileDefault); got != "111111111111111" {
 		t.Fatalf("cache = %q", got)
 	}
 	// Keep the old inode alive so this models replacement rather than inode reuse.
@@ -26,11 +26,11 @@ func TestIMEICacheRejectsReusedSerialNode(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadCachedIMEI(path); got != "" {
+	if got := loadCachedIMEIForProfile(path, ATProfileDefault); got != "" {
 		t.Fatalf("reused port retained identity %q", got)
 	}
-	storeCachedIMEI(path, "111111111111111", node)
-	if got := loadCachedIMEI(path); got != "" {
+	storeCachedIMEIForProfile(path, "111111111111111", node, ATProfileDefault)
+	if got := loadCachedIMEIForProfile(path, ATProfileDefault); got != "" {
 		t.Fatalf("late probe poisoned new node: %q", got)
 	}
 }

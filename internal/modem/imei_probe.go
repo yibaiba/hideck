@@ -13,9 +13,10 @@ import (
 
 // imeiCacheItem 存储 IMEI 缓存条目及对应的获取时间戳
 type imeiCacheItem struct {
-	IMEI string
-	TS   time.Time
-	Node os.FileInfo
+	IMEI    string
+	TS      time.Time
+	Node    os.FileInfo
+	Profile ATProfile
 }
 
 // imeiCache 提供线程安全的内存 IMEI 映射缓存，避免频繁通过串口发起硬件查询
@@ -31,6 +32,10 @@ func ProbeIMEICached(atPort string, timeout time.Duration) (string, error) {
 
 // ProbeIMEICachedContext 提供可取消的缓存 IMEI 探测。
 func ProbeIMEICachedContext(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
+	return ATProfileDefault.ProbeIMEICached(ctx, atPort, timeout)
+}
+
+func (profile ATProfile) ProbeIMEICached(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
 	atPort = strings.TrimSpace(atPort)
 	if atPort == "" {
 		return "", errors.New("empty at port")
@@ -39,30 +44,30 @@ func ProbeIMEICachedContext(ctx context.Context, atPort string, timeout time.Dur
 		ctx = context.Background()
 	}
 
-	if imei := loadCachedIMEI(atPort); imei != "" {
+	if imei := loadCachedIMEIForProfile(atPort, profile); imei != "" {
 		return imei, nil
 	}
 
 	node, _ := os.Stat(atPort)
-	imei, err := ProbeIMEIContext(ctx, atPort, timeout)
+	imei, err := profile.probeIMEI(ctx, atPort, timeout)
 	if err == nil && imei != "" {
-		storeCachedIMEI(atPort, imei, node)
+		storeCachedIMEIForProfile(atPort, imei, node, profile)
 	}
 	return imei, err
 }
 
-func loadCachedIMEI(atPort string) string {
+func loadCachedIMEIForProfile(atPort string, profile ATProfile) string {
 	imeiCache.mu.RLock()
 	defer imeiCache.mu.RUnlock()
 	item, ok := imeiCache.m[atPort]
 	node, err := os.Stat(atPort)
-	if !ok || item.IMEI == "" || time.Since(item.TS) >= 10*time.Minute || err != nil || item.Node == nil || !os.SameFile(item.Node, node) || !item.Node.ModTime().Equal(node.ModTime()) {
+	if !ok || item.Profile != profile || item.IMEI == "" || time.Since(item.TS) >= 10*time.Minute || err != nil || item.Node == nil || !os.SameFile(item.Node, node) || !item.Node.ModTime().Equal(node.ModTime()) {
 		return ""
 	}
 	return item.IMEI
 }
 
-func storeCachedIMEI(atPort, imei string, node os.FileInfo) {
+func storeCachedIMEIForProfile(atPort, imei string, node os.FileInfo, profile ATProfile) {
 	current, err := os.Stat(atPort)
 	if err != nil || node == nil || !os.SameFile(node, current) || !node.ModTime().Equal(current.ModTime()) {
 		return
@@ -72,7 +77,7 @@ func storeCachedIMEI(atPort, imei string, node os.FileInfo) {
 	if imeiCache.m == nil {
 		imeiCache.m = make(map[string]imeiCacheItem)
 	}
-	imeiCache.m[atPort] = imeiCacheItem{IMEI: imei, TS: time.Now(), Node: node}
+	imeiCache.m[atPort] = imeiCacheItem{IMEI: imei, TS: time.Now(), Node: node, Profile: profile}
 }
 
 // ProbeIMEI 通过打开底层 TTY 串口设备并执行 `AT+CGSN` 指令来实时探测模组的 IMEI 串号
@@ -82,6 +87,10 @@ func ProbeIMEI(atPort string, timeout time.Duration) (string, error) {
 
 // ProbeIMEIContext 在取消时主动关闭串口，避免 USB 重枚举期间阻塞设备恢复。
 func ProbeIMEIContext(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
+	return ATProfileDefault.probeIMEI(ctx, atPort, timeout)
+}
+
+func (profile ATProfile) probeIMEI(ctx context.Context, atPort string, timeout time.Duration) (string, error) {
 	atPort = strings.TrimSpace(atPort)
 	if atPort == "" {
 		return "", errors.New("empty at port")
@@ -116,6 +125,14 @@ func ProbeIMEIContext(ctx context.Context, atPort string, timeout time.Duration)
 
 	buf := make([]byte, 1024)
 	var acc strings.Builder
+	readIMEI := func() string {
+		reply := acc.String()
+		if profile == ATProfileML307C {
+			// A serial read can end in the middle of an identifier.
+			reply = reply[:strings.LastIndexAny(reply, "\r\n")+1]
+		}
+		return profile.parseIMEI(reply)
+	}
 
 	write := func(s string) {
 		_, _ = p.Write([]byte(s))
@@ -124,14 +141,14 @@ func ProbeIMEIContext(ctx context.Context, atPort string, timeout time.Duration)
 	// 写入 AT 测试命令与查询 IMEI 的 AT+CGSN 命令
 	write("AT\r\n")
 	time.Sleep(40 * time.Millisecond)
-	write("AT+CGSN\r\n")
+	write(profile.imeiCommand() + "\r\n")
 
 	// 在指定的截止时间内轮询并解析串口输出内容
 	for probeCtx.Err() == nil {
 		n, rerr := p.Read(buf)
 		if n > 0 {
 			acc.Write(buf[:n])
-			if imei := parseIMEI(acc.String()); imei != "" {
+			if imei := readIMEI(); imei != "" {
 				return imei, nil
 			}
 		}
@@ -146,7 +163,7 @@ func ProbeIMEIContext(ctx context.Context, atPort string, timeout time.Duration)
 	}
 
 	// 最终尝试解析一次累积的串口缓冲区
-	if imei := parseIMEI(acc.String()); imei != "" {
+	if imei := readIMEI(); imei != "" {
 		return imei, nil
 	}
 	if err := probeCtx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {

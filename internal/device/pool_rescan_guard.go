@@ -108,6 +108,9 @@ func rescanWorkerConfig(cfg config.DeviceConfig, hw CompatibleModem) config.Devi
 	if hw.NetInterface != "" {
 		cfg.Interface = hw.NetInterface
 	}
+	if hw.USBPath != "" {
+		cfg.USBPath = hw.USBPath
+	}
 	cfg.ControlDevice = strings.TrimSpace(hw.ControlPath)
 	cfg.QMIDevice = strings.TrimSpace(hw.ControlPath)
 	cfg.ATPort = hw.ATPort

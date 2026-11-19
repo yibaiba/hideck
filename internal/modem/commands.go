@@ -2,6 +2,7 @@ package modem
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,11 +12,15 @@ import (
 )
 
 func (m *Manager) QueryIMEI() (string, error) {
-	resp, err := m.ExecuteATSilent("AT+CGSN", 2*time.Second)
+	resp, err := m.ExecuteATSilent(m.atProfile.imeiCommand(), 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return parseIMEI(resp), nil
+	imei := m.atProfile.parseIMEI(resp)
+	if imei == "" && m.atProfile == ATProfileML307C {
+		return "", errors.New("invalid IMEI response")
+	}
+	return imei, nil
 }
 
 func (m *Manager) QueryFirmware() (string, error) {
@@ -27,6 +32,9 @@ func (m *Manager) QueryFirmware() (string, error) {
 }
 
 func (m *Manager) QuerySIMInserted() (bool, error) {
+	if m.atProfile == ATProfileML307C {
+		return m.queryML307CSIMInserted()
+	}
 	if resp, err := m.ExecuteATSilent("AT+QSIMSTAT?", 2*time.Second); err == nil {
 		if inserted, ok := parseQSIMSTATInserted(resp); ok {
 			return inserted, nil
@@ -51,15 +59,17 @@ func (m *Manager) QueryIMSI() (string, error) {
 }
 
 func (m *Manager) QueryICCID() (string, error) {
-	resp, err := m.ExecuteATSilent("AT+QCCID", 2*time.Second)
+	resp, err := m.ExecuteATSilent(m.atProfile.iccidCommand(), 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return parseQCCID(resp), nil
+	return m.atProfile.parseICCID(resp), nil
 }
 
 func (m *Manager) QueryOperator() (string, error) {
-	_, _ = m.ExecuteATSilent("AT+COPS=3,2", 2*time.Second)
+	if m.atProfile != ATProfileML307C {
+		_, _ = m.ExecuteATSilent("AT+COPS=3,2", 2*time.Second)
+	}
 	resp, err := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
 	if err != nil {
 		return "", err
@@ -68,11 +78,15 @@ func (m *Manager) QueryOperator() (string, error) {
 }
 
 func (m *Manager) QueryRegistration() (int, string, string, string, error) {
-	resp, err := m.ExecuteATSilent("AT+CREG?", 2*time.Second)
+	command, prefix := "AT+CREG?", "+CREG:"
+	if m.atProfile == ATProfileML307C {
+		command, prefix = "AT+CEREG?", "+CEREG:"
+	}
+	resp, err := m.ExecuteATSilent(command, 2*time.Second)
 	if err != nil {
 		return 0, "", "", "", err
 	}
-	regStatus, lac, cellID, ok := parseCREG(resp)
+	regStatus, lac, cellID, ok := parseRegistration(resp, prefix)
 	if !ok {
 		return 0, "", "", "", nil
 	}
@@ -100,6 +114,9 @@ func (m *Manager) QueryServingCellLTE() (int, int, error) {
 }
 
 func (m *Manager) QueryServingCellLTEInfo() (ServingCellLTEInfo, error) {
+	if m.atProfile == ATProfileML307C {
+		return ServingCellLTEInfo{}, nil
+	}
 	resp, err := m.ExecuteATSilent("AT+QENG=\"servingcell\"", 3*time.Second)
 	if err != nil {
 		return ServingCellLTEInfo{}, err
@@ -120,6 +137,9 @@ func (m *Manager) QueryAPN() (string, error) {
 }
 
 func (m *Manager) QueryIMSStatus() (int, error) {
+	if m.atProfile == ATProfileML307C {
+		return 0, nil
+	}
 	resp, err := m.ExecuteATSilent("AT+QIMS?", 2*time.Second)
 	if err != nil {
 		return 0, err
@@ -134,6 +154,14 @@ func (m *Manager) QueryNetworkModeAndDuplex() (string, string, error) {
 }
 
 func (m *Manager) QueryNetworkRadio() (string, string, string, uint32, error) {
+	if m.atProfile == ATProfileML307C {
+		resp, err := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
+		if err != nil {
+			return "", "", "", 0, err
+		}
+		mode, _ := parseCOPSAct(resp)
+		return mode, "", "", 0, nil
+	}
 	resp, err := m.ExecuteATSilent("AT+QNWINFO", 2*time.Second)
 	if err != nil {
 		return "", "", "", 0, err
@@ -149,8 +177,8 @@ func (m *Manager) QueryNetworkMode() (string, error) {
 
 func (m *Manager) QueryNetworkModeFallbackAndDuplex() (string, string, error) {
 	networkMode, networkDuplex, err := m.QueryNetworkModeAndDuplex()
-	if err == nil && networkMode != "" {
-		return networkMode, networkDuplex, nil
+	if m.atProfile == ATProfileML307C || (err == nil && networkMode != "") {
+		return networkMode, networkDuplex, err
 	}
 	resp, err2 := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
 	if err2 != nil {
@@ -263,6 +291,9 @@ func (m *Manager) QueryMSISDN() (string, error) {
 
 // QueryUSBNetMode 查询 USBNET 模式
 func (m *Manager) QueryUSBNetMode() (int, error) {
+	if m.atProfile == ATProfileML307C {
+		return -1, nil
+	}
 	resp, err := m.ExecuteATSilent("AT+QCFG=\"usbnet\"?", 2*time.Second)
 	if err != nil {
 		return -1, err

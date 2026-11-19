@@ -57,11 +57,12 @@ type commandRequest struct {
 
 // Manager 管理单个 EC20 模块的 AT 指令通信
 type Manager struct {
-	cfg      config.DeviceConfig
-	atPort   string
-	port     serial.Port
-	portMode *serial.Mode
-	role     runtimeRole
+	atProfile ATProfile
+	cfg       config.DeviceConfig
+	atPort    string
+	port      serial.Port
+	portMode  *serial.Mode
+	role      runtimeRole
 
 	// 通道驱动的异步架构
 	stop        chan struct{}
@@ -176,19 +177,26 @@ func (m *Manager) pureQMIBackend() bool {
 }
 
 func New(cfg config.DeviceConfig) (*Manager, error) {
-	return newManager(cfg, runtimeRoleDefault)
+	return NewWithATProfile(cfg, ATProfileDefault)
 }
+
+func NewWithATProfile(cfg config.DeviceConfig, profile ATProfile) (*Manager, error) {
+	return newManager(cfg, runtimeRoleDefault, profile)
+}
+
+func (m *Manager) ATProfile() ATProfile { return m.atProfile }
 
 // NewSMSAuxiliary creates the single AT runtime used by an MBIM worker for
 // SMS, SMSC, URCs, and manual AT commands. Network, identity, and APDU remain
 // owned by the MBIM backend.
 func NewSMSAuxiliary(cfg config.DeviceConfig) (*Manager, error) {
-	return newManager(cfg, runtimeRoleSMSAuxiliary)
+	return newManager(cfg, runtimeRoleSMSAuxiliary, ATProfileDefault)
 }
 
-func newManager(cfg config.DeviceConfig, role runtimeRole) (*Manager, error) {
+func newManager(cfg config.DeviceConfig, role runtimeRole, profile ATProfile) (*Manager, error) {
 	m := &Manager{
 		cfg:          cfg,
+		atProfile:    profile,
 		atPort:       cfg.ATPort,
 		role:         role,
 		stop:         make(chan struct{}),
@@ -769,7 +777,9 @@ RespLoop:
 						"resp", logATResponse(req.cmd, strings.Join(fullResponse, " | ")),
 						"cost", time.Since(startTime).Truncate(time.Millisecond).String())
 				}
-				if req.cmd == "AT+CLCC" {
+				if m.atProfile == ATProfileML307C && req.cmd == "AT+CPIN?" && isML307CNoSIMError(line) {
+					req.errChan <- errSIMNotInserted
+				} else if req.cmd == "AT+CLCC" {
 					req.errChan <- &clccResponseError{response: strings.Join(fullResponse, "\n"), terminal: line}
 				} else {
 					req.errChan <- fmt.Errorf("设备返回错误: %s", logATResponse(req.cmd, strings.Join(fullResponse, "\n")))
@@ -796,6 +806,8 @@ RespLoop:
 
 				req.respChan <- "> "
 				break RespLoop
+			} else if m.atProfile == ATProfileML307C && req.cmd == "AT+CPIN?" && strings.HasPrefix(line, "+CPIN:") {
+				fullResponse = append(fullResponse, line)
 			} else if m.isURC(line) {
 				// 对于确认为 URC 的行，始终分发出去
 				m.handleURC(line)
@@ -1010,8 +1022,10 @@ func (m *Manager) collectDeviceInfo() {
 			imsi = v
 		}
 	}
-	if v, err := m.QueryICCID(); err == nil {
-		iccid = v
+	if simInserted || m.atProfile != ATProfileML307C {
+		if v, err := m.QueryICCID(); err == nil {
+			iccid = v
+		}
 	}
 	if v, err := m.QueryOperator(); err == nil {
 		operator = v
@@ -1062,7 +1076,9 @@ func (m *Manager) collectDeviceInfo() {
 	if operator != "" {
 		m.operator = operator
 	}
-	m.simInserted = simInserted
+	if m.atProfile != ATProfileML307C {
+		m.simInserted = simInserted
+	}
 	if signalDBM != -999 {
 		m.signalDBM = signalDBM
 	}
@@ -1279,6 +1295,9 @@ func (m *Manager) RefreshStatus(onAlert func(msg string), onRecover func(msg str
 
 	// 检查 SIM 卡是否存活
 	simInserted, simErr := m.QuerySIMInserted()
+	if m.atProfile == ATProfileML307C && simErr == nil {
+		m.dispatchSIMStatusURC(&simInserted, "")
+	}
 
 	if v, err := m.QueryOperator(); err == nil {
 		operator = v
@@ -1425,6 +1444,9 @@ func (m *Manager) handleURC(line string) {
 				}
 				break
 			}
+		}
+		if m.atProfile == ATProfileML307C && IsSIMPINRequiredState(state) {
+			m.cacheML307CSIMState(false, ErrSIMPINRequired)
 		}
 		m.dispatchSIMStatusURC(nil, state)
 	}

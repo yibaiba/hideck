@@ -114,7 +114,11 @@ func parseIMSI(resp string) string {
 }
 
 func parseQCCID(resp string) string {
-	line, ok := findLineWithPrefix(resp, "+QCCID:")
+	return parseICCID(resp, "+QCCID:")
+}
+
+func parseICCID(resp, prefix string) string {
+	line, ok := findLineWithPrefix(resp, prefix)
 	if !ok {
 		return ""
 	}
@@ -165,7 +169,11 @@ func parseCOPSAct(resp string) (string, bool) {
 }
 
 func parseCREG(resp string) (int, string, string, bool) {
-	line, ok := findLineWithPrefix(resp, "+CREG:")
+	return parseRegistration(resp, "+CREG:")
+}
+
+func parseRegistration(resp, prefix string) (int, string, string, bool) {
+	line, ok := findLineWithPrefix(resp, prefix)
 	if !ok {
 		return 0, "", "", false
 	}

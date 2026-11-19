@@ -8,6 +8,7 @@ import (
 	"github.com/yibaiba/hideck/internal/cardpolicy"
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/db"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/internal/vowifihost"
 )
 
@@ -134,6 +135,82 @@ func TestConfirmedSIMRemovalCancelsStartingVoWiFi(t *testing.T) {
 		}
 	default:
 		t.Fatal("SIM removal did not cancel the in-progress VoWiFi start")
+	}
+}
+
+type ml307cSIMBackendStub struct {
+	workerStartupIdentityBackendStub
+	simErr error
+}
+
+func (s *ml307cSIMBackendStub) IsSimInserted(context.Context) (bool, error) {
+	return s.simErr == nil, s.simErr
+}
+
+func TestML307CPINRecoveryRetriesIdentityOnRepeatedReady(t *testing.T) {
+	p := NewPool(&config.Config{})
+	t.Cleanup(func() { _ = p.Shutdown() })
+	cfg := config.DeviceConfig{ID: "c", DeviceBackend: "at", ATPort: "/dev/ttyUSB8"}
+	m, err := modem.NewWithATProfile(cfg, modem.ATProfileML307C)
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &ml307cSIMBackendStub{simErr: modem.ErrSIMPINRequired}
+	w := &Worker{ID: cfg.ID, Pool: p, Config: cfg, Modem: m, Backend: be}
+	setWorkerSMSIdentity(w, SMSIdentity{ICCID: "card-old", IMSI: "imsi-old"})
+	p.AttachWorkerForTest(w)
+	owner := p.captureWorkerLifecycleOwner(w.ID)
+	t.Cleanup(func() { p.cancelWorkerLifecycleTimers(w.ID) })
+
+	p.voWiFiRuntimeStore().SetInstance(w.ID, &runtimehost.Instance{})
+	t.Cleanup(func() { p.voWiFiRuntimeStore().DeleteInstance(w.ID, nil) })
+	commands := make(chan vowifihost.LifecycleCommand, 1)
+	p.voWiFiHost().LifecycleControllerForTest().TestRun = func(_ context.Context, command vowifihost.LifecycleCommand) error {
+		commands <- command
+		return nil
+	}
+
+	p.handleSIMStatusEventForOwner(owner, "test", nil, "SIM PUK")
+	select {
+	case command := <-commands:
+		if command.Kind != vowifihost.LifecycleCommandDisable {
+			t.Fatalf("PIN lock lifecycle command = %s", command.Kind)
+		}
+	default:
+		t.Fatal("PIN lock left the old VoWiFi runtime active")
+	}
+	p.voWiFiRuntimeStore().DeleteInstance(w.ID, nil)
+	if !w.SIMIdentityConvergenceMatches("", 0) || w.CurrentICCID() != "card-old" {
+		t.Fatal("PIN lock must block the old identity and preserve its binding")
+	}
+	if err := p.refreshModemRebootRecoveredIdentity(w, "manual_reboot"); err != nil {
+		t.Fatalf("PIN lock must allow control-plane recovery: %v", err)
+	}
+
+	be.simErr = nil
+	ready := true
+	confirmPoll := func() {
+		t.Helper()
+		p.handleSIMStatusEventForOwner(owner, "test", &ready, "")
+		p.simEventMu.Lock()
+		timer := p.simEventTimers[w.ID]
+		p.simEventMu.Unlock()
+		if timer == nil {
+			t.Fatal("READY did not schedule SIM identity convergence")
+		}
+		timer.Stop()
+		p.confirmSIMRemovedForOwner(owner, "test", timer)
+	}
+
+	confirmPoll() // CPIN says READY, but the first live ICCID/IMSI read is empty.
+	if !w.SIMIdentityConvergenceMatches("", 0) || w.CurrentICCID() != "card-old" {
+		t.Fatal("failed identity refresh must leave SIM convergence pending")
+	}
+
+	be.liveICCID, be.liveIMSI = "card-new", "imsi-new"
+	confirmPoll()
+	if w.SIMIdentityConvergenceMatches("", 0) || w.CurrentICCID() != "card-new" {
+		t.Fatalf("repeated READY did not converge to the fresh ICCID: %q", w.CurrentICCID())
 	}
 }
 

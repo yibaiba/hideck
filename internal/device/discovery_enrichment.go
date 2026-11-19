@@ -6,6 +6,7 @@ import (
 
 	qmiq "github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 	"github.com/yibaiba/hideck/internal/config"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -186,16 +187,18 @@ type WorkerDiscoveryInfo struct {
 }
 
 type WorkerDiscoveryIndex struct {
-	byControl map[string]WorkerDiscoveryInfo
-	byUSB     map[string]WorkerDiscoveryInfo
-	byIface   map[string]WorkerDiscoveryInfo
+	byControl        map[string]WorkerDiscoveryInfo
+	byUSB            map[string]WorkerDiscoveryInfo
+	byIface          map[string]WorkerDiscoveryInfo
+	atIdentityByPort map[string]func() (string, error)
 }
 
 func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) WorkerDiscoveryIndex {
 	idx := WorkerDiscoveryIndex{
-		byControl: map[string]WorkerDiscoveryInfo{},
-		byUSB:     map[string]WorkerDiscoveryInfo{},
-		byIface:   map[string]WorkerDiscoveryInfo{},
+		byControl:        map[string]WorkerDiscoveryInfo{},
+		byUSB:            map[string]WorkerDiscoveryInfo{},
+		byIface:          map[string]WorkerDiscoveryInfo{},
+		atIdentityByPort: map[string]func() (string, error){},
 	}
 
 	for _, worker := range workers {
@@ -211,7 +214,10 @@ func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) Wor
 			ATPort:      strings.TrimSpace(cfg.ATPort),
 			IMEI:        strings.TrimSpace(cfg.ModemIMEI),
 		}
-		if includeRuntimeStatus {
+		if worker.Modem != nil && worker.Modem.OwnsATRuntime() && worker.ResolvedATPort() != "" {
+			idx.atIdentityByPort[worker.ResolvedATPort()] = worker.Modem.QueryIMEI
+		}
+		if includeRuntimeStatus && (worker.Modem == nil || worker.Modem.ATProfile() != modem.ATProfileML307C) {
 			status := worker.GetDeviceStatus()
 			if imei := strings.TrimSpace(status.IMEI); imei != "" {
 				info.IMEI = imei
@@ -259,6 +265,26 @@ func (idx WorkerDiscoveryIndex) Lookup(controlPath, usbPath, iface string) (Work
 		}
 	}
 	return WorkerDiscoveryInfo{}, false
+}
+
+// ReadOwnedATIdentity queries the manager already holding a candidate port.
+// A failed query still counts as owned until the old worker is retired.
+func (idx WorkerDiscoveryIndex) ReadOwnedATIdentity(dev CompatibleModem) (CompatibleModem, bool) {
+	if dev.ATProfile() != modem.ATProfileML307C {
+		return dev, false
+	}
+	for _, port := range dev.ATPorts {
+		query := idx.atIdentityByPort[port]
+		if query == nil {
+			continue
+		}
+		dev.ATPort, dev.IMEI = port, ""
+		if imei, err := query(); err == nil {
+			dev.IMEI = imei
+		}
+		return dev, true
+	}
+	return dev, false
 }
 
 type ConfiguredDeviceIndex struct {

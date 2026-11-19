@@ -3,6 +3,8 @@ package device
 import "strings"
 
 const (
+	cmIoTVendorID                = 0x2ecc
+	ml307cProductID              = 0x3012
 	quectelVendorID              = 0x2c7c
 	qualcommVendorID             = 0x05c6
 	quectel0125ProductID         = 0x0125
@@ -27,6 +29,10 @@ type usbDeviceIdentity struct {
 	productID uint16
 }
 
+func (id usbDeviceIdentity) isML307C() bool {
+	return id.vendorID == cmIoTVendorID && id.productID == ml307cProductID
+}
+
 type usbATPortRule struct {
 	interfaceNumber int
 	serialPortCount int
@@ -34,6 +40,9 @@ type usbATPortRule struct {
 }
 
 func usbATPortRuleFor(identity usbDeviceIdentity, mode string) (usbATPortRule, bool) {
+	if identity.isML307C() {
+		return usbInterfaceATPortRule(2), true
+	}
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if identity.vendorID == qualcommVendorID && mode == "qmi" {
 		return usbInterfaceATPortRule(2), true
@@ -109,6 +118,16 @@ func supportsStaticQuectelATInterface(mode string) bool {
 
 func discoverATPortsForUSBDevice(usbPath string, identity usbDeviceIdentity, mode string) (ports []string, bestPort, imei string) {
 	portScan := scanATPortsForUSBDevice(usbPath)
+	if identity.isML307C() {
+		var atOnly usbATPortScan
+		for _, port := range portScan.interfaceOrdered {
+			if port.interfaceNumber == 2 || port.interfaceNumber == 3 {
+				atOnly.interfaceOrdered = append(atOnly.interfaceOrdered, port)
+				atOnly.candidates = append(atOnly.candidates, port.path)
+			}
+		}
+		portScan = atOnly
+	}
 	bestPort, imei = selectBestATPortForUSBDevice(identity, mode, portScan)
 	return portScan.candidates, bestPort, imei
 }

@@ -1220,7 +1220,16 @@ func (s *Server) useDeviceMgmtDiscovered(c businessContext) {
 			resolvedATPort := strings.TrimSpace(dev.ATPort)
 			imei := strings.TrimSpace(dev.IMEI)
 
-			if withIMEI {
+			if withIMEI && dev.ATProfile() == modem.ATProfileML307C {
+				var owned bool
+				dev, owned = managedIndex.ReadOwnedATIdentity(dev)
+				if !owned {
+					dev, _ = enrichDiscoveredCompatibleModemFn(dev, device.CompatibleModemEnrichOptions{
+						EnableATProbe: true, ATProbeTimeout: 900 * time.Millisecond,
+					})
+				}
+				resolvedATPort, imei = dev.ATPort, dev.IMEI
+			} else if withIMEI {
 				managedMatch, hasManaged := managedIndex.Lookup(strings.TrimSpace(dev.ControlPath), strings.TrimSpace(dev.USBPath), strings.TrimSpace(dev.NetInterface))
 				if hasManaged {
 					if containsDiscoveredATPort(dev.ATPorts, managedMatch.ATPort) {

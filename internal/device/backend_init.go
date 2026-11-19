@@ -9,11 +9,11 @@ import (
 	"github.com/yibaiba/hideck/internal/modem"
 )
 
-func newWorkerModem(cfg config.DeviceConfig, backendMode string) (*modem.Manager, error) {
+func newWorkerModem(cfg config.DeviceConfig, backendMode string, profile modem.ATProfile) (*modem.Manager, error) {
 	if backend.NormalizeBackendMode(backendMode) == backend.BackendMBIM {
 		return modem.NewSMSAuxiliary(cfg)
 	}
-	return modem.New(cfg)
+	return modem.NewWithATProfile(cfg, profile)
 }
 
 func newWorkerBackendStrict(deviceID, backendMode, controlDevice string, m *modem.Manager, source backend.QMISource, mbimSource backend.MBIMSource) (backend.DeviceBackend, error) {

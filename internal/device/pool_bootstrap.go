@@ -13,6 +13,7 @@ import (
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/esim"
 	mbimcore "github.com/yibaiba/hideck/internal/mbim"
+	"github.com/yibaiba/hideck/internal/modem"
 	qmicore "github.com/yibaiba/hideck/internal/qmi"
 	"github.com/yibaiba/hideck/pkg/logger"
 	"github.com/yibaiba/hideck/pkg/smscodec"
@@ -270,16 +271,24 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 
 	var matched *QMIDevice
+	var atProfile modem.ATProfile
 	discoveryCache := &qmiBootstrapDiscoveryCache{}
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
 	configuredIndex := BuildConfiguredDeviceIndex(config.ListDevices())
 	if !needsQMICore {
-		liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), true)
-		hardware := p.collectRescanHardware(nil, liveWorkerIndex)
+		scanAT := configuredDevicesNeedCompatibleATDiscovery(config.ListDevices()) ||
+			(resolvedBackendMode(devCfg) == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) != "")
+		hardware := p.collectRescanHardware(nil, liveWorkerIndex, scanAT)
 		resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 
 		if len(resolved.Matched) > 0 {
 			hw := resolved.Matched[0].Hardware
+			atProfile = hw.ATProfile()
+			if atProfile == modem.ATProfileML307C {
+				devCfg.USBPath = hw.USBPath
+				devCfg.ATPort = hw.ATPort
+				devCfg.ManagePort = hw.ATPort
+			}
 			if devCfg.Interface == "" {
 				devCfg.Interface = hw.NetInterface
 			}
@@ -298,10 +307,10 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 				devCfg.ModemIMEI = resolved.Matched[0].BackfillIMEI
 				logger.Info(fmt.Sprintf("[%s] MBIM/AT 通过 USB 路径认领成功，回填实时 IMEI", devCfg.ID), "imei", devCfg.ModemIMEI)
 			}
-		} else {
-			if strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "" {
-				return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
-			}
+		} else if (strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "") ||
+			(resolvedBackendMode(devCfg) == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) != "" &&
+				strings.TrimSpace(devCfg.USBPath) != "" && readUSBDeviceIdentity(resolveUSBPathForScan(devCfg.USBPath)).isML307C()) {
+			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
 		}
 	} else if hasManagedQMINetwork(devCfg) {
 		configuredStatic := QMIDevice{
@@ -317,7 +326,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			if qmiErr != nil {
 				logger.Debug("QMI 静态路径启动前发现失败", "device", devCfg.ID, "err", qmiErr)
 			} else {
-				hardware := p.collectRescanHardware(qmiList, liveWorkerIndex)
+				hardware := p.collectRescanHardware(qmiList, liveWorkerIndex, configuredDevicesNeedCompatibleATDiscovery(config.ListDevices()))
 				resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 				if len(resolved.Matched) > 0 {
 					hw := resolved.Matched[0].Hardware
@@ -370,7 +379,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 
 	backendMode := resolvedBackendMode(devCfg)
-	m, err := newWorkerModem(devCfg, backendMode)
+	m, err := newWorkerModem(devCfg, backendMode, atProfile)
 	if err != nil {
 		return nil, fmt.Errorf("初始化 Modem 失败: %w", err)
 	}
@@ -571,6 +580,11 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			p.scheduleATDisconnectRecovery(owner, reason)
 		})
 		p.bindModemReadyIndications(w)
+		if atProfile == modem.ATProfileML307C {
+			m.SetSIMStatusHandler(func(inserted *bool, state string) {
+				p.handleSIMStatusEventForOwner(owner, "ml307c_sim_status", inserted, state)
+			})
+		}
 	}
 
 	if backendMode == backend.BackendQMI {

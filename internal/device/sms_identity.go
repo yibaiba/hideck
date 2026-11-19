@@ -108,6 +108,9 @@ func (p *Pool) runtimeSMSIdentity(deviceID string) (smsIdentityCandidate, error)
 	}
 	worker.cacheMu.RLock()
 	defer worker.cacheMu.RUnlock()
+	if worker.isML307C() && (!worker.state.Identity.Ready || !worker.Modem.IsSimInserted()) {
+		return smsIdentityCandidate{}, ErrSMSIdentityUnknown
+	}
 	phase := worker.state.Identity.Phase
 	if phase == simIdentityPhaseTransitioning || phase == simIdentityPhaseDegraded {
 		return smsIdentityCandidate{}, fmt.Errorf("%w: device=%s phase=%s", ErrSMSIdentityTransitioning, deviceID, phase)

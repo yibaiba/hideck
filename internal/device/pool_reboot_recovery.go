@@ -1,6 +1,7 @@
 package device
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/config"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -42,6 +44,9 @@ func (p *Pool) refreshModemRebootRecoveredIdentity(w *Worker, reason string) err
 	}
 
 	result, err := p.refreshIdentityAndApplyCardPolicy(w, reason)
+	if errors.Is(err, errATNoSIM) || errors.Is(err, modem.ErrSIMPINRequired) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("refresh_identity: %w", err)
 	}
