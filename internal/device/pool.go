@@ -1950,8 +1950,12 @@ func (p *Pool) RescanAndReconnect() error {
 	return p.rescanAndReconnect(rescanReconnectOptions{})
 }
 
-func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex WorkerDiscoveryIndex, scanCompatibleAT bool) []CompatibleModem {
-	var hardware []CompatibleModem
+type ml307cScanCandidate struct {
+	CompatibleModem
+	unreadableOwner *Worker
+}
+
+func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex WorkerDiscoveryIndex, scan compatibleATDiscoveryScope) (hardware []CompatibleModem, ml307cCandidates []ml307cScanCandidate) {
 	for i := range discovered {
 		raw := discovered[i]
 		// Paths are attachment hints, never proof that the old worker still
@@ -1977,7 +1981,7 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 		})
 	}
 
-	if scanCompatibleAT {
+	if scan != compatibleATDiscoveryNone {
 		if compatList, err := DiscoverCompatibleModemsFromQMI(discovered); err == nil {
 			seen := map[string]bool{}
 			for _, hw := range hardware {
@@ -1986,15 +1990,28 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 				}
 			}
 			for _, raw := range compatList {
+				isML307C := raw.ATProfile() == modem.ATProfileML307C
+				if scan == compatibleATDiscoveryML307C && !isML307C {
+					continue
+				}
 				m, owned := liveWorkerIndex.ReadOwnedATIdentity(raw)
 				imei := m.IMEI
 				if !owned {
 					m, imei = resolveDiscoveredCompatibleModemFn(raw, 1200*time.Millisecond)
 				}
-				if config.NormalizeIMEI(imei) == "" {
+				key := config.NormalizeIMEI(imei)
+				if isML307C {
+					// Bootstrap must recognize C ports even when IMEI is unreadable.
+					candidate := ml307cScanCandidate{CompatibleModem: raw}
+					if owned && key == "" {
+						candidate.unreadableOwner = liveWorkerIndex.atIdentityByPort[m.ATPort].worker
+					}
+					ml307cCandidates = append(ml307cCandidates, candidate)
+				}
+				if key == "" {
 					continue
 				}
-				if seen[config.NormalizeIMEI(imei)] {
+				if seen[key] {
 					continue
 				}
 				m.IMEI = imei
@@ -2002,7 +2019,7 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 			}
 		}
 	}
-	return hardware
+	return hardware, ml307cCandidates
 }
 
 func (p *Pool) rescanAndReconnect(opts rescanReconnectOptions) error {
@@ -2016,9 +2033,9 @@ func (p *Pool) rescanAndReconnect(opts rescanReconnectOptions) error {
 	}
 
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
-	hardware := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesNeedCompatibleATDiscovery(config.ListDevices()))
 	managed := p.managedDevices()
 	modemDevices, pcscDevices := partitionManagedDevices(managed)
+	hardware, ml307cCandidates := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesATDiscovery(modemDevices))
 	resolved := ResolveDeviceIdentities(hardware, modemDevices)
 
 	if len(resolved.Degraded) > 0 || len(resolved.Unmatched) > 0 {
@@ -2029,7 +2046,7 @@ func (p *Pool) rescanAndReconnect(opts rescanReconnectOptions) error {
 	}
 
 	for _, snapshot := range resolved.Offline {
-		p.reconcileOfflineRescanDevice(opts, snapshot, hardware, managed)
+		p.reconcileOfflineRescanDevice(opts, snapshot, hardware, ml307cCandidates, managed)
 	}
 
 	return p.reconcilePCSCReaders(opts, managed, pcscDevices)

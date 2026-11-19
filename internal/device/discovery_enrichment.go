@@ -186,11 +186,16 @@ type WorkerDiscoveryInfo struct {
 	USBNetMode  *int
 }
 
+type workerATIdentityReader struct {
+	worker *Worker
+	query  func() (string, error)
+}
+
 type WorkerDiscoveryIndex struct {
 	byControl        map[string]WorkerDiscoveryInfo
 	byUSB            map[string]WorkerDiscoveryInfo
 	byIface          map[string]WorkerDiscoveryInfo
-	atIdentityByPort map[string]func() (string, error)
+	atIdentityByPort map[string]workerATIdentityReader
 }
 
 func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) WorkerDiscoveryIndex {
@@ -198,7 +203,7 @@ func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) Wor
 		byControl:        map[string]WorkerDiscoveryInfo{},
 		byUSB:            map[string]WorkerDiscoveryInfo{},
 		byIface:          map[string]WorkerDiscoveryInfo{},
-		atIdentityByPort: map[string]func() (string, error){},
+		atIdentityByPort: map[string]workerATIdentityReader{},
 	}
 
 	for _, worker := range workers {
@@ -215,7 +220,7 @@ func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) Wor
 			IMEI:        strings.TrimSpace(cfg.ModemIMEI),
 		}
 		if worker.Modem != nil && worker.Modem.OwnsATRuntime() && worker.ResolvedATPort() != "" {
-			idx.atIdentityByPort[worker.ResolvedATPort()] = worker.Modem.QueryIMEI
+			idx.atIdentityByPort[worker.ResolvedATPort()] = workerATIdentityReader{worker: worker, query: worker.Modem.QueryIMEI}
 		}
 		if includeRuntimeStatus && (worker.Modem == nil || worker.Modem.ATProfile() != modem.ATProfileML307C) {
 			status := worker.GetDeviceStatus()
@@ -274,7 +279,7 @@ func (idx WorkerDiscoveryIndex) ReadOwnedATIdentity(dev CompatibleModem) (Compat
 		return dev, false
 	}
 	for _, port := range dev.ATPorts {
-		query := idx.atIdentityByPort[port]
+		query := idx.atIdentityByPort[port].query
 		if query == nil {
 			continue
 		}

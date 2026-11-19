@@ -6,6 +6,7 @@ import (
 
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/config"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -87,7 +88,9 @@ func (p *Pool) reconcileHealthyRescanWorker(
 		})
 		return
 	}
-	if hw.ATPort == "" || hw.ATPort == worker.Config.ATPort || !opts.allowWorkerMutation(pair.Config.ID) {
+	usbChanged := hw.ATProfile() == modem.ATProfileML307C && hw.USBPath != "" && hw.USBPath != worker.Config.USBPath
+	portChanged := hw.ATPort != "" && hw.ATPort != worker.Config.ATPort
+	if (!usbChanged && !portChanged) || !opts.allowWorkerMutation(pair.Config.ID) {
 		return
 	}
 	logger.Info("检测到设备端口变化，重建 Worker",
@@ -209,6 +212,7 @@ func (p *Pool) reconcileOfflineRescanDevice(
 	opts rescanReconnectOptions,
 	snapshot config.DeviceConfig,
 	hardware []CompatibleModem,
+	ml307cCandidates []ml307cScanCandidate,
 	fallback []config.DeviceConfig,
 ) {
 	releaseMutation := p.AcquireManagedDeviceMutation(snapshot.ID)
@@ -226,9 +230,21 @@ func (p *Pool) reconcileOfflineRescanDevice(
 	if worker == nil {
 		return
 	}
+	healthy := worker.IsDeviceHealthy()
+	if healthy && worker.isML307C() && config.IMEIMatches(worker.Config.ModemIMEI, current.ModemIMEI) {
+		usb := strings.TrimSpace(worker.Config.USBPath)
+		port := worker.ResolvedATPort()
+		for _, candidate := range ml307cCandidates {
+			if candidate.unreadableOwner == worker && usb != "" && candidate.USBPath == usb &&
+				containsPort(candidate.ATPorts, port) {
+				// Keep the existing owner until the next scan can verify its IMEI.
+				return
+			}
+		}
+	}
 	logger.Info("检测到设备离线，清理 Worker 以便后续重建",
 		"device", current.ID, "imei", current.ModemIMEI,
-		"was_healthy", worker.IsDeviceHealthy())
+		"was_healthy", healthy)
 	p.teardownVoWiFiForReconnect(current.ID)
 	if p.lifecycle != nil {
 		p.lifecycle.BeginRecovery(current.ID, LifecyclePhaseUSBWait, "rescan_device_missing", qmiLifecycleRecoveryTTL)

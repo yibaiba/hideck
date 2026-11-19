@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -127,18 +128,49 @@ func resolveDiscoveredCompatibleModem(dev CompatibleModem, timeout time.Duration
 	})
 }
 
-func configuredDevicesNeedCompatibleATDiscovery(devices []config.DeviceConfig) bool {
+type compatibleATDiscoveryScope uint8
+
+const (
+	compatibleATDiscoveryNone compatibleATDiscoveryScope = iota
+	compatibleATDiscoveryML307C
+	compatibleATDiscoveryAll
+)
+
+func configuredDevicesATDiscovery(devices []config.DeviceConfig) compatibleATDiscoveryScope {
+	scope := compatibleATDiscoveryNone
 	for _, dev := range devices {
-		if requiresQMICore(dev) {
+		if requiresQMICore(dev) || resolvedBackendMode(dev) == backend.BackendPCSC || strings.TrimSpace(dev.ModemIMEI) == "" {
 			continue
 		}
-		if strings.TrimSpace(dev.ModemIMEI) == "" {
-			continue
+		if strings.TrimSpace(dev.ATPort) == "" && strings.TrimSpace(dev.ManagePort) == "" {
+			return compatibleATDiscoveryAll
 		}
-		if strings.TrimSpace(dev.ATPort) != "" || strings.TrimSpace(dev.ManagePort) != "" {
-			continue
+		if resolvedBackendMode(dev) == backend.BackendAT {
+			// An enumerated tty is only an attachment hint for an ML307C.
+			// Other modems with explicit ports keep their existing probe behavior.
+			scope = compatibleATDiscoveryML307C
 		}
+	}
+	return scope
+}
+
+func configuredPortPointsToML307C(cfg config.DeviceConfig, candidates []ml307cScanCandidate) bool {
+	if usb := strings.TrimSpace(cfg.USBPath); usb != "" && readUSBDeviceIdentity(resolveUSBPathForScan(usb)).isML307C() {
 		return true
+	}
+	for _, port := range []string{cfg.ATPort, cfg.ManagePort} {
+		port = strings.TrimSpace(port)
+		if port == "" {
+			continue
+		}
+		if target, err := filepath.EvalSymlinks(port); err == nil {
+			port = target
+		}
+		for _, hw := range candidates {
+			if containsPort(hw.ATPorts, port) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -276,9 +308,12 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
 	configuredIndex := BuildConfiguredDeviceIndex(config.ListDevices())
 	if !needsQMICore {
-		scanAT := configuredDevicesNeedCompatibleATDiscovery(config.ListDevices()) ||
-			(resolvedBackendMode(devCfg) == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) != "")
-		hardware := p.collectRescanHardware(nil, liveWorkerIndex, scanAT)
+		scan := configuredDevicesATDiscovery([]config.DeviceConfig{devCfg})
+		if scan == compatibleATDiscoveryNone && configuredDevicesATDiscovery(config.ListDevices()) == compatibleATDiscoveryAll {
+			scan = compatibleATDiscoveryAll
+		}
+		atIMEIConfigured := resolvedBackendMode(devCfg) == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) != ""
+		hardware, ml307cCandidates := p.collectRescanHardware(nil, liveWorkerIndex, scan)
 		resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 
 		if len(resolved.Matched) > 0 {
@@ -308,8 +343,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 				logger.Info(fmt.Sprintf("[%s] MBIM/AT 通过 USB 路径认领成功，回填实时 IMEI", devCfg.ID), "imei", devCfg.ModemIMEI)
 			}
 		} else if (strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "") ||
-			(resolvedBackendMode(devCfg) == backend.BackendAT && strings.TrimSpace(devCfg.ModemIMEI) != "" &&
-				strings.TrimSpace(devCfg.USBPath) != "" && readUSBDeviceIdentity(resolveUSBPathForScan(devCfg.USBPath)).isML307C()) {
+			(atIMEIConfigured && configuredPortPointsToML307C(devCfg, ml307cCandidates)) {
 			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
 		}
 	} else if hasManagedQMINetwork(devCfg) {
@@ -326,7 +360,11 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			if qmiErr != nil {
 				logger.Debug("QMI 静态路径启动前发现失败", "device", devCfg.ID, "err", qmiErr)
 			} else {
-				hardware := p.collectRescanHardware(qmiList, liveWorkerIndex, configuredDevicesNeedCompatibleATDiscovery(config.ListDevices()))
+				scan := compatibleATDiscoveryNone
+				if configuredDevicesATDiscovery(config.ListDevices()) == compatibleATDiscoveryAll {
+					scan = compatibleATDiscoveryAll
+				}
+				hardware, _ := p.collectRescanHardware(qmiList, liveWorkerIndex, scan)
 				resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 				if len(resolved.Matched) > 0 {
 					hw := resolved.Matched[0].Hardware
