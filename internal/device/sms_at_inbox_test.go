@@ -36,14 +36,14 @@ func TestATStoredSMSPersistence(t *testing.T) {
 	})
 	identity := SMSIdentity{ICCID: "8988110000000000001", IMSI: "001010123456789"}
 	scope := db.SMSInboundFragmentScope{DeviceID: "c", ICCID: identity.ICCID, IMSI: identity.IMSI}
-	fragment := func(seq, minute, second byte, ch rune, observed time.Time, extraUDH ...byte) atInboxPart {
+	multipart := func(total, seq, minute, second byte, ch rune, observed time.Time, extraUDH ...byte) atInboxPart {
 		t.Helper()
 		pdu := []byte{
 			0,                         // default SMSC
 			0x40, 3, 0x81, 0x77, 0xF7, // SMS-DELIVER, UDHI, sender 777
 			0, 8, // PID, UCS2
 			0x62, 0x11, 0x91, 0x21, minute, second, 0, // SCTS
-			byte(8 + len(extraUDH)), byte(5 + len(extraUDH)), 0, 3, 17, 2, seq,
+			byte(8 + len(extraUDH)), byte(5 + len(extraUDH)), 0, 3, 17, total, seq,
 		}
 		pdu = append(pdu, extraUDH...)
 		pdu = append(pdu, byte(ch>>8), byte(ch))
@@ -56,6 +56,10 @@ func TestATStoredSMSPersistence(t *testing.T) {
 		}
 		part.observedAt = observed
 		return part
+	}
+	fragment := func(seq, minute, second byte, ch rune, observed time.Time, extraUDH ...byte) atInboxPart {
+		t.Helper()
+		return multipart(2, seq, minute, second, ch, observed, extraUDH...)
 	}
 	load := func(scope db.SMSInboundFragmentScope) *atSMSParts {
 		t.Helper()
@@ -309,6 +313,32 @@ func TestATStoredSMSPersistence(t *testing.T) {
 	}
 	if messages, err := state.archiveSettledATFragments(observed.Add(3 * time.Minute)); err != nil || len(messages) != 0 {
 		t.Fatalf("archive ignored a same-family write failure: %+v, %v", messages, err)
+	}
+
+	// One exact group contains two of the three parts. Observing its first
+	// part alone cannot prove the other part is still in modem storage.
+	observed = observed.Add(10 * time.Minute)
+	p1 := multipart(3, 1, 0x15, 0, '全', observed)
+	p2 := multipart(3, 2, 0x15, 0, '部', observed.Add(time.Second))
+	p3 := multipart(3, 3, 0x15, 0x10, '在', observed.Add(2*time.Second))
+	state = load(scope)
+	for _, part := range []atInboxPart{p1, p2, p3} {
+		apply(state, part, true, false, "")
+	}
+	settledAt := observed.Add(3 * time.Minute)
+	state = load(scope)
+	apply(state, p1, false, false, "")
+	apply(state, p3, false, false, "")
+	if messages, err := state.archiveSettledATFragments(settledAt); err != nil || len(messages) != 0 {
+		t.Fatalf("archived a cross-SCTS SMS with an unobserved part: %+v, %v", messages, err)
+	}
+	state = load(scope)
+	for _, part := range []atInboxPart{p1, p2, p3} {
+		apply(state, part, false, false, "")
+	}
+	messages, err = state.archiveSettledATFragments(settledAt)
+	if err != nil || len(messages) != 1 || messages[0].Content != "全部在" {
+		t.Fatalf("archive with all parts observed: %+v, %v", messages, err)
 	}
 
 	swapped := scope

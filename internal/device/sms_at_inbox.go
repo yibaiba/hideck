@@ -389,8 +389,14 @@ type atSMSParts struct {
 	scope           db.SMSInboundFragmentScope
 	groups          map[string][]db.SMSInboundFragment
 	seen            map[string]bool
-	senders         map[string]string
+	observed        map[atSMSFragmentObservation]string
 	blockedFamilies map[string]bool
+}
+
+type atSMSFragmentObservation struct {
+	sessionKey  string
+	sequence    int
+	fingerprint string
 }
 
 func loadATSMSParts(scope db.SMSInboundFragmentScope) (*atSMSParts, error) {
@@ -400,7 +406,7 @@ func loadATSMSParts(scope db.SMSInboundFragmentScope) (*atSMSParts, error) {
 	}
 	state := &atSMSParts{
 		scope: scope, groups: make(map[string][]db.SMSInboundFragment),
-		seen: make(map[string]bool), senders: make(map[string]string), blockedFamilies: make(map[string]bool),
+		seen: make(map[string]bool), observed: make(map[atSMSFragmentObservation]string), blockedFamilies: make(map[string]bool),
 	}
 	for _, row := range rows {
 		if strings.HasPrefix(row.SessionKey, db.ATSMSInboundPrefix) {
@@ -444,8 +450,7 @@ const (
 	atSMSReassemblyWindow = 2 * time.Minute
 )
 
-func (state *atSMSParts) fragmentGroup(part atInboxPart, sourceKnown bool) (string, bool, error) {
-	fingerprint := hex.EncodeToString(part.fingerprint[:])
+func (state *atSMSParts) fragmentGroup(part atInboxPart, fingerprint string, sourceKnown bool) (string, bool, error) {
 	matches := func(saved db.SMSInboundFragment) bool {
 		if saved.PDUFingerprint != "" {
 			return saved.PDUFingerprint == fingerprint
@@ -508,12 +513,12 @@ func (state *atSMSParts) fragmentGroup(part atInboxPart, sourceKnown bool) (stri
 }
 
 func (state *atSMSParts) persistFragment(part atInboxPart, sourceKnown bool) (bool, *InboundSMS, error) {
-	key, matched, err := state.fragmentGroup(part, sourceKnown)
+	fingerprint := hex.EncodeToString(part.fingerprint[:])
+	key, matched, err := state.fragmentGroup(part, fingerprint, sourceKnown)
 	if err != nil || key == "" {
 		return false, nil, err
 	}
 	state.seen[key] = true
-	state.senders[key] = part.Sender
 	fragments := state.groups[key]
 	if !matched {
 		scope := state.scope
@@ -522,7 +527,7 @@ func (state *atSMSParts) persistFragment(part atInboxPart, sourceKnown bool) (bo
 		result, err := db.SaveSMSInboundFragment(scope, db.SMSInboundFragment{
 			Sequence: concat.Seq, Reference: concat.Ref, ReferenceBits: concat.RefBits,
 			Total: concat.Total, Content: part.Content, ArrivedAt: part.Timestamp,
-			PDUFingerprint: hex.EncodeToString(part.fingerprint[:]),
+			PDUFingerprint: fingerprint,
 		})
 		if err != nil {
 			return false, nil, err
@@ -530,6 +535,7 @@ func (state *atSMSParts) persistFragment(part atInboxPart, sourceKnown bool) (bo
 		fragments = result.Fragments
 		state.groups[key] = fragments
 	}
+	state.observed[atSMSFragmentObservation{key, part.Concat.Seq, fingerprint}] = part.Sender
 	if len(fragments) < part.Concat.Total {
 		// Keep the source while other exact groups can still arrive.
 		return false, nil, nil
@@ -543,16 +549,18 @@ func (state *atSMSParts) persistFragment(part atInboxPart, sourceKnown bool) (bo
 }
 
 func (state *atSMSParts) archiveSettledATFragments(now time.Time) ([]InboundSMS, error) {
+	observedSender := func(fragment db.SMSInboundFragment) string {
+		return state.observed[atSMSFragmentObservation{fragment.SessionKey, fragment.Sequence, fragment.PDUFingerprint}]
+	}
 	var notifications []InboundSMS
 	for _, fragments := range state.settledATFragments(now) {
-		// Each group must have an exact PDU in the current scan. A DB-only
-		// group can outlive its source slots and must not complete a new SMS.
+		// Each fragment must match a PDU observed in the current scan.
 		if slices.ContainsFunc(fragments, func(fragment db.SMSInboundFragment) bool {
-			return state.senders[fragment.SessionKey] == ""
+			return observedSender(fragment) == ""
 		}) {
 			continue
 		}
-		sender := state.senders[fragments[0].SessionKey]
+		sender := observedSender(fragments[0])
 		key, content, err := completeATMultipart(fragments[0].SessionKey, fragments)
 		if err != nil {
 			return notifications, err
