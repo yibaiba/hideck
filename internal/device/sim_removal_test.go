@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/iniwex5/vowifi-go/runtimehost"
 	"github.com/yibaiba/hideck/internal/cardpolicy"
@@ -41,6 +42,29 @@ func TestPhysicalSIMInsertEventRefreshesIdentity(t *testing.T) {
 	p.deviceEventWakeMu.Unlock()
 	if !recoveryScheduled {
 		t.Fatal("refreshed SIM did not schedule desired VoWiFi recovery")
+	}
+}
+
+func TestStaleSIMConfirmationKeepsCurrentWorkerTimer(t *testing.T) {
+	p := NewPool(&config.Config{})
+	t.Cleanup(func() { _ = p.Shutdown() })
+	w := &Worker{ID: "dev", Pool: p}
+	p.AttachWorkerForTest(w)
+
+	timer := time.NewTimer(time.Hour)
+	t.Cleanup(func() { timer.Stop() })
+	p.simEventMu.Lock()
+	p.simEventTimers = map[string]*time.Timer{w.ID: timer}
+	p.simEventMu.Unlock()
+
+	old := &Worker{ID: w.ID, Pool: p}
+	p.confirmSIMRemovedForOwner(workerLifecycleOwner{worker: old}, "at_startup", nil)
+
+	p.simEventMu.Lock()
+	current := p.simEventTimers[w.ID]
+	p.simEventMu.Unlock()
+	if current != timer {
+		t.Fatal("stale worker consumed the current worker's SIM status timer")
 	}
 }
 

@@ -514,7 +514,8 @@ func (w *Worker) PreWarmCache() {
 	identityErr := w.RefreshIdentityLive(nil, "prewarm")
 	if w.Pool != nil {
 		if errors.Is(identityErr, errATNoSIM) {
-			w.Pool.confirmSIMRemovedForOwner(w.Pool.captureWorkerLifecycleOwner(w.ID), "ml307c_startup", nil)
+			owner := workerLifecycleOwner{worker: w, generation: w.generation}
+			w.Pool.confirmSIMRemovedForOwner(owner, "at_startup", nil)
 		}
 		w.Pool.PersistRuntimeState(w)
 		w.Pool.PersistIdentityState(w)
