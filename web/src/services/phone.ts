@@ -30,6 +30,7 @@ export type PhoneDevice = {
   vowifi_active?: boolean
   software_ims_blocked?: boolean
   native_voice_unavailable_reason?: string
+  cellular_ims_unavailable_reason?: string
   phone_region?: string
   phone_country_code?: number
   rf_lock?: string

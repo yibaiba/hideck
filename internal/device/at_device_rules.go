@@ -9,6 +9,7 @@ type atDeviceRules struct {
 	model                        string
 	storedSMSInbox               bool
 	nativeVoiceUnavailableReason string
+	cellularIMSUnavailableReason string
 }
 
 func atDeviceRulesFor(profile modem.ATProfile) atDeviceRules {
@@ -21,6 +22,7 @@ func atDeviceRulesFor(profile modem.ATProfile) atDeviceRules {
 			model:                        "ML307C",
 			storedSMSInbox:               true,
 			nativeVoiceUnavailableReason: "ML307C 在 HiDeck 中不支持原生 VoLTE 和模组直拨",
+			cellularIMSUnavailableReason: "ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS",
 		}
 	default:
 		return atDeviceRules{model: "EC20"}

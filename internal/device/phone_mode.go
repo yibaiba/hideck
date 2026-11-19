@@ -65,23 +65,37 @@ func WorkerSoftwareIMSBlocked(w *Worker) bool {
 	if w == nil {
 		return false
 	}
+	w.cacheMu.RLock()
 	mcc := strings.TrimSpace(w.state.Identity.NativeMCC)
+	imsi := strings.TrimSpace(w.state.Identity.IMSI)
+	w.cacheMu.RUnlock()
 	if carrier.IsVoWiFiBlockedMCC(mcc) {
 		return true
 	}
-	imsi := strings.TrimSpace(w.state.Identity.IMSI)
 	if len(imsi) >= 3 && carrier.IsVoWiFiBlockedMCC(imsi[:3]) {
 		return true
 	}
 	return false
 }
 
-// CheckPhoneModeSupported checks native call control when selected or required
-// by the SIM's software IMS policy.
+// CellularIMSUnavailableReason reports the modem data-path limitation, independent of SIM policy.
+func (w *Worker) CellularIMSUnavailableReason() string {
+	if w.NetworkController() != nil {
+		return ""
+	}
+	return w.atDeviceRules().cellularIMSUnavailableReason
+}
+
+// CheckPhoneModeSupported checks the device and SIM capabilities for a phone mode.
 func (w *Worker) CheckPhoneModeSupported(mode string) error {
 	if reason := w.atDeviceRules().nativeVoiceUnavailableReason; reason != "" &&
 		(UsesModemPhoneControl(mode) || WorkerSoftwareIMSBlocked(w)) {
 		return &PhoneModeUnsupportedError{Reason: reason}
+	}
+	if strings.TrimSpace(mode) == PhoneModeCellular {
+		if reason := w.CellularIMSUnavailableReason(); reason != "" {
+			return &PhoneModeUnsupportedError{Reason: reason}
+		}
 	}
 	return nil
 }

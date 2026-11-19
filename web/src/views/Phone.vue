@@ -116,7 +116,8 @@ function deviceModeLabel(device?: PhoneDevice) {
 function deviceStatus(device?: PhoneDevice) {
   if (!device) return '未选择设备'
   if (isDeviceBusy(device)) return '通话占用'
-  if (device.native_voice_unavailable_reason && phoneModeDisabledReason(device, device.phone_mode || 'wifi')) {
+  if ((device.native_voice_unavailable_reason || device.cellular_ims_unavailable_reason)
+    && phoneModeDisabledReason(device, device.phone_mode || 'wifi')) {
     return '当前通话方式不可用'
   }
   const mode = deviceModeLabel(device)
@@ -151,7 +152,11 @@ const selectedMode = computed(() => {
   if (mode === 'cellular' || mode === 'volte' || mode === 'modem_voice') return mode
   return 'wifi'
 })
-const selectedModeBlocked = computed(() => selected.value?.native_voice_unavailable_reason
+const selectedDeviceModeReasons = computed(() => [
+  selected.value?.native_voice_unavailable_reason,
+  selected.value?.cellular_ims_unavailable_reason
+].filter(Boolean).join('。'))
+const selectedModeBlocked = computed(() => selectedDeviceModeReasons.value
   ? phoneModeDisabledReason(selected.value, selectedMode.value)
   : undefined)
 const selectedStrategy = computed(() => selected.value?.data_strategy === 'always' ? 'always' : 'on_demand')
@@ -490,8 +495,8 @@ async function sendDTMF(digit: string) {
                 <el-option label="仅打电话时开" value="on_demand" />
                 <el-option label="长时间开启" value="always" />
               </el-select>
-              <p v-if="selected?.native_voice_unavailable_reason" class="phone-mode-hint" role="status">
-                {{ selectedModeBlocked || selected.native_voice_unavailable_reason }}
+              <p v-if="selectedDeviceModeReasons" class="phone-mode-hint" role="status">
+                {{ selectedModeBlocked || selectedDeviceModeReasons }}
               </p>
               <p v-if="selectedMode === 'cellular' && !selectedModeBlocked" class="phone-mode-hint">
                 {{ selected?.network_enabled

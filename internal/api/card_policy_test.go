@@ -19,6 +19,7 @@ import (
 	"github.com/yibaiba/hideck/internal/db"
 	"github.com/yibaiba/hideck/internal/device"
 	"github.com/yibaiba/hideck/internal/modem"
+	"github.com/yibaiba/hideck/internal/phone"
 	"github.com/yibaiba/hideck/internal/vowifihost"
 )
 
@@ -605,10 +606,14 @@ func TestPutCardPolicyAirplaneField(t *testing.T) {
 func TestPhoneModePatchUsesEffectivePolicy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
-		name, imsi, workerMode, storedMode, body   string
-		wantEnabled, defaultProfile, missingPolicy bool
+		name, imsi, workerMode, storedMode, body, wantReason string
+		wantEnabled, defaultProfile, missingPolicy           bool
 	}{
 		{name: "native VoLTE", imsi: "530010000000001", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"volte"}`},
+		{name: "cellular IMS on demand", imsi: "530010000000001", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"cellular","data_strategy":"on_demand"}`,
+			wantReason: "ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS"},
+		{name: "saved cellular IMS mode", imsi: "530010000000001", workerMode: "wifi", storedMode: "cellular", body: `{"enabled":true}`,
+			wantReason: "ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS"},
 		{name: "direct dial", imsi: "530010000000001", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"modem_voice"}`},
 		{name: "China software fallback", imsi: "460011234567890", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"wifi"}`},
 		{name: "stored VoLTE ahead of worker", imsi: "530010000000001", workerMode: "wifi", storedMode: "volte", body: `{"enabled":true}`},
@@ -657,13 +662,56 @@ func TestPhoneModePatchUsesEffectivePolicy(t *testing.T) {
 				}
 				return
 			}
-			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "ML307C 在 HiDeck 中不支持原生 VoLTE 和模组直拨") {
+			wantReason := tc.wantReason
+			if wantReason == "" {
+				wantReason = "ML307C 在 HiDeck 中不支持原生 VoLTE 和模组直拨"
+			}
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), wantReason) {
 				t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 			}
 			if store.policy != policy || w.Config != cfg {
 				t.Fatalf("the rejected request changed policy or worker: %+v, %+v", store.policy, w.Config)
 			}
 		})
+	}
+}
+
+func TestPhoneDevicesReportsCellularIMSAvailability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pool := device.NewPool(&config.Config{})
+	for id, profile := range map[string]modem.ATProfile{
+		"ml307c":  modem.ATProfileML307C,
+		"default": modem.ATProfileDefault,
+	} {
+		cfg := config.DeviceConfig{ID: id, DeviceBackend: "at", ATPort: "/dev/test-" + id}
+		manager, err := modem.NewWithATProfile(cfg, profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		injectWorker(pool, &device.Worker{ID: id, Config: cfg, Modem: manager})
+	}
+	s := &Server{pool: pool, phone: &phone.Service{}}
+	r := gin.New()
+	r.GET("/api/phone/devices", s.handlePhoneDevices)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/phone/devices", nil))
+
+	var response struct {
+		Devices []struct {
+			ID     string  `json:"id"`
+			Reason *string `json:"cellular_ims_unavailable_reason"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); rec.Code != http.StatusOK || err != nil || len(response.Devices) != 2 {
+		t.Fatalf("code=%d error=%v body=%s", rec.Code, err, rec.Body.String())
+	}
+	for _, item := range response.Devices {
+		if item.ID == "ml307c" && (item.Reason == nil || *item.Reason != "ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS") {
+			t.Fatalf("missing ML307C reason: %s", rec.Body.String())
+		}
+		if item.ID == "default" && item.Reason != nil {
+			t.Fatalf("unexpected default-profile restriction: %s", rec.Body.String())
+		}
 	}
 }
 

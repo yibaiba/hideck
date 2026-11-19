@@ -70,6 +70,8 @@ func TestML307CPhonePolicyKeepsExplicitRadioSettings(t *testing.T) {
 	}{
 		{name: "China WiFi", imsi: "460011234567890", mode: PhoneModeWiFi},
 		{name: "China cellular", imsi: "460011234567890", mode: PhoneModeCellular},
+		{name: "overseas cellular", imsi: "530240000000001", mode: PhoneModeCellular},
+		{name: "overseas cellular in airplane", imsi: "530240000000001", mode: PhoneModeCellular, airplane: true},
 		{name: "overseas VoLTE", imsi: "530240000000001", mode: PhoneModeVoLTE},
 		{name: "overseas direct dial", imsi: "530240000000001", mode: PhoneModeModemVoice, airplane: true},
 	} {
@@ -107,7 +109,7 @@ func TestML307CPhonePolicyKeepsExplicitRadioSettings(t *testing.T) {
 			if resolver.pol != pol || p.currentCardPolicyAllowsVoWiFi(w, pol.ICCID, "test", LebaraUKClass{}) {
 				t.Fatalf("card policy changed or still enables recovery: %+v", resolver.pol)
 			}
-			if tc.mode == PhoneModeWiFi || tc.mode == PhoneModeCellular {
+			if !tc.airplane && (tc.mode == PhoneModeWiFi || tc.mode == PhoneModeCellular) {
 				var unsupported *PhoneModeUnsupportedError
 				if err := p.EnableVoWiFi(w.ID); !errors.As(err, &unsupported) {
 					t.Fatalf("direct software IMS start error = %v", err)
@@ -117,6 +119,14 @@ func TestML307CPhonePolicyKeepsExplicitRadioSettings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestML307CCellularIMSCapabilityWithNetworkController(t *testing.T) {
+	w := &Worker{ID: "ml307c", netOverride: &fakeController{}}
+	w.Modem = newML307CPhoneTestModem(t, w.ID)
+	if err := w.CheckPhoneModeSupported(PhoneModeCellular); err != nil {
+		t.Fatalf("cellular IMS with a controller: %v", err)
 	}
 }
 
