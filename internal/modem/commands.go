@@ -393,7 +393,7 @@ func (m *Manager) openLogicalChannel(aid, leaseOwner, sessionOwner string, class
 	if err != nil {
 		return -1, fmt.Errorf("打开 logical channel 失败: %w", err)
 	}
-	channel, ok := parseCCHO(resp)
+	channel, ok := parseCCHO(resp, m.atProfile)
 	if !ok {
 		return -1, fmt.Errorf("解析 logical channel 响应失败: %s", resp)
 	}
