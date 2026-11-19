@@ -157,7 +157,7 @@ func configuredDevicesATDiscovery(devices []config.DeviceConfig) compatibleATDis
 func configuredPortRequiresLiveATIdentity(cfg config.DeviceConfig, observations []atScanObservation) bool {
 	if usb := strings.TrimSpace(cfg.USBPath); usb != "" {
 		profile := readUSBDeviceIdentity(resolveUSBPathForScan(usb)).atProfile()
-		if atIdentityRulesFor(profile).verifyLiveIMEI {
+		if atDeviceRulesFor(profile).verifyLiveIMEI {
 			return true
 		}
 	}
@@ -322,7 +322,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 		if len(resolved.Matched) > 0 {
 			hw := resolved.Matched[0].Hardware
 			atProfile = hw.ATProfile()
-			if atIdentityRulesFor(atProfile).verifyLiveIMEI {
+			if atDeviceRulesFor(atProfile).verifyLiveIMEI {
 				devCfg.USBPath = hw.USBPath
 				devCfg.ATPort = hw.ATPort
 				devCfg.ManagePort = hw.ATPort
@@ -621,7 +621,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			p.scheduleATDisconnectRecovery(owner, reason)
 		})
 		p.bindModemReadyIndications(w)
-		if source := atIdentityRulesFor(atProfile).simStatusSource; source != "" {
+		if source := atDeviceRulesFor(atProfile).simStatusSource; source != "" {
 			m.SetSIMStatusHandler(func(inserted *bool, state string) {
 				p.handleSIMStatusEventForOwner(owner, source, inserted, state)
 			})

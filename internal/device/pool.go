@@ -157,7 +157,7 @@ type Worker struct {
 	operatorScanActive  bool
 
 	reassembler      *smscodec.Reassembler
-	ml307cSMSNotices ml307cSMSNotices
+	storedSMSNotices storedSMSNotices
 
 	// 短信工作模式：AT / QMI / VoWiFi（三模完全隔离）。MBIM 网络使用 AT 短信模式。
 	smsMode smsMode
@@ -680,7 +680,7 @@ func (w *Worker) refreshIdentityLive(ctx context.Context, reason string) (liveSI
 		defer cancel()
 	}
 
-	strictSIMIdentity := atIdentityRulesFor(w.atProfile()).strictSIMIdentity
+	strictSIMIdentity := w.atDeviceRules().strictSIMIdentity
 	if strictSIMIdentity {
 		inserted, err := w.Backend.IsSimInserted(ctx)
 		if err != nil {
@@ -1041,7 +1041,7 @@ func (p *Pool) handleSIMStatusEventForOwner(owner workerLifecycleOwner, source s
 		return
 	}
 	state = strings.ToUpper(strings.TrimSpace(state))
-	if atIdentityRulesFor(owner.worker.atProfile()).strictSIMIdentity {
+	if owner.worker.atDeviceRules().strictSIMIdentity {
 		if modem.IsSIMPINRequiredState(state) {
 			p.handleSIMPINRequired(owner)
 			return
@@ -1219,7 +1219,7 @@ func (p *Pool) confirmSIMRemovedForOwner(owner workerLifecycleOwner, source stri
 	inserted, err := w.Backend.IsSimInserted(ctx)
 	if err != nil {
 		transition.Unlock()
-		if atIdentityRulesFor(w.atProfile()).strictSIMIdentity && errors.Is(err, modem.ErrSIMPINRequired) {
+		if w.atDeviceRules().strictSIMIdentity && errors.Is(err, modem.ErrSIMPINRequired) {
 			p.handleSIMPINRequired(owner)
 			return
 		}
@@ -1271,7 +1271,7 @@ func (p *Pool) finishConfirmedSIMInsertion(owner workerLifecycleOwner, source st
 	}
 	p.broadcastVoWiFiStateChange(w.ID)
 	if result.err != nil {
-		if atIdentityRulesFor(w.atProfile()).strictSIMIdentity && errors.Is(result.err, modem.ErrSIMPINRequired) {
+		if w.atDeviceRules().strictSIMIdentity && errors.Is(result.err, modem.ErrSIMPINRequired) {
 			p.handleSIMPINRequired(owner)
 			return
 		}
@@ -1987,7 +1987,7 @@ func (p *Pool) collectRescanHardware(discovered []QMIDevice, liveWorkerIndex Wor
 				return resolveDiscoveredCompatibleModemFn(dev, 1200*time.Millisecond)
 			}
 			for _, raw := range compatList {
-				if scan == compatibleATDiscoveryLiveIdentity && !atIdentityRulesFor(raw.ATProfile()).verifyLiveIMEI {
+				if scan == compatibleATDiscoveryLiveIdentity && !atDeviceRulesFor(raw.ATProfile()).verifyLiveIMEI {
 					continue
 				}
 				m, observation := liveWorkerIndex.observeLiveATIdentity(raw, probe)
@@ -2725,7 +2725,7 @@ func (p *Pool) PersistRuntimeState(worker *Worker) {
 	}
 
 	// 更新 Device 表
-	model := atIdentityRulesFor(worker.atProfile()).model
+	model := worker.atDeviceRules().model
 	if err := db.UpsertDevice(imei, worker.ID, model, worker.Config.ATPort); err != nil {
 		logger.Warn(fmt.Sprintf("[%s] 更新设备信息失败", worker.ID), "err", err)
 	}

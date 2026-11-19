@@ -15,8 +15,8 @@ func configureWorkerATSMS(w *Worker) {
 	}
 	w.Modem.SetNewSMSHandler(nil)
 	w.Modem.SetDisableURCRead(false)
-	if w.isML307C() {
-		w.Modem.SetStoredSMSHandler(w.handleML307CStoredSMS)
+	if w.atDeviceRules().storedSMSInbox {
+		w.Modem.SetStoredSMSHandler(w.handleStoredSMS)
 		return
 	}
 	w.Modem.SetSMSReadinessCheck(func() error {

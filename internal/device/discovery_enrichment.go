@@ -221,7 +221,7 @@ func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) Wor
 		if worker.Modem != nil && worker.Modem.OwnsATRuntime() && worker.ResolvedATPort() != "" {
 			idx.atIdentityByPort[worker.ResolvedATPort()] = workerATIdentityReader{worker: worker, query: worker.Modem.QueryIMEI}
 		}
-		if includeRuntimeStatus && !atIdentityRulesFor(worker.atProfile()).verifyLiveIMEI {
+		if includeRuntimeStatus && !worker.atDeviceRules().verifyLiveIMEI {
 			status := worker.GetDeviceStatus()
 			if imei := strings.TrimSpace(status.IMEI); imei != "" {
 				info.IMEI = imei
@@ -287,7 +287,7 @@ func (idx WorkerDiscoveryIndex) ResolveLiveATIdentity(dev CompatibleModem, probe
 }
 
 func (idx WorkerDiscoveryIndex) observeLiveATIdentity(dev CompatibleModem, probe func(CompatibleModem) (CompatibleModem, string)) (CompatibleModem, *atScanObservation) {
-	if !atIdentityRulesFor(dev.ATProfile()).verifyLiveIMEI {
+	if !atDeviceRulesFor(dev.ATProfile()).verifyLiveIMEI {
 		return dev, nil
 	}
 	observation := &atScanObservation{usbPath: dev.USBPath, atPorts: dev.ATPorts}

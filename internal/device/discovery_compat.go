@@ -37,8 +37,8 @@ func (m CompatibleModem) ATProfile() modem.ATProfile {
 }
 
 func (id usbDeviceIdentity) atProfile() modem.ATProfile {
-	if id.isML307C() {
-		return modem.ATProfileML307C
+	if layout, ok := id.atOnlyLayout(); ok {
+		return layout.profile
 	}
 	return modem.ATProfileDefault
 }
@@ -158,7 +158,7 @@ func discoverFallbackOne(usbPath string) (CompatibleModem, bool) {
 	scanUSBPath := resolveUSBPathForScan(usbPath)
 	identity := readUSBDeviceIdentity(scanUSBPath)
 	vid, pid := identity.vendorID, identity.productID
-	if identity.isML307C() {
+	if _, ok := identity.atOnlyLayout(); ok {
 		ports, port, _ := discoverATPortsForUSBDevice(scanUSBPath, identity, "at")
 		if port == "" {
 			return CompatibleModem{}, false

@@ -8,7 +8,7 @@ import (
 	"github.com/yibaiba/hideck/internal/db"
 )
 
-func TestML307CStoredSMSPersistence(t *testing.T) {
+func TestATStoredSMSPersistence(t *testing.T) {
 	initDevicePhoneNumberTestDB(t)
 	identity := SMSIdentity{ICCID: "8988110000000000001", IMSI: "001010123456789"}
 	scope := db.SMSInboundFragmentScope{DeviceID: "c", ICCID: identity.ICCID, IMSI: identity.IMSI}
@@ -212,39 +212,39 @@ func TestML307CStoredSMSPersistence(t *testing.T) {
 	}
 }
 
-func TestML307CStoredSMSNoticeSurvivesReadFailure(t *testing.T) {
+func TestATStoredSMSNoticeSurvivesReadFailure(t *testing.T) {
 	w := &Worker{}
-	slot := ml307cSMSSlot{store: "ME", index: 7}
+	slot := storedSMSSlot{store: "ME", index: 7}
 	// With identity still unknown, a notification cannot attest a later card.
-	w.handleML307CStoredSMS(slot.store, "7")
-	if len(w.ml307cSMSNotices.slots) != 0 {
+	w.handleStoredSMS(slot.store, "7")
+	if len(w.storedSMSNotices.slots) != 0 {
 		t.Fatal("unknown SIM claimed an ME slot")
 	}
-	owner := ml307cSMSOwner{simGeneration: 1}
-	notice := &ml307cSMSNotice{owner: owner, slot: slot, observedAt: time.Now()}
-	w.ml307cSMSNotices.add(notice) // An unsuccessful CMGR leaves the notification unresolved.
+	owner := storedSMSOwner{simGeneration: 1}
+	notice := &storedSMSNotice{owner: owner, slot: slot, observedAt: time.Now()}
+	w.storedSMSNotices.add(notice) // An unsuccessful CMGR leaves the notification unresolved.
 
-	retry := w.ml307cSMSNotices.snapshot(owner, slot.store)[slot.index]
-	if retry != notice || !w.ml307cSMSNotices.bind(retry, "001122") {
+	retry := w.storedSMSNotices.snapshot(owner, slot.store)[slot.index]
+	if retry != notice || !w.storedSMSNotices.bind(retry, "001122") {
 		t.Fatal("periodic list could not recover the pending ME notification")
 	}
-	if w.ml307cSMSNotices.bind(retry, "aabbcc") {
+	if w.storedSMSNotices.bind(retry, "aabbcc") {
 		t.Fatal("retry accepted a replacement after the original PDU was read")
 	}
 
-	next := &ml307cSMSNotice{owner: owner, slot: slot, observedAt: time.Now()}
-	w.ml307cSMSNotices.add(next)
-	w.ml307cSMSNotices.forget(notice)
-	if !w.ml307cSMSNotices.bind(next, "aabbcc") {
+	next := &storedSMSNotice{owner: owner, slot: slot, observedAt: time.Now()}
+	w.storedSMSNotices.add(next)
+	w.storedSMSNotices.forget(notice)
+	if !w.storedSMSNotices.bind(next, "aabbcc") {
 		t.Fatal("old task discarded a newer slot notification")
 	}
 	owner.simGeneration++
-	if len(w.ml307cSMSNotices.snapshot(owner, slot.store)) != 0 || w.ml307cSMSNotices.bind(next, "aabbcc") {
+	if len(w.storedSMSNotices.snapshot(owner, slot.store)) != 0 || w.storedSMSNotices.bind(next, "aabbcc") {
 		t.Fatal("new SIM generation inherited an ME notice")
 	}
-	latest := &ml307cSMSNotice{owner: owner, slot: slot, observedAt: time.Now()}
-	w.ml307cSMSNotices.add(latest)
-	if len(w.ml307cSMSNotices.snapshot(next.owner, slot.store)) != 0 || !w.ml307cSMSNotices.current(latest) {
+	latest := &storedSMSNotice{owner: owner, slot: slot, observedAt: time.Now()}
+	w.storedSMSNotices.add(latest)
+	if len(w.storedSMSNotices.snapshot(next.owner, slot.store)) != 0 || !w.storedSMSNotices.current(latest) {
 		t.Fatal("an old scan discarded a newer SIM generation's notice")
 	}
 }

@@ -87,7 +87,7 @@ func (p *Pool) reconcileHealthyRescanWorker(
 		})
 		return
 	}
-	usbChanged := atIdentityRulesFor(hw.ATProfile()).verifyLiveIMEI && hw.USBPath != "" && hw.USBPath != worker.Config.USBPath
+	usbChanged := atDeviceRulesFor(hw.ATProfile()).verifyLiveIMEI && hw.USBPath != "" && hw.USBPath != worker.Config.USBPath
 	portChanged := hw.ATPort != "" && hw.ATPort != worker.Config.ATPort
 	if (!usbChanged && !portChanged) || !opts.allowWorkerMutation(pair.Config.ID) {
 		return
@@ -230,7 +230,7 @@ func (p *Pool) reconcileOfflineRescanDevice(
 		return
 	}
 	healthy := worker.IsDeviceHealthy()
-	if healthy && atIdentityRulesFor(worker.atProfile()).verifyLiveIMEI && config.IMEIMatches(worker.Config.ModemIMEI, current.ModemIMEI) {
+	if healthy && worker.atDeviceRules().verifyLiveIMEI && config.IMEIMatches(worker.Config.ModemIMEI, current.ModemIMEI) {
 		usb := strings.TrimSpace(worker.Config.USBPath)
 		port := worker.ResolvedATPort()
 		for _, candidate := range atObservations {

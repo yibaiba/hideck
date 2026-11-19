@@ -19,42 +19,42 @@ import (
 	"github.com/yibaiba/hideck/pkg/smscodec"
 )
 
-var ml307cSMSStores = [...]string{"ME", "SM"}
+var storedSMSStores = [...]string{"ME", "SM"}
 
-type ml307cSMSOwner struct {
+type storedSMSOwner struct {
 	workerLifecycleOwner
 	SMSIdentity
 	simGeneration uint64
 }
 
-func (w *Worker) ml307cSMSOwner() (ml307cSMSOwner, error) {
+func (w *Worker) storedSMSOwner() (storedSMSOwner, error) {
 	w.cacheMu.RLock()
 	id := w.state.Identity
 	w.cacheMu.RUnlock()
 	identity := normalizeSMSIdentity(SMSIdentity{ICCID: id.ICCID, IMSI: id.IMSI})
 	if !id.Ready || id.Phase != simIdentityPhaseReady || identity.ICCID == "" || identity.IMSI == "" {
-		return ml307cSMSOwner{}, ErrSMSIdentityUnknown
+		return storedSMSOwner{}, ErrSMSIdentityUnknown
 	}
-	return ml307cSMSOwner{
+	return storedSMSOwner{
 		workerLifecycleOwner: workerLifecycleOwner{worker: w, generation: w.generation},
 		SMSIdentity:          identity, simGeneration: id.Generation,
 	}, nil
 }
 
-func (owner ml307cSMSOwner) check() error {
+func (owner storedSMSOwner) check() error {
 	w := owner.worker
 	if !w.Pool.workerLifecycleOwnerCurrent(owner.workerLifecycleOwner) ||
 		w.Pool.IsESIMSwitching(w.ID) || !w.Modem.StoredSMSReceiving() {
 		return ErrSMSIdentityTransitioning
 	}
-	current, err := w.ml307cSMSOwner()
+	current, err := w.storedSMSOwner()
 	if err != nil || current != owner {
 		return ErrSMSIdentityTransitioning
 	}
 	return nil
 }
 
-func (owner ml307cSMSOwner) verifyLive() error {
+func (owner storedSMSOwner) verifyLive() error {
 	if err := owner.check(); err != nil {
 		return err
 	}
@@ -81,36 +81,36 @@ func (owner ml307cSMSOwner) verifyLive() error {
 }
 
 // A CMTI only proves provenance within the current worker and SIM generation.
-type ml307cSMSSlot struct {
+type storedSMSSlot struct {
 	store string
 	index int
 }
 
-type ml307cSMSNotice struct {
-	owner      ml307cSMSOwner
-	slot       ml307cSMSSlot
+type storedSMSNotice struct {
+	owner      storedSMSOwner
+	slot       storedSMSSlot
 	observedAt time.Time
 	pdu        string // Set under the notice lock after the first successful read.
 }
 
-type ml307cSMSNotices struct {
+type storedSMSNotices struct {
 	mu    sync.Mutex
-	slots map[ml307cSMSSlot]*ml307cSMSNotice
+	slots map[storedSMSSlot]*storedSMSNotice
 }
 
-func (notices *ml307cSMSNotices) add(notice *ml307cSMSNotice) {
+func (notices *storedSMSNotices) add(notice *storedSMSNotice) {
 	notices.mu.Lock()
 	defer notices.mu.Unlock()
 	if notices.slots == nil {
-		notices.slots = make(map[ml307cSMSSlot]*ml307cSMSNotice)
+		notices.slots = make(map[storedSMSSlot]*storedSMSNotice)
 	}
 	notices.slots[notice.slot] = notice
 }
 
-func (notices *ml307cSMSNotices) snapshot(owner ml307cSMSOwner, store string) map[int]*ml307cSMSNotice {
+func (notices *storedSMSNotices) snapshot(owner storedSMSOwner, store string) map[int]*storedSMSNotice {
 	notices.mu.Lock()
 	defer notices.mu.Unlock()
-	var pending map[int]*ml307cSMSNotice
+	var pending map[int]*storedSMSNotice
 	for slot, notice := range notices.slots {
 		if notice.owner != owner {
 			if notice.owner.workerLifecycleOwner == owner.workerLifecycleOwner && notice.owner.simGeneration < owner.simGeneration {
@@ -118,7 +118,7 @@ func (notices *ml307cSMSNotices) snapshot(owner ml307cSMSOwner, store string) ma
 			}
 		} else if slot.store == store {
 			if pending == nil {
-				pending = make(map[int]*ml307cSMSNotice)
+				pending = make(map[int]*storedSMSNotice)
 			}
 			pending[slot.index] = notice
 		}
@@ -126,13 +126,13 @@ func (notices *ml307cSMSNotices) snapshot(owner ml307cSMSOwner, store string) ma
 	return pending
 }
 
-func (notices *ml307cSMSNotices) current(notice *ml307cSMSNotice) bool {
+func (notices *storedSMSNotices) current(notice *storedSMSNotice) bool {
 	notices.mu.Lock()
 	defer notices.mu.Unlock()
 	return notices.slots[notice.slot] == notice
 }
 
-func (notices *ml307cSMSNotices) bind(notice *ml307cSMSNotice, pdu string) bool {
+func (notices *storedSMSNotices) bind(notice *storedSMSNotice, pdu string) bool {
 	notices.mu.Lock()
 	defer notices.mu.Unlock()
 	if notice == nil || notices.slots[notice.slot] != notice {
@@ -148,7 +148,7 @@ func (notices *ml307cSMSNotices) bind(notice *ml307cSMSNotice, pdu string) bool 
 	return true
 }
 
-func (notices *ml307cSMSNotices) forget(notice *ml307cSMSNotice) {
+func (notices *storedSMSNotices) forget(notice *storedSMSNotice) {
 	if notice == nil {
 		return
 	}
@@ -159,22 +159,22 @@ func (notices *ml307cSMSNotices) forget(notice *ml307cSMSNotice) {
 	}
 }
 
-func (w *Worker) handleML307CStoredSMS(storage, index string) {
+func (w *Worker) handleStoredSMS(storage, index string) {
 	slot, err := strconv.Atoi(index)
 	if err != nil || slot < 0 || slot > 65535 || (storage != "ME" && storage != "SM") {
 		return
 	}
 	// Capture before queuing the work. A delayed URC must keep its original
 	// worker and SIM generation across eSIM and physical card changes.
-	owner, err := w.ml307cSMSOwner()
+	owner, err := w.storedSMSOwner()
 	if err != nil {
 		return
 	}
-	notice := &ml307cSMSNotice{
-		owner: owner, slot: ml307cSMSSlot{store: storage, index: slot}, observedAt: time.Now(),
+	notice := &storedSMSNotice{
+		owner: owner, slot: storedSMSSlot{store: storage, index: slot}, observedAt: time.Now(),
 	}
-	w.ml307cSMSNotices.add(notice)
-	go w.runML307CSMS(owner, notice)
+	w.storedSMSNotices.add(notice)
+	go w.receiveStoredSMS(owner, notice)
 }
 
 // scanATSMS polls the stored inbox when the active AT SMS path enables it.
@@ -182,17 +182,17 @@ func (w *Worker) scanATSMS() {
 	if w.Modem == nil || !w.Modem.StoredSMSReceiving() {
 		return
 	}
-	owner, err := w.ml307cSMSOwner()
+	owner, err := w.storedSMSOwner()
 	if err != nil {
 		return
 	}
-	w.runML307CSMS(owner, nil)
+	w.receiveStoredSMS(owner, nil)
 }
 
-func (w *Worker) runML307CSMS(owner ml307cSMSOwner, notice *ml307cSMSNotice) {
+func (w *Worker) receiveStoredSMS(owner storedSMSOwner, notice *storedSMSNotice) {
 	var notifications []InboundSMS
-	if err := w.readML307CSMSInbox(owner, notice, &notifications); err != nil {
-		logger.Warn("ML307C 短信收件未完成", "device", w.ID, "err", err)
+	if err := w.readStoredSMSInbox(owner, notice, &notifications); err != nil {
+		logger.Warn("AT 短信收件未完成", "device", w.ID, "err", err)
 	}
 	for _, inbound := range notifications {
 		w.Pool.notifyInboundSMS(inbound)
@@ -202,7 +202,7 @@ func (w *Worker) runML307CSMS(owner ml307cSMSOwner, notice *ml307cSMSNotice) {
 	}
 }
 
-func (w *Worker) readML307CSMSInbox(owner ml307cSMSOwner, notice *ml307cSMSNotice, notifications *[]InboundSMS) error {
+func (w *Worker) readStoredSMSInbox(owner storedSMSOwner, notice *storedSMSNotice, notifications *[]InboundSMS) error {
 	// The eSIM manager uses the same transition lock. Take it before the
 	// serial inbox lock, matching the lock order used for sending.
 	release, err := w.Pool.AcquireDeviceOperation(w.ID)
@@ -230,7 +230,7 @@ func (w *Worker) readML307CSMSInbox(owner ml307cSMSOwner, notice *ml307cSMSNotic
 			return err
 		}
 		if notice != nil {
-			if !w.ml307cSMSNotices.current(notice) {
+			if !w.storedSMSNotices.current(notice) {
 				return nil
 			}
 			if err := inbox.Select(notice.slot.store); err != nil {
@@ -243,18 +243,18 @@ func (w *Worker) readML307CSMSInbox(owner ml307cSMSOwner, notice *ml307cSMSNotic
 			if err := owner.verifyLive(); err != nil {
 				return err
 			}
-			return w.ingestML307CSlot(inbox, owner, state, record, notice.slot.store == "SM", notice, notifications)
+			return w.ingestStoredSMSSlot(inbox, owner, state, record, notice.slot.store == "SM", notice, notifications)
 		}
 
 		var scanErr error
 		scanIncomplete := false
-		for _, store := range ml307cSMSStores {
+		for _, store := range storedSMSStores {
 			if err := inbox.Select(store); err != nil {
 				return errors.Join(scanErr, err)
 			}
 			// Only notices already observed before this snapshot can identify
 			// a listed PDU. A newer CMTI may refer to a reused slot.
-			pending := w.ml307cSMSNotices.snapshot(owner, store)
+			pending := w.storedSMSNotices.snapshot(owner, store)
 			records, err := inbox.List()
 			if err != nil {
 				scanErr = errors.Join(scanErr, err)
@@ -267,12 +267,12 @@ func (w *Worker) readML307CSMSInbox(owner ml307cSMSOwner, notice *ml307cSMSNotic
 			for _, record := range records {
 				notice := pending[record.Index]
 				delete(pending, record.Index)
-				if err := w.ingestML307CSlot(inbox, owner, state, record, store == "SM", notice, notifications); err != nil {
+				if err := w.ingestStoredSMSSlot(inbox, owner, state, record, store == "SM", notice, notifications); err != nil {
 					scanErr = errors.Join(scanErr, err)
 				}
 			}
 			for _, absent := range pending {
-				w.ml307cSMSNotices.forget(absent)
+				w.storedSMSNotices.forget(absent)
 			}
 		}
 		if scanIncomplete {
@@ -290,15 +290,15 @@ func (w *Worker) readML307CSMSInbox(owner ml307cSMSOwner, notice *ml307cSMSNotic
 	})
 }
 
-func (w *Worker) ingestML307CSlot(inbox *modem.SMSInbox, owner ml307cSMSOwner, state *atSMSParts, record modem.SMSPDURecord, sourceKnown bool, notice *ml307cSMSNotice, notifications *[]InboundSMS) error {
+func (w *Worker) ingestStoredSMSSlot(inbox *modem.SMSInbox, owner storedSMSOwner, state *atSMSParts, record modem.SMSPDURecord, sourceKnown bool, notice *storedSMSNotice, notifications *[]InboundSMS) error {
 	if !record.Received() {
-		w.ml307cSMSNotices.forget(notice)
+		w.storedSMSNotices.forget(notice)
 		return nil
 	}
 	if err := owner.check(); err != nil {
 		return err
 	}
-	if notice != nil && !w.ml307cSMSNotices.bind(notice, record.PDU) {
+	if notice != nil && !w.storedSMSNotices.bind(notice, record.PDU) {
 		return nil
 	}
 	part, err := decodeATInboxPart(owner.SMSIdentity, record.PDU)
@@ -322,7 +322,7 @@ func (w *Worker) ingestML307CSlot(inbox *modem.SMSInbox, owner ml307cSMSOwner, s
 	if err := inbox.DeleteMatching(record, owner.verifyLive); err != nil {
 		return fmt.Errorf("delete persisted SMS slot %d: %w", record.Index, err)
 	}
-	w.ml307cSMSNotices.forget(notice)
+	w.storedSMSNotices.forget(notice)
 	return nil
 }
 

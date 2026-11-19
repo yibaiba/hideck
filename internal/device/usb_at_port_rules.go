@@ -1,6 +1,10 @@
 package device
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/yibaiba/hideck/internal/modem"
+)
 
 const (
 	cmIoTVendorID                = 0x2ecc
@@ -29,8 +33,22 @@ type usbDeviceIdentity struct {
 	productID uint16
 }
 
-func (id usbDeviceIdentity) isML307C() bool {
-	return id.vendorID == cmIoTVendorID && id.productID == ml307cProductID
+// usbATOnlyLayout describes USB compositions managed only through an AT port.
+type usbATOnlyLayout struct {
+	profile            modem.ATProfile
+	preferredInterface int
+	alternateInterface int
+}
+
+func (id usbDeviceIdentity) atOnlyLayout() (usbATOnlyLayout, bool) {
+	if id.vendorID == cmIoTVendorID && id.productID == ml307cProductID {
+		return usbATOnlyLayout{
+			profile:            modem.ATProfileML307C,
+			preferredInterface: 2,
+			alternateInterface: 3,
+		}, true
+	}
+	return usbATOnlyLayout{}, false
 }
 
 type usbATPortRule struct {
@@ -40,8 +58,8 @@ type usbATPortRule struct {
 }
 
 func usbATPortRuleFor(identity usbDeviceIdentity, mode string) (usbATPortRule, bool) {
-	if identity.isML307C() {
-		return usbInterfaceATPortRule(2), true
+	if layout, ok := identity.atOnlyLayout(); ok {
+		return usbInterfaceATPortRule(layout.preferredInterface), true
 	}
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if identity.vendorID == qualcommVendorID && mode == "qmi" {
@@ -118,10 +136,10 @@ func supportsStaticQuectelATInterface(mode string) bool {
 
 func discoverATPortsForUSBDevice(usbPath string, identity usbDeviceIdentity, mode string) (ports []string, bestPort, imei string) {
 	portScan := scanATPortsForUSBDevice(usbPath)
-	if identity.isML307C() {
+	if layout, ok := identity.atOnlyLayout(); ok {
 		var atOnly usbATPortScan
 		for _, port := range portScan.interfaceOrdered {
-			if port.interfaceNumber == 2 || port.interfaceNumber == 3 {
+			if port.interfaceNumber == layout.preferredInterface || port.interfaceNumber == layout.alternateInterface {
 				atOnly.interfaceOrdered = append(atOnly.interfaceOrdered, port)
 				atOnly.candidates = append(atOnly.candidates, port.path)
 			}

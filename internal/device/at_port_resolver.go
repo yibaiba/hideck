@@ -95,7 +95,7 @@ func ResolveQMIDeviceATPort(dev QMIDevice, timeout time.Duration) (QMIDevice, st
 // ResolveCompatibleModemATPort 为兼容发现结果解析真实可用的主 AT 口。
 // 行为与 QMI 设备一致，同样只允许在该设备自己的 ATPorts 范围内探测。
 func ResolveCompatibleModemATPort(dev CompatibleModem, timeout time.Duration) (CompatibleModem, string) {
-	if atIdentityRulesFor(dev.ATProfile()).verifyLiveIMEI {
+	if atDeviceRulesFor(dev.ATProfile()).verifyLiveIMEI {
 		return ResolveCompatibleModemATPortContext(context.Background(), dev, timeout)
 	}
 	atPort, imei := ResolveATPortForDevice(dev.ATPort, dev.ATPorts, timeout)
@@ -113,7 +113,7 @@ func ResolveCompatibleModemATPortContext(
 	timeout time.Duration,
 ) (CompatibleModem, string) {
 	profile := dev.ATProfile()
-	if atIdentityRulesFor(profile).verifyLiveIMEI {
+	if atDeviceRulesFor(profile).verifyLiveIMEI {
 		preferred := dev.ATPort
 		dev.ATPort, dev.IMEI = "", ""
 		for _, port := range orderedATPortCandidates(preferred, dev.ATPorts) {

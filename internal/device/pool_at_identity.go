@@ -12,33 +12,6 @@ import (
 var errATIdentityUnavailable = errors.New("at identity unavailable")
 var errATNoSIM = errors.New("AT modem has no SIM")
 
-type atIdentityRules struct {
-	verifyLiveIMEI    bool
-	strictSIMIdentity bool
-	simStatusSource   string
-	model             string
-}
-
-func atIdentityRulesFor(profile modem.ATProfile) atIdentityRules {
-	switch profile {
-	case modem.ATProfileML307C:
-		return atIdentityRules{verifyLiveIMEI: true, strictSIMIdentity: true, simStatusSource: "ml307c_sim_status", model: "ML307C"}
-	default:
-		return atIdentityRules{model: "EC20"}
-	}
-}
-
-func (w *Worker) atProfile() modem.ATProfile {
-	if w == nil || w.Modem == nil {
-		return modem.ATProfileDefault
-	}
-	return w.Modem.ATProfile()
-}
-
-func (w *Worker) isML307C() bool {
-	return w.atProfile() == modem.ATProfileML307C
-}
-
 var probeATIdentityFn = modem.ProbeATIdentity
 
 func probeWorkerATIdentity(ctx context.Context, w *Worker) (modem.ATIdentity, error) {
