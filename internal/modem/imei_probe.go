@@ -200,10 +200,18 @@ func closeIMEISerialPortOnCancel(ctx context.Context, port serial.Port, stop <-c
 	}
 }
 
+var errIMEIReplyUnavailable = errors.New("IMEI reply unavailable")
+
 // verifyOpenedIMEI consumes the entire identity reply before the manager starts
 // reading URCs or issuing initialization commands on this handle.
 func (m *Manager) verifyOpenedIMEI(expected string) error {
-	live, err := readOpenedIMEI(m.port, m.atProfile.dialect(), 1200*time.Millisecond)
+	const timeout = 1200 * time.Millisecond
+	dialect := m.atProfile.dialect()
+	live, err := readOpenedIMEI(m.port, dialect, timeout)
+	if errors.Is(err, errIMEIReplyUnavailable) {
+		time.Sleep(250 * time.Millisecond)
+		live, err = readOpenedIMEI(m.port, dialect, timeout)
+	}
 	if err != nil {
 		return fmt.Errorf("无法验证 AT 口 %s 的实时 IMEI: %w", m.atPort, err)
 	}
@@ -250,14 +258,14 @@ func readOpenedIMEI(port serial.Port, dialect *atDialect, timeout time.Duration)
 			case line == "OK":
 				imei := dialect.imei.parse(response.String())
 				if imei == "" {
-					return "", errors.New("empty IMEI response")
+					return "", fmt.Errorf("%w: empty IMEI response", errIMEIReplyUnavailable)
 				}
 				return imei, nil
 			case line == "ERROR" || strings.HasPrefix(line, "+CME ERROR:") || strings.HasPrefix(line, "+CMS ERROR:"):
-				return "", fmt.Errorf("IMEI query failed: %s", line)
+				return "", fmt.Errorf("%w: %s", errIMEIReplyUnavailable, line)
 			}
 			response.WriteString(line + "\n")
 		}
 	}
-	return "", errors.New("imei probe timeout")
+	return "", fmt.Errorf("%w: timeout", errIMEIReplyUnavailable)
 }
