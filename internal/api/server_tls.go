@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	defaultHTTPSAddress  = ":7576"
-	maxServerHeaderBytes = 1 << 20
+	defaultHTTPSAddress     = ":7576"
+	maxServerHeaderBytes    = 1 << 20
+	managedHTTPWriteTimeout = 120 * time.Second
 )
 
 func (s *Server) serveHTTP() error {
@@ -63,7 +64,7 @@ func (s *Server) serveHTTPAndHTTPS(certificate tls.Certificate) error {
 func newManagedHTTPServer(address string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 120 * time.Second, WriteTimeout: 120 * time.Second,
+		ReadTimeout: 120 * time.Second, WriteTimeout: managedHTTPWriteTimeout,
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: maxServerHeaderBytes,
 	}
 }

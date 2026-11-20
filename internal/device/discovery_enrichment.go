@@ -185,17 +185,24 @@ type WorkerDiscoveryInfo struct {
 	USBNetMode  *int
 }
 
+type workerATIdentityReader struct {
+	worker *Worker
+	query  func() (string, error)
+}
+
 type WorkerDiscoveryIndex struct {
-	byControl map[string]WorkerDiscoveryInfo
-	byUSB     map[string]WorkerDiscoveryInfo
-	byIface   map[string]WorkerDiscoveryInfo
+	byControl        map[string]WorkerDiscoveryInfo
+	byUSB            map[string]WorkerDiscoveryInfo
+	byIface          map[string]WorkerDiscoveryInfo
+	atIdentityByPort map[string]workerATIdentityReader
 }
 
 func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) WorkerDiscoveryIndex {
 	idx := WorkerDiscoveryIndex{
-		byControl: map[string]WorkerDiscoveryInfo{},
-		byUSB:     map[string]WorkerDiscoveryInfo{},
-		byIface:   map[string]WorkerDiscoveryInfo{},
+		byControl:        map[string]WorkerDiscoveryInfo{},
+		byUSB:            map[string]WorkerDiscoveryInfo{},
+		byIface:          map[string]WorkerDiscoveryInfo{},
+		atIdentityByPort: map[string]workerATIdentityReader{},
 	}
 
 	for _, worker := range workers {
@@ -211,7 +218,13 @@ func BuildWorkerDiscoveryIndex(workers []*Worker, includeRuntimeStatus bool) Wor
 			ATPort:      strings.TrimSpace(cfg.ATPort),
 			IMEI:        strings.TrimSpace(cfg.ModemIMEI),
 		}
-		if includeRuntimeStatus {
+		if worker.Modem != nil && worker.Modem.OwnsATRuntime() && worker.ResolvedATPort() != "" {
+			port := worker.ResolvedATPort()
+			owner := workerATIdentityReader{worker: worker, query: worker.Modem.QueryIMEI}
+			idx.atIdentityByPort[port] = owner
+			idx.atIdentityByPort[resolveUSBPathForScan(port)] = owner
+		}
+		if includeRuntimeStatus && !worker.atDeviceRules().verifyLiveIMEI {
 			status := worker.GetDeviceStatus()
 			if imei := strings.TrimSpace(status.IMEI); imei != "" {
 				info.IMEI = imei
@@ -259,6 +272,56 @@ func (idx WorkerDiscoveryIndex) Lookup(controlPath, usbPath, iface string) (Work
 		}
 	}
 	return WorkerDiscoveryInfo{}, false
+}
+
+// atScanObservation retains a static attachment even if its IMEI could not
+// be verified. Only the separate verified modem result can establish identity.
+type atScanObservation struct {
+	usbPath         string
+	atPorts         []string
+	unreadableOwner *Worker
+}
+
+// ResolveLiveATIdentity handles hardware that requires a live AT IMEI.
+// The caller retains its cache and transport fallback for other hardware.
+func (idx WorkerDiscoveryIndex) ResolveLiveATIdentity(dev CompatibleModem, probe func(CompatibleModem) (CompatibleModem, string)) (CompatibleModem, bool) {
+	resolved, observation := idx.observeLiveATIdentity(dev, probe)
+	return resolved, observation != nil
+}
+
+func (idx WorkerDiscoveryIndex) observeLiveATIdentity(dev CompatibleModem, probe func(CompatibleModem) (CompatibleModem, string)) (CompatibleModem, *atScanObservation) {
+	if !atDeviceRulesFor(dev.ATProfile()).verifyLiveIMEI {
+		return dev, nil
+	}
+	observation := &atScanObservation{usbPath: dev.USBPath, atPorts: dev.ATPorts}
+	if port, owner := idx.ownedATPort(dev.ATPorts); port != "" {
+		dev.ATPort, dev.IMEI = port, ""
+		if imei, err := owner.query(); err == nil {
+			dev.IMEI = imei
+		}
+		if config.NormalizeIMEI(dev.IMEI) == "" {
+			// Do not open a second reader while the worker owns the port.
+			observation.unreadableOwner = owner.worker
+		}
+		return dev, observation
+	}
+	resolved, imei := probe(dev)
+	resolved.IMEI = imei
+	return resolved, observation
+}
+
+func (idx WorkerDiscoveryIndex) ownedATPort(ports []string) (string, workerATIdentityReader) {
+	for _, port := range ports {
+		if owner := idx.atIdentityByPort[port]; owner.query != nil {
+			return port, owner
+		}
+		if canonical := resolveUSBPathForScan(port); canonical != port {
+			if owner := idx.atIdentityByPort[canonical]; owner.query != nil {
+				return port, owner
+			}
+		}
+	}
+	return "", workerATIdentityReader{}
 }
 
 type ConfiguredDeviceIndex struct {

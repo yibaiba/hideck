@@ -204,6 +204,10 @@ func (w *Worker) MarkSIMIdentityDegraded(reason string, err error) {
 	now := time.Now()
 	w.cacheMu.Lock()
 	defer w.cacheMu.Unlock()
+	w.markSIMIdentityDegradedLocked(reason, err, now)
+}
+
+func (w *Worker) markSIMIdentityDegradedLocked(reason string, err error, now time.Time) {
 	w.state.Identity.Ready = false
 	w.state.Identity.Phase = simIdentityPhaseDegraded
 	w.state.Identity.LastReason = strings.TrimSpace(reason)

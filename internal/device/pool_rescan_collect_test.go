@@ -31,7 +31,7 @@ func TestCollectRescanHardwarePopulatesIMEIAndPaths(t *testing.T) {
 
 	discovered, _ := discoverQMIDevicesFn()
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(nil, false)
-	hardware := p.collectRescanHardware(discovered, liveWorkerIndex)
+	hardware, _ := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesATDiscovery(config.ListDevices()))
 
 	if len(hardware) != 1 {
 		t.Fatalf("expected 1 hardware, got %d", len(hardware))
@@ -101,7 +101,7 @@ func TestCollectRescanHardwarePopulatesNonQMIIMEIAndPaths(t *testing.T) {
 
 	discovered, _ := discoverQMIDevicesFn()
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(nil, false)
-	hardware := p.collectRescanHardware(discovered, liveWorkerIndex)
+	hardware, _ := p.collectRescanHardware(discovered, liveWorkerIndex, configuredDevicesATDiscovery(config.ListDevices()))
 
 	if len(hardware) != 1 {
 		t.Fatalf("expected 1 hardware, got %d", len(hardware))

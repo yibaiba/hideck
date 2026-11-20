@@ -28,8 +28,5 @@ func (m *Manager) initializationCommands() []string {
 	if m.role == runtimeRoleSMSAuxiliary {
 		return commands
 	}
-	return append(commands,
-		"AT+CLIP=1",
-		"AT+QPCMV=1,2",
-	)
+	return append(commands, m.atProfile.dialect().voiceInit...)
 }

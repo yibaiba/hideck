@@ -33,6 +33,21 @@ test('mode availability follows SIM capability and RF lock, not country alone', 
   assert.ok(phoneModeDisabledReason(undefined, 'wifi'))
 })
 
+test('ML307C blocks native voice and cellular IMS modes and preserves One NZ WiFi calling', () => {
+  const reason = 'ML307C 在 HiDeck 中不支持原生 VoLTE 和模组直拨'
+  const cellularReason = 'ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS'
+  const oneNZ = {
+    ...device(), phone_region: 'NZ', native_voice_unavailable_reason: reason,
+    cellular_ims_unavailable_reason: cellularReason
+  }
+  assert.equal(phoneModeDisabledReason(oneNZ, 'volte'), reason)
+  assert.equal(phoneModeDisabledReason(oneNZ, 'modem_voice'), reason)
+  assert.equal(phoneModeDisabledReason(oneNZ, 'wifi'), undefined)
+  assert.equal(phoneModeDisabledReason(oneNZ, 'cellular'), cellularReason)
+  const china = { ...oneNZ, phone_region: 'CN', software_ims_blocked: true }
+  assert.equal(phoneModeDisabledReason(china, 'wifi'), `此 SIM 卡不支持软件 IMS。${reason}`)
+})
+
 test('mode radio buttons use the group change event, not clicks on disabled labels', () => {
   const source = readFileSync(new URL('../src/views/Phone.vue', import.meta.url), 'utf8')
   const group = source.match(/<el-radio-group[\s\S]*?<\/el-radio-group>/)![0]

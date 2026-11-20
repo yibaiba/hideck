@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -510,8 +511,12 @@ func (w *Worker) PreWarmCache() {
 		return
 	}
 	_ = w.RefreshRuntime(nil, "prewarm")
-	_ = w.RefreshIdentityLive(nil, "prewarm")
+	identityErr := w.RefreshIdentityLive(nil, "prewarm")
 	if w.Pool != nil {
+		if errors.Is(identityErr, errATNoSIM) {
+			owner := workerLifecycleOwner{worker: w, generation: w.generation}
+			w.Pool.confirmSIMRemovedForOwner(owner, "at_startup", nil)
+		}
 		w.Pool.PersistRuntimeState(w)
 		w.Pool.PersistIdentityState(w)
 	}

@@ -15,9 +15,7 @@ func TestModemVoicePolicyKeepsExplicitModeAndDoesNotForceData(t *testing.T) {
 			w := &Worker{ID: "test"}
 			w.state.Identity.IMSI = imsi
 			pol := cardpolicy.Policy{VoWiFiEnabled: true, PhoneMode: PhoneModeModemVoice, DataStrategy: "always"}
-			if err := applyPolicyToWorker(w, pol); err != nil {
-				t.Fatal(err)
-			}
+			applyTestCardPolicy(t, w, pol)
 			if w.Config.PhoneMode != PhoneModeModemVoice || w.Config.AirplaneEnabled || w.Config.NetworkEnabled || w.cellularRadioIsSuppressed() {
 				t.Fatalf("unexpected projection: %+v", w.Config)
 			}
@@ -28,9 +26,7 @@ func TestModemVoicePolicyKeepsExplicitModeAndDoesNotForceData(t *testing.T) {
 func TestModemVoiceCannotOverrideLebaraRadioLock(t *testing.T) {
 	w := &Worker{ID: "test"}
 	w.state.Identity.IMSI = "234870000000001"
-	if err := applyPolicyToWorker(w, cardpolicy.Policy{VoWiFiEnabled: true, PhoneMode: PhoneModeModemVoice}); err != nil {
-		t.Fatal(err)
-	}
+	applyTestCardPolicy(t, w, cardpolicy.Policy{VoWiFiEnabled: true, PhoneMode: PhoneModeModemVoice})
 	if !w.Config.AirplaneEnabled || w.Config.NetworkEnabled || !w.cellularRadioIsSuppressed() || w.Config.PhoneMode != PhoneModeWiFi {
 		t.Fatalf("radio lock bypassed: %+v", w.Config)
 	}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/yibaiba/hideck/internal/config"
@@ -252,11 +253,49 @@ func TestHandleDeviceMgmtDiscoveredExposesPCSCFailure(t *testing.T) {
 	}
 }
 
+func TestHandleDeviceMgmtDiscoveredReadsLiveATIdentityOnlyOnRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	path := writeDeviceMgmtDiscoveryConfig(t, "server:\n  port: \":7575\"\ndevices: []")
+	if err := config.InitGlobalManager(path); err != nil {
+		t.Fatal(err)
+	}
+	restoreDiscoveryStubs(t)
+	discoverQMIForMgmtFn = func() ([]device.QMIDevice, error) { return nil, nil }
+	discoverPCSCReadersForMgmtFn = func(context.Context) ([]pcsc.Reader, error) { return nil, nil }
+	discoverCompatibleModemsFromQMIFn = func([]device.QMIDevice) ([]device.CompatibleModem, error) {
+		return []device.CompatibleModem{{
+			USBPath: "/sys/bus/usb/devices/1-1", VendorID: 0x2ecc, ProductID: 0x3012,
+			ATPort: "/dev/ttyUSB8", ATPorts: []string{"/dev/ttyUSB8"}, Mode: "at",
+		}}, nil
+	}
+	const liveIMEI = "490154203237518"
+	var calls []device.CompatibleModemEnrichOptions
+	enrichDiscoveredCompatibleModemFn = func(dev device.CompatibleModem, opts device.CompatibleModemEnrichOptions) (device.CompatibleModem, string) {
+		calls = append(calls, opts)
+		return dev, liveIMEI
+	}
+	srv := &Server{pool: device.NewPool(&config.Config{}), configPath: path}
+	static := requestDiscoveredDevicesWithQuery(t, srv, "")
+	if len(calls) != 0 || len(static.Devices) != 1 || static.Devices[0].IMEI != "" || static.Devices[0].ATPort != "/dev/ttyUSB8" {
+		t.Fatalf("static discovery probed or lost the attachment: probes=%d devices=%+v", len(calls), static.Devices)
+	}
+	live := requestDiscoveredDevices(t, srv)
+	if len(calls) != 1 || !calls[0].EnableATProbe || calls[0].ATProbeTimeout != 900*time.Millisecond || calls[0].EnableQMIIMEIProbe ||
+		len(live.Devices) != 1 || live.Devices[0].IMEI != liveIMEI {
+		t.Fatalf("unexpected live AT discovery: probes=%+v devices=%+v", calls, live.Devices)
+	}
+}
+
 func requestDiscoveredDevices(t *testing.T, srv *Server) discoveredDevicesResponse {
+	t.Helper()
+	return requestDiscoveredDevicesWithQuery(t, srv, "?with_imei=1")
+}
+
+func requestDiscoveredDevicesWithQuery(t *testing.T, srv *Server, query string) discoveredDevicesResponse {
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/devices/discovered?with_imei=1", nil)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/devices/discovered"+query, nil)
 
 	srv.handleDeviceMgmtDiscovered(ctx)
 

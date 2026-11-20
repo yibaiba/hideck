@@ -33,11 +33,11 @@ func (g *apiBalanceGateway) Snapshot(deviceID string) (balance.DeviceSnapshot, e
 	return balance.DeviceSnapshot{DeviceID: deviceID, ICCID: "iccid-1", MCC: "234", MNC: "10"}, nil
 }
 
-func (g *apiBalanceGateway) SendVoWiFiSMS(context.Context, string, string, string) error {
+func (g *apiBalanceGateway) SendVoWiFiSMS(context.Context, balance.DeviceSnapshot, string, string) error {
 	return errors.New("unexpected VoWiFi route")
 }
 
-func (g *apiBalanceGateway) SendBackendSMS(context.Context, string, string, string) error {
+func (g *apiBalanceGateway) SendBackendSMS(context.Context, balance.DeviceSnapshot, string, string) error {
 	g.smsCalls++
 	return nil
 }

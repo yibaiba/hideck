@@ -22,7 +22,7 @@ func TestRescanReusedPathsDoNotInheritOldWorkerIMEI(t *testing.T) {
 		{ControlPath: "/dev/cdc-wdm0", USBPath: "/sys/usb/1-1", NetInterface: "wwan0"},
 		{ControlPath: "/dev/cdc-wdm1", USBPath: "/sys/usb/1-2", NetInterface: "wwan1"},
 	}
-	hardware := (&Pool{}).collectRescanHardware(discovered, BuildWorkerDiscoveryIndex([]*Worker{old}, false))
+	hardware, _ := (&Pool{}).collectRescanHardware(discovered, BuildWorkerDiscoveryIndex([]*Worker{old}, false), compatibleATDiscoveryNone)
 	if len(hardware) != 2 || hardware[0].IMEI != "222222222222222" || hardware[1].IMEI != "111111111111111" {
 		t.Fatalf("identities = %+v", hardware)
 	}

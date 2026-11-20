@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/yibaiba/hideck/internal/carrierquery"
+	"github.com/yibaiba/hideck/internal/modem"
 )
 
 type Service struct {
@@ -40,19 +41,24 @@ func (s *Service) StartQuery(ctx context.Context, deviceID string) (Query, error
 	if err := s.repo.CreatePending(ctx, query); err != nil {
 		return Query{}, err
 	}
-	if err := s.send(ctx, snapshot, rule, query.ID); err != nil {
-		_ = s.repo.MarkFailed(context.Background(), query.ID, err, s.now())
-		failed, _, _ := s.repo.Get(context.Background(), query.ID)
-		return failed, err
+	sendErr := s.send(ctx, snapshot, rule, query.ID)
+	// Submission may finish after the caller's deadline. Read the persisted
+	// result without losing a late acknowledgement or an early reply.
+	readbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	stored, _, err := s.repo.Get(readbackCtx, query.ID)
+	if sendErr == nil || (err == nil && stored.State == StateCompleted) {
+		return stored, err
 	}
-	stored, _, err := s.repo.Get(ctx, query.ID)
-	return stored, err
+	_ = s.repo.MarkFailed(readbackCtx, query.ID, sendErr, s.now())
+	failed, _, _ := s.repo.Get(readbackCtx, query.ID)
+	return failed, sendErr
 }
 
 func (s *Service) send(ctx context.Context, snapshot DeviceSnapshot, rule carrierquery.Rule, queryID string) error {
 	switch rule.Transport {
 	case carrierquery.TransportSMS:
-		if err := s.sendSMS(ctx, snapshot, rule); err != nil {
+		if err := s.sendSMS(ctx, snapshot, rule); err != nil && !errors.Is(err, modem.ErrSMSSubmitUnknown) {
 			return err
 		}
 		return s.repo.MarkAwaitingReply(context.Background(), queryID, s.now())
@@ -65,9 +71,9 @@ func (s *Service) send(ctx context.Context, snapshot DeviceSnapshot, rule carrie
 
 func (s *Service) sendSMS(ctx context.Context, snapshot DeviceSnapshot, rule carrierquery.Rule) error {
 	if snapshot.VoWiFiActive || snapshot.RouteSMSViaVoWiFi {
-		return s.gateway.SendVoWiFiSMS(ctx, snapshot.DeviceID, rule.Destination, rule.Payload)
+		return s.gateway.SendVoWiFiSMS(ctx, snapshot, rule.Destination, rule.Payload)
 	}
-	return s.gateway.SendBackendSMS(ctx, snapshot.DeviceID, rule.Destination, rule.Payload)
+	return s.gateway.SendBackendSMS(ctx, snapshot, rule.Destination, rule.Payload)
 }
 
 func (s *Service) sendUSSD(ctx context.Context, snapshot DeviceSnapshot, rule carrierquery.Rule, queryID string) error {

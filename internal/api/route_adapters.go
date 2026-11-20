@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -127,42 +128,58 @@ func (s *Server) useDeviceVoWiFiPatch(c businessContext) {
 	}
 
 	if *req.Enabled {
-		// 落库：置 vowifi_enabled=true。若带 mode/data_strategy 则一并落库。
-		mode := normalizePhoneMode(req.Mode)
-		if req.Mode == nil {
-			if w := s.pool.GetWorker(deviceID); w != nil {
-				mode = w.Config.PhoneMode
+		w := s.pool.GetWorker(deviceID)
+		var mode, strategy string
+		if _, _, err := s.patchCardPolicyForDeviceChecked(deviceID, func(p *db.CardPolicy) error {
+			db.NormalizeCardPolicy(p)
+			mode = p.PhoneMode
+			if req.Mode != nil {
+				mode = normalizePhoneMode(req.Mode)
 			}
-		}
-		if !s.allowModemVoiceModeChange(c, deviceID, mode) {
-			return
-		}
-		strategy := normalizeDataStrategy(req.DataStrategy)
-		forceVoLTE := false
-		if w := s.pool.GetWorker(deviceID); device.WorkerSoftwareIMSBlocked(w) && !device.IsModemVoiceMode(mode) {
-			mode = device.PhoneModeVoLTE
-			forceVoLTE = true
-		}
-		if device.PhoneModeCampsOnCell(mode) {
-			class, classifyErr := s.classifyLebaraUKForDevice(businessRequestContext(c), deviceID)
-			if rejectLebaraUKRFUnlock(c, class, classifyErr) {
-				return
+			softwareIMSBlocked := device.WorkerSoftwareIMSBlocked(w)
+			if softwareIMSBlocked && !device.IsModemVoiceMode(mode) {
+				mode = device.PhoneModeVoLTE
 			}
-		}
-		if _, _, err := s.patchCardPolicyForDevice(deviceID, func(p *db.CardPolicy) {
-			if req.Mode != nil || forceVoLTE {
+			var rfPolicyErr error
+			keepSavedMode := false
+			if device.PhoneModeCampsOnCell(mode) {
+				class, err := s.classifyLebaraUKForDevice(businessRequestContext(c), deviceID)
+				switch {
+				case err != nil:
+					rfPolicyErr = fmt.Errorf("识别 Lebara UK 射频策略失败: %w", err)
+				case class.IsLebara && req.Mode == nil && !softwareIMSBlocked:
+					// Lebara projects the saved mode to WiFi while its RF lock is active.
+					mode = device.PhoneModeWiFi
+					keepSavedMode = true
+				case class.IsLebara:
+					rfPolicyErr = device.ErrLebaraUKRFLocked
+				}
+			}
+			if err := s.checkModemVoiceModeChange(deviceID, mode); err != nil {
+				return err
+			}
+			if err := w.CheckPhoneModeSupported(mode); err != nil {
+				return err
+			}
+			if rfPolicyErr != nil {
+				return rfPolicyErr
+			}
+			strategy = p.DataStrategy
+			if req.DataStrategy != nil {
+				strategy = normalizeDataStrategy(req.DataStrategy)
+			}
+			if !keepSavedMode {
 				p.PhoneMode = mode
 			}
-			if req.DataStrategy != nil {
-				p.DataStrategy = strategy
-			}
-			applyVoWiFiEnableToCardPolicy(p)
+			p.DataStrategy = strategy
+			applyVoWiFiEnableToCardPolicy(p, mode)
+			return nil
 		}); err != nil {
 			writeCardPolicyMutationError(c, err)
 			return
 		}
 		// 同步 w.Config，使概览即时切到 VoWiFi 模式面板（EnableVoWiFi 不碰 Config）。
-		w := s.pool.GetWorker(deviceID)
+		w = s.pool.GetWorker(deviceID)
 		prevMode, prevStrategy := "", ""
 		if w != nil {
 			prevMode = w.Config.PhoneMode
@@ -173,12 +190,8 @@ func (s *Server) useDeviceVoWiFiPatch(c businessContext) {
 			if prevStrategy == "" {
 				prevStrategy = "on_demand"
 			}
-			if req.Mode != nil || forceVoLTE {
-				w.Config.PhoneMode = mode
-			}
-			if req.DataStrategy != nil {
-				w.Config.DataStrategy = strategy
-			}
+			w.Config.PhoneMode = mode
+			w.Config.DataStrategy = strategy
 		}
 		s.pool.SetWorkerVoWiFiPolicy(deviceID, true)
 		if w := s.pool.GetWorker(deviceID); w != nil && device.IsModemVoiceMode(w.Config.PhoneMode) {
@@ -221,8 +234,8 @@ func (s *Server) useDeviceVoWiFiPatch(c businessContext) {
 			})
 			return
 		}
-		modeChanged := req.Mode != nil && mode != prevMode
-		strategyChanged := req.DataStrategy != nil && strategy != prevStrategy
+		modeChanged := mode != prevMode
+		strategyChanged := strategy != prevStrategy
 		if s.pool.IsVoWiFiActive(deviceID) && (modeChanged || strategyChanged) {
 			if err := s.pool.RestartVoWiFi(deviceID); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
@@ -244,7 +257,8 @@ func (s *Server) useDeviceVoWiFiPatch(c businessContext) {
 	}
 
 	// 落库：仅清 vowifi_enabled=false，保留 airplane_enabled（用户飞行意图）。
-	if !s.allowModemVoiceModeChange(c, deviceID, "") {
+	if err := s.checkModemVoiceModeChange(deviceID, ""); err != nil {
+		writeCardPolicyMutationError(c, err)
 		return
 	}
 	// 关闭 VoWiFi 后 DisableVoWiFi 会按当前卡策略重投影：之前是飞行则回飞行，否则回在线。
@@ -295,19 +309,19 @@ func applyNetworkEnableToCardPolicy(p *db.CardPolicy) {
 }
 
 // applyVoWiFiEnableToCardPolicy 按通话方式联动射频和流量。
-func applyVoWiFiEnableToCardPolicy(p *db.CardPolicy) {
+func applyVoWiFiEnableToCardPolicy(p *db.CardPolicy, mode string) {
 	if p == nil {
 		return
 	}
 	p.VoWiFiEnabled = true
-	if p.PhoneMode == "cellular" {
+	if mode == device.PhoneModeCellular {
 		p.AirplaneEnabled = false
 		if p.DataStrategy == "always" {
 			p.NetworkEnabled = true
 		}
 		return
 	}
-	if p.PhoneMode == "volte" || p.PhoneMode == "modem_voice" {
+	if device.UsesModemPhoneControl(mode) {
 		p.AirplaneEnabled = false
 		return
 	}

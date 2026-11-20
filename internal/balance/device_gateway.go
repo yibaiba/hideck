@@ -40,24 +40,24 @@ func (g *PoolGateway) Snapshot(deviceID string) (DeviceSnapshot, error) {
 		RouteSMSViaVoWiFi: g.pool.ShouldRouteSMSViaVoWiFi(worker.ID)}, nil
 }
 
-func (g *PoolGateway) SendVoWiFiSMS(ctx context.Context, deviceID, destination, payload string) error {
+func (g *PoolGateway) SendVoWiFiSMS(ctx context.Context, snapshot DeviceSnapshot, destination, payload string) error {
 	if g == nil || g.pool == nil {
 		return ErrDeviceNotFound
 	}
-	worker := g.pool.GetWorker(deviceID)
+	worker := g.pool.GetWorker(snapshot.DeviceID)
 	if worker == nil {
 		return ErrDeviceNotFound
 	}
-	_, err := g.pool.SendRoutedSMS(ctx, worker, destination, payload, smscodec.SubmitOptions{})
+	_, err := g.pool.SendRoutedSMSForIdentity(ctx, worker, destination, payload, smscodec.SubmitOptions{}, device.SMSIdentity{ICCID: snapshot.ICCID})
 	return err
 }
 
-func (g *PoolGateway) SendBackendSMS(_ context.Context, deviceID, destination, payload string) error {
-	worker := g.pool.GetWorker(deviceID)
+func (g *PoolGateway) SendBackendSMS(ctx context.Context, snapshot DeviceSnapshot, destination, payload string) error {
+	worker := g.pool.GetWorker(snapshot.DeviceID)
 	if worker == nil {
 		return ErrDeviceNotFound
 	}
-	return worker.SendSMSWithOptions(destination, payload, smscodec.SubmitOptions{})
+	return worker.SendSMSForIdentity(ctx, destination, payload, smscodec.SubmitOptions{}, device.SMSIdentity{ICCID: snapshot.ICCID})
 }
 
 func (g *PoolGateway) SendVoWiFiUSSD(ctx context.Context, deviceID, code string) (USSDResponse, error) {

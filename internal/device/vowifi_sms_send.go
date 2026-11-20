@@ -9,6 +9,8 @@ import (
 
 	"github.com/iniwex5/vowifi-go/runtimehost"
 	"github.com/iniwex5/vowifi-go/runtimehost/messaging"
+	"github.com/yibaiba/hideck/internal/db"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/smscodec"
 )
 
@@ -19,12 +21,13 @@ const (
 )
 
 type routedSMSSendResult struct {
-	Via          string
-	Outcome      messaging.SendOutcome
-	FellBackToCS bool
-	Destination  string
-	Identity     SMSIdentity
-	IdentityRead bool
+	Via            string
+	Outcome        messaging.SendOutcome
+	FellBackToCS   bool
+	PartsConfirmed int
+	Destination    string
+	Identity       SMSIdentity
+	IdentityRead   bool
 }
 
 // ShouldFallbackVoWiFiSMSToCS reports whether IMS never accepted the MESSAGE.
@@ -55,6 +58,13 @@ func sendRoutedSMS(
 			return routedSMSSendResult{Via: RoutedSMSViaVoWiFi, Outcome: outcome}, err
 		}
 		if csErr := sendCS(); csErr != nil {
+			if errors.Is(csErr, ErrSMSSelectorMismatch) {
+				return routedSMSSendResult{Via: RoutedSMSViaVoWiFi, Outcome: outcome, FellBackToCS: true}, csErr
+			}
+			if result := csSMSResult(csErr); result.Outcome.DeliveryState != "" {
+				result.FellBackToCS = true
+				return result, csErr
+			}
 			return routedSMSSendResult{Via: RoutedSMSViaVoWiFi, Outcome: outcome, FellBackToCS: true}, err
 		}
 		return routedSMSSendResult{Via: RoutedSMSViaCS, Outcome: outcome, FellBackToCS: true}, nil
@@ -62,10 +72,24 @@ func sendRoutedSMS(
 	if sendCS == nil {
 		return routedSMSSendResult{Via: RoutedSMSViaCS}, errors.New("sms route: CS sender is unavailable")
 	}
-	if err := sendCS(); err != nil {
-		return routedSMSSendResult{Via: RoutedSMSViaCS}, err
+	err := sendCS()
+	return csSMSResult(err), err
+}
+
+func csSMSResult(err error) routedSMSSendResult {
+	result := routedSMSSendResult{Via: RoutedSMSViaCS}
+	var progress *modem.SMSSubmitError
+	if errors.As(err, &progress) {
+		result.Outcome.PartsTotal = progress.PartsTotal
+		result.PartsConfirmed = progress.PartsConfirmed
 	}
-	return routedSMSSendResult{Via: RoutedSMSViaCS}, nil
+	switch {
+	case errors.Is(err, modem.ErrSMSSubmitUnknown):
+		result.Outcome.DeliveryState = db.SMSDeliveryStateUnknown
+	case result.PartsConfirmed > 0:
+		result.Outcome.DeliveryState = db.SMSDeliveryStatePartialAck
+	}
+	return result
 }
 
 // SendRoutedSMS sends via VoWiFi when that path is selected, and falls back to
@@ -76,6 +100,17 @@ func (p *Pool) SendRoutedSMS(
 	phone, message string,
 	opts smscodec.SubmitOptions,
 ) (routedSMSSendResult, error) {
+	return p.SendRoutedSMSForIdentity(ctx, worker, phone, message, opts, SMSIdentity{})
+}
+
+// SendRoutedSMSForIdentity binds an explicit SIM selector to the selected worker through submission.
+func (p *Pool) SendRoutedSMSForIdentity(
+	ctx context.Context,
+	worker *Worker,
+	phone, message string,
+	opts smscodec.SubmitOptions,
+	selector SMSIdentity,
+) (routedSMSSendResult, error) {
 	if p == nil {
 		return routedSMSSendResult{}, errors.New("sms route: pool is nil")
 	}
@@ -84,15 +119,27 @@ func (p *Pool) SendRoutedSMS(
 	}
 	deviceID := worker.ID
 	destination := strings.TrimSpace(phone)
-	checkOwner := p.outboundOwnerCheck(worker)
-	identity, identityErr := p.ResolveSMSIdentity(deviceID)
-	if identityErr != nil {
-		return routedSMSSendResult{}, fmt.Errorf("sms route: resolve SIM identity: %w", identityErr)
+	explicitSelector := selector != (SMSIdentity{})
+	selector = normalizeSMSIdentity(selector)
+	checkOwner := p.smsSendOwnerCheck(worker, selector)
+	identity, err := p.ResolveSMSIdentity(deviceID)
+	if err != nil {
+		if explicitSelector && (errors.Is(err, ErrSMSIdentityUnknown) || errors.Is(err, ErrSMSIdentityConflict) || errors.Is(err, ErrSMSIdentityTransitioning)) {
+			return routedSMSSendResult{}, ErrSMSSelectorMismatch
+		}
+		return routedSMSSendResult{}, fmt.Errorf("sms route: resolve SIM identity: %w", err)
+	}
+	if explicitSelector && !selector.matches(identity) {
+		return routedSMSSendResult{}, ErrSMSSelectorMismatch
 	}
 	if err := checkOwner(); err != nil {
 		return routedSMSSendResult{Identity: identity, IdentityRead: true}, err
 	}
-	if err := p.authorizeSMS(ctx, outboundSMSRequest{Worker: worker, To: destination, Text: message, Options: opts}); err != nil {
+	request := outboundSMSRequest{Worker: worker, To: destination, Text: message, Options: opts}
+	if explicitSelector {
+		request.CheckOwner = checkOwner
+	}
+	if err := p.authorizeSMS(ctx, request); err != nil {
 		return routedSMSSendResult{Identity: identity, IdentityRead: true}, err
 	}
 	p.mu.RLock()
@@ -125,7 +172,10 @@ func (p *Pool) SendRoutedSMS(
 				return err
 			}
 			defer release()
-			if err := checkOwner(); err != nil {
+			if err := worker.confirmCSSMSIdentity(ctx, identity, checkOwner); err != nil {
+				if explicitSelector && errors.Is(err, ErrSMSIdentityConflict) {
+					return ErrSMSSelectorMismatch
+				}
 				return err
 			}
 			if sendCSHook != nil {

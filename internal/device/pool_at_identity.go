@@ -10,6 +10,7 @@ import (
 )
 
 var errATIdentityUnavailable = errors.New("at identity unavailable")
+var errATNoSIM = errors.New("AT modem has no SIM")
 
 var probeATIdentityFn = modem.ProbeATIdentity
 

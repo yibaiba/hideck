@@ -12,6 +12,7 @@ import (
 	"github.com/iniwex5/vowifi-go/runtimehost"
 	"github.com/iniwex5/vowifi-go/runtimehost/messaging"
 	"github.com/yibaiba/hideck/internal/config"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/smscodec"
 )
 
@@ -294,6 +295,22 @@ func TestSendRoutedSMSKeepsVoWiFiErrorWhenCSAlsoFails(t *testing.T) {
 	)
 	if !errors.Is(err, imsErr) || !result.FellBackToCS || result.Via != RoutedSMSViaVoWiFi {
 		t.Fatalf("dual failure result=%+v err=%v", result, err)
+	}
+}
+
+func TestSendRoutedSMSKeepsUnknownCSFallbackResult(t *testing.T) {
+	imsErr := errors.New("503")
+	csErr := fmt.Errorf("CS submit: %w", modem.ErrSMSSubmitUnknown)
+	calls := 0
+	result, err := sendRoutedSMS(true,
+		func() (messaging.SendOutcome, error) {
+			return messaging.SendOutcome{MessageID: "ims-1", RecommendCSFallback: true, DeliveryState: "failed"}, imsErr
+		},
+		func() error { calls++; return csErr },
+	)
+	if err != csErr || !result.FellBackToCS || result.Via != RoutedSMSViaCS ||
+		result.Outcome.DeliveryState != "unknown" || result.Outcome.MessageID != "" || calls != 1 {
+		t.Fatalf("fallback result=%+v err=%v CS calls=%d", result, err, calls)
 	}
 }
 

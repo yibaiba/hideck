@@ -1,20 +1,20 @@
 package api
 
 import (
-	"net/http"
+	"errors"
 
-	"github.com/gin-gonic/gin"
 	"github.com/yibaiba/hideck/internal/device"
 )
 
-func (s *Server) allowModemVoiceModeChange(c businessContext, id, nextMode string) bool {
+var errModemVoiceCallActive = errors.New("请先挂断模组直拨通话，再切换或关闭电话服务")
+
+func (s *Server) checkModemVoiceModeChange(id, nextMode string) error {
 	if s.pool == nil || s.pool.ModemVoiceController() == nil {
-		return true
+		return nil
 	}
 	controller := s.pool.ModemVoiceController()
 	if controller.ActiveCall(id) == nil || nextMode == device.PhoneModeModemVoice {
-		return true
+		return nil
 	}
-	c.JSON(http.StatusConflict, gin.H{"status": "error", "message": "请先挂断模组直拨通话，再切换或关闭电话服务"})
-	return false
+	return errModemVoiceCallActive
 }

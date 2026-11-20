@@ -10,23 +10,28 @@ import (
 
 	"github.com/yibaiba/hideck/internal/carrierquery"
 	appdb "github.com/yibaiba/hideck/internal/db"
+	"github.com/yibaiba/hideck/internal/modem"
 )
 
 type fakeGateway struct {
 	snapshot              DeviceSnapshot
 	sendErr               error
+	onBackendSMS          func()
 	wifiSMS, backendSMS   int
 	wifiUSSD, backendUSSD int
 	ussdResponse          USSDResponse
 }
 
 func (g *fakeGateway) Snapshot(string) (DeviceSnapshot, error) { return g.snapshot, nil }
-func (g *fakeGateway) SendVoWiFiSMS(context.Context, string, string, string) error {
+func (g *fakeGateway) SendVoWiFiSMS(context.Context, DeviceSnapshot, string, string) error {
 	g.wifiSMS++
 	return g.sendErr
 }
-func (g *fakeGateway) SendBackendSMS(context.Context, string, string, string) error {
+func (g *fakeGateway) SendBackendSMS(context.Context, DeviceSnapshot, string, string) error {
 	g.backendSMS++
+	if g.onBackendSMS != nil {
+		g.onBackendSMS()
+	}
 	return g.sendErr
 }
 func (g *fakeGateway) SendVoWiFiUSSD(context.Context, string, string) (USSDResponse, error) {
@@ -114,6 +119,36 @@ func TestStartQueryFailureIsPersistedWithoutRetry(t *testing.T) {
 	}
 	if gateway.backendSMS != 1 || gateway.wifiSMS != 0 {
 		t.Fatalf("SMS calls wifi/backend = %d/%d", gateway.wifiSMS, gateway.backendSMS)
+	}
+}
+
+func TestSMSQueryWithUnknownSubmissionCanReceiveReply(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	gateway := &fakeGateway{
+		snapshot: DeviceSnapshot{DeviceID: "wwan0", ICCID: "iccid-1", MCC: "234", MNC: "10"},
+		sendErr:  modem.ErrSMSSubmitUnknown,
+	}
+	service, store := newTestService(t, gateway, smsTestRule(), now)
+	request, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gateway.onBackendSMS = cancel
+	query, err := service.StartQuery(request, "wwan0")
+	if err != nil || query.State != StateAwaitingReply {
+		t.Fatalf("StartQuery() = %+v, %v", query, err)
+	}
+	ctx := context.Background()
+	if _, err := service.StartQuery(ctx, "wwan0"); !errors.Is(err, ErrPendingQuery) || gateway.backendSMS != 1 {
+		t.Fatalf("pending query retried SMS: calls=%d err=%v", gateway.backendSMS, err)
+	}
+	matched, err := service.HandleInboundSMS(ctx, InboundSMS{
+		ICCID: "iccid-1", Sender: "giffgaff", Content: "credit 5.00", Time: now.Add(time.Second),
+	})
+	if err != nil || !matched {
+		t.Fatalf("HandleInboundSMS() = %t, %v", matched, err)
+	}
+	stored, _, err := store.Get(ctx, query.ID)
+	if err != nil || stored.State != StateCompleted || stored.Amount != "5.00" {
+		t.Fatalf("stored query = %+v, %v", stored, err)
 	}
 }
 

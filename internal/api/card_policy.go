@@ -20,7 +20,6 @@ const cardPolicySavedMWIClearFailedCode = "card_policy_saved_mwi_clear_failed"
 
 type cardPolicyStore interface {
 	Get(string) (db.CardPolicy, error)
-	Resolve(string) (db.CardPolicy, error)
 	Upsert(db.CardPolicy) error
 	ClearMWIRejections(string) (bool, error)
 }
@@ -37,10 +36,6 @@ type databaseCardPolicyStore struct{}
 
 func (databaseCardPolicyStore) Get(iccid string) (db.CardPolicy, error) {
 	return db.GetCardPolicy(iccid)
-}
-
-func (databaseCardPolicyStore) Resolve(iccid string) (db.CardPolicy, error) {
-	return db.ResolveCardPolicy(iccid)
 }
 
 func (databaseCardPolicyStore) Upsert(policy db.CardPolicy) error {
@@ -61,6 +56,13 @@ func (s *Server) cardPolicyStore() cardPolicyStore {
 // patchCardPolicyForDevice 解析设备当前 ICCID，对 card_policies 行执行原地修改并落库。
 // mutate 在 resolve 后的副本上改字段（source 会被强制为 "user"）。
 func (s *Server) patchCardPolicyForDevice(deviceID string, mutate func(*db.CardPolicy)) (iccid string, applied bool, err error) {
+	return s.patchCardPolicyForDeviceChecked(deviceID, func(p *db.CardPolicy) error {
+		mutate(p)
+		return nil
+	})
+}
+
+func (s *Server) patchCardPolicyForDeviceChecked(deviceID string, mutate func(*db.CardPolicy) error) (iccid string, applied bool, err error) {
 	worker := s.pool.GetWorker(deviceID)
 	if worker == nil {
 		return "", false, fmt.Errorf("设备未找到")
@@ -69,11 +71,16 @@ func (s *Server) patchCardPolicyForDevice(deviceID string, mutate func(*db.CardP
 	if iccid == "" {
 		return "", false, errCardPolicyIdentityUnavailable
 	}
-	p, err := s.cardPolicyStore().Resolve(iccid)
-	if err != nil {
+	p, err := s.cardPolicyStore().Get(iccid)
+	if errors.Is(err, db.ErrCardPolicyNotFound) {
+		// Keep the default in memory until the mutation has been validated.
+		p = db.DefaultCardPolicy(iccid)
+	} else if err != nil {
 		return iccid, false, fmt.Errorf("获取卡策略失败: %w", err)
 	}
-	mutate(&p)
+	if err := mutate(&p); err != nil {
+		return iccid, false, err
+	}
 	p.Source = "user"
 	db.NormalizeCardPolicy(&p)
 	if err := s.cardPolicyStore().Upsert(p); err != nil {
@@ -357,9 +364,16 @@ func normalizeCardPolicyIPVersion(value string) (string, error) {
 }
 
 func writeCardPolicyMutationError(c businessContext, err error) {
+	if writeLebaraUKRFLockError(c, err) {
+		return
+	}
 	status := http.StatusInternalServerError
-	if errors.Is(err, errCardPolicyIdentityUnavailable) {
+	var unsupportedMode *device.PhoneModeUnsupportedError
+	switch {
+	case errors.Is(err, errCardPolicyIdentityUnavailable), errors.Is(err, errModemVoiceCallActive):
 		status = http.StatusConflict
+	case errors.As(err, &unsupportedMode):
+		status = http.StatusUnprocessableEntity
 	}
 	c.JSON(status, gin.H{"status": "error", "message": err.Error()})
 }

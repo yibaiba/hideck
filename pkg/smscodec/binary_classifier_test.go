@@ -60,6 +60,15 @@ func TestClassifyBinarySMS_OmaCPByPort(t *testing.T) {
 	}
 }
 
+func TestClassifyBinarySMS_ExplicitOMATypeBeatsMMSHint(t *testing.T) {
+	ct := "application/vnd.wap.connectivity-wbxml\x00"
+	msg := append([]byte{0x21, 0x06, byte(len(ct))}, []byte(ct)...)
+	msg = append(msg, 0x8C, 0x82)
+	if kind := classifyBinarySMS(&tpdu.TPDU{}, msg).Kind; kind != binaryKindOmaCP {
+		t.Fatalf("explicit OMA content type classified as %s", kind)
+	}
+}
+
 func TestClassifyBinarySMS_WAPSI(t *testing.T) {
 	// WSP header 使用文本 content-type，避免依赖 token 映射。
 	ct := "application/vnd.wap.sic\x00"
@@ -88,7 +97,10 @@ func TestClassifyBinarySMS_MMSNotification(t *testing.T) {
 	msg := append([]byte{0x31, 0x06, byte(len(ct))}, []byte(ct)...)
 	msg = append(msg, body...)
 
-	c := classifyBinarySMS(&tpdu.TPDU{}, msg)
+	tp := &tpdu.TPDU{UDH: tpdu.UserDataHeader{
+		{ID: 0x05, Data: []byte{0x0B, 0x84, 0x23, 0xF0}},
+	}}
+	c := classifyBinarySMS(tp, msg)
 	if c.Kind != binaryKindMMSNotification {
 		t.Fatalf("应识别为 MMS Notification，实际: %s", c.Kind)
 	}

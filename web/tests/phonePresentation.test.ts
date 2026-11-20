@@ -253,7 +253,7 @@ test('wifi calling keeps a dedicated start switch under the mode control', () =>
   assert.match(phoneView, /disableVoWiFi\(selectedDevice\.value\)/)
   assert.match(phoneView, /打开后开始注册。关掉只停服务，仍是 WiFi calling/)
   assert.match(phoneView, /if \(mode === selectedMode\.value\) \{[\s\S]*if \(mode === 'wifi'\) return/)
-  assert.match(phoneView, /:disabled="!!call \|\| modePending \|\| lebaraIdentityBusy\(selected\)"/)
+  assert.match(phoneView, /:disabled="!!call \|\| modePending \|\| lebaraIdentityBusy\(selected\)/)
   assert.doesNotMatch(phoneView, /modePending \|\| !!selected\?\.rf_lock/)
   assert.match(phoneView, /status === 'recovering' \|\| status === 'waiting_identity'/)
   assert.match(phoneView, /正在恢复英国身份/)

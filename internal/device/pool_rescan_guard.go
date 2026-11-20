@@ -87,7 +87,9 @@ func (p *Pool) reconcileHealthyRescanWorker(
 		})
 		return
 	}
-	if hw.ATPort == "" || hw.ATPort == worker.Config.ATPort || !opts.allowWorkerMutation(pair.Config.ID) {
+	usbChanged := atDeviceRulesFor(hw.ATProfile()).verifyLiveIMEI && hw.USBPath != "" && hw.USBPath != worker.Config.USBPath
+	portChanged := hw.ATPort != "" && hw.ATPort != worker.Config.ATPort
+	if (!usbChanged && !portChanged) || !opts.allowWorkerMutation(pair.Config.ID) {
 		return
 	}
 	logger.Info("检测到设备端口变化，重建 Worker",
@@ -107,6 +109,9 @@ func rescanWorkerConfig(cfg config.DeviceConfig, hw CompatibleModem) config.Devi
 	}
 	if hw.NetInterface != "" {
 		cfg.Interface = hw.NetInterface
+	}
+	if hw.USBPath != "" {
+		cfg.USBPath = hw.USBPath
 	}
 	cfg.ControlDevice = strings.TrimSpace(hw.ControlPath)
 	cfg.QMIDevice = strings.TrimSpace(hw.ControlPath)
@@ -206,6 +211,7 @@ func (p *Pool) reconcileOfflineRescanDevice(
 	opts rescanReconnectOptions,
 	snapshot config.DeviceConfig,
 	hardware []CompatibleModem,
+	atObservations []atScanObservation,
 	fallback []config.DeviceConfig,
 ) {
 	releaseMutation := p.AcquireManagedDeviceMutation(snapshot.ID)
@@ -223,9 +229,21 @@ func (p *Pool) reconcileOfflineRescanDevice(
 	if worker == nil {
 		return
 	}
+	healthy := worker.IsDeviceHealthy()
+	if healthy && worker.atDeviceRules().verifyLiveIMEI && config.IMEIMatches(worker.Config.ModemIMEI, current.ModemIMEI) {
+		usb := strings.TrimSpace(worker.Config.USBPath)
+		port := worker.ResolvedATPort()
+		for _, candidate := range atObservations {
+			if candidate.unreadableOwner == worker && usb != "" && candidate.usbPath == usb &&
+				containsPort(candidate.atPorts, port) {
+				// Keep the existing owner until the next scan can verify its IMEI.
+				return
+			}
+		}
+	}
 	logger.Info("检测到设备离线，清理 Worker 以便后续重建",
 		"device", current.ID, "imei", current.ModemIMEI,
-		"was_healthy", worker.IsDeviceHealthy())
+		"was_healthy", healthy)
 	p.teardownVoWiFiForReconnect(current.ID)
 	if p.lifecycle != nil {
 		p.lifecycle.BeginRecovery(current.ID, LifecyclePhaseUSBWait, "rescan_device_missing", qmiLifecycleRecoveryTTL)

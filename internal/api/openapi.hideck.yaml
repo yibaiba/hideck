@@ -446,6 +446,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SMSSendResponse'
+        '202':
+          description: 短信提交结果未知或仅确认了部分分段，请勿重发整条
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SMSSendResponse'
         '400':
           $ref: '#/components/responses/ErrorMessage'
         '404':
@@ -4001,6 +4007,12 @@ components:
         phone_region:
           type: string
           description: SIM 归属国家或地区的 ISO 3166-1 alpha-2 代码
+        native_voice_unavailable_reason:
+          type: string
+          description: 设备不支持模组原生语音模式时返回的原因
+        cellular_ims_unavailable_reason:
+          type: string
+          description: 设备无法通过模组蜂窝数据使用软件 IMS 的原因
         voice:
           type: object
           additionalProperties: true
@@ -5205,9 +5217,12 @@ components:
           type: string
         parts_total:
           type: integer
+        parts_confirmed:
+          type: integer
+          description: 202 响应中模组已确认提交的分段数量
         delivery_state:
           type: string
-          description: 通道发送状态；acked 仅表示发送端已受理，不保证收件手机已收到
+          description: acked 表示发送端已受理；202 响应中的 unknown 表示结果未知，partial_ack 表示仅部分分段获确认
 
     SMSDeliveryResponse:
       type: object

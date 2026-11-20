@@ -330,8 +330,8 @@ func TestConfiguredDevicesNeedCompatibleATDiscoverySkipsPureQMI(t *testing.T) {
 		},
 	}
 
-	if configuredDevicesNeedCompatibleATDiscovery(devices) {
-		t.Fatal("configuredDevicesNeedCompatibleATDiscovery() = true for pure QMI config, want false")
+	if scope := configuredDevicesATDiscovery(devices); scope != compatibleATDiscoveryNone {
+		t.Fatalf("configuredDevicesATDiscovery() = %v for pure QMI config, want none", scope)
 	}
 }
 
@@ -344,8 +344,8 @@ func TestConfiguredDevicesNeedCompatibleATDiscoveryForATMissingPort(t *testing.T
 		},
 	}
 
-	if !configuredDevicesNeedCompatibleATDiscovery(devices) {
-		t.Fatal("configuredDevicesNeedCompatibleATDiscovery() = false for AT config missing port, want true")
+	if scope := configuredDevicesATDiscovery(devices); scope != compatibleATDiscoveryAll {
+		t.Fatalf("configuredDevicesATDiscovery() = %v for AT config missing port, want all", scope)
 	}
 }
 

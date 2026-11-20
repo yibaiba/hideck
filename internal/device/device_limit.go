@@ -7,7 +7,7 @@ import (
 	"github.com/yibaiba/hideck/internal/config"
 )
 
-const DefaultFreeDeviceLimit = 5
+const DefaultFreeDeviceLimit = 10
 
 func FreeDeviceLimitReached(count int) bool {
 	return count >= DefaultFreeDeviceLimit

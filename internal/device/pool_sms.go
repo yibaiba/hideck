@@ -401,6 +401,11 @@ func (w *Worker) SendSMS(phone, message string) error {
 }
 
 func (w *Worker) SendSMSWithOptions(phone, message string, opts smscodec.SubmitOptions) error {
+	return w.SendSMSForIdentity(context.Background(), phone, message, opts, SMSIdentity{})
+}
+
+// SendSMSForIdentity binds a SIM selector to a direct backend send.
+func (w *Worker) SendSMSForIdentity(ctx context.Context, phone, message string, opts smscodec.SubmitOptions, selector SMSIdentity) error {
 	if w == nil || w.Pool == nil {
 		return errors.New("短信发送需要有效的设备池")
 	}
@@ -409,11 +414,35 @@ func (w *Worker) SendSMSWithOptions(phone, message string, opts smscodec.SubmitO
 		return err
 	}
 	defer release()
-	check := w.Pool.outboundOwnerCheck(w)
-	if err := w.Pool.authorizeSMS(context.Background(), outboundSMSRequest{Worker: w, To: phone, Text: message, Options: opts}); err != nil {
+	explicitSelector := selector != (SMSIdentity{})
+	selector = normalizeSMSIdentity(selector)
+	check := w.Pool.smsSendOwnerCheck(w, selector)
+	request := outboundSMSRequest{Worker: w, To: phone, Text: message, Options: opts}
+	var intended SMSIdentity
+	if w.atDeviceRules().strictSIMIdentity {
+		intended, err = w.strictSMSSendIdentity()
+		if err != nil {
+			return err
+		}
+	} else if explicitSelector {
+		intended = w.cachedSMSIdentity()
+	}
+	if explicitSelector {
+		if !selector.matches(intended) {
+			return ErrSMSSelectorMismatch
+		}
+		if err := check(); err != nil {
+			return err
+		}
+		request.CheckOwner = check
+	}
+	if err := w.Pool.authorizeSMS(ctx, request); err != nil {
 		return err
 	}
-	if err := check(); err != nil {
+	if err := w.confirmCSSMSIdentity(ctx, intended, check); err != nil {
+		if explicitSelector && errors.Is(err, ErrSMSIdentityConflict) {
+			return ErrSMSSelectorMismatch
+		}
 		return err
 	}
 	return w.sendSMSWithOptions(phone, message, opts)

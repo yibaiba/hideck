@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/yibaiba/hideck/internal/modem"
 	qmicore "github.com/yibaiba/hideck/internal/qmi"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
@@ -29,6 +30,17 @@ type CompatibleModem struct {
 	Mode           string
 	TransportType  string
 	NetworkCapable bool
+}
+
+func (m CompatibleModem) ATProfile() modem.ATProfile {
+	return (usbDeviceIdentity{vendorID: m.VendorID, productID: m.ProductID}).atProfile()
+}
+
+func (id usbDeviceIdentity) atProfile() modem.ATProfile {
+	if layout, ok := id.atOnlyLayout(); ok {
+		return layout.profile
+	}
+	return modem.ATProfileDefault
 }
 
 var discoverFallbackModemsFn = discoverFallbackModems
@@ -144,10 +156,18 @@ func compatibleModemFromQMIStaticDevice(d QMIDevice) CompatibleModem {
 
 func discoverFallbackOne(usbPath string) (CompatibleModem, bool) {
 	scanUSBPath := resolveUSBPathForScan(usbPath)
-
-	vid := readHexFile16(filepath.Join(scanUSBPath, "idVendor"))
-	pid := readHexFile16(filepath.Join(scanUSBPath, "idProduct"))
-	identity := usbDeviceIdentity{vendorID: vid, productID: pid}
+	identity := readUSBDeviceIdentity(scanUSBPath)
+	vid, pid := identity.vendorID, identity.productID
+	if _, ok := identity.atOnlyLayout(); ok {
+		ports, port, _ := discoverATPortsForUSBDevice(scanUSBPath, identity, "at")
+		if port == "" {
+			return CompatibleModem{}, false
+		}
+		return CompatibleModem{
+			USBPath: usbPath, VendorID: vid, ProductID: pid,
+			ATPorts: ports, ATPort: port, Mode: "at", TransportType: "at",
+		}, true
+	}
 	if capability, ok := detectQMIUSBCapability(scanUSBPath); ok {
 		mode := classifyMode(capability.ControlPath, capability.DriverName)
 		atPorts, atPort, imei := discoverATPortsForUSBDevice(scanUSBPath, identity, mode)
@@ -187,7 +207,7 @@ func discoverFallbackOne(usbPath string) (CompatibleModem, bool) {
 		}, true
 	}
 
-	if vid != 0x2c7c && vid != 0x05c6 {
+	if vid != quectelVendorID && vid != qualcommVendorID {
 		return CompatibleModem{}, false
 	}
 
@@ -279,6 +299,13 @@ func resolveUSBPathForScan(usbPath string) string {
 		return p
 	}
 	return resolved
+}
+
+func readUSBDeviceIdentity(usbPath string) usbDeviceIdentity {
+	return usbDeviceIdentity{
+		vendorID:  readHexFile16(filepath.Join(usbPath, "idVendor")),
+		productID: readHexFile16(filepath.Join(usbPath, "idProduct")),
+	}
 }
 
 func readHexFile16(path string) uint16 {

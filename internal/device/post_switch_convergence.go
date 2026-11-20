@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -54,6 +55,13 @@ type postSwitchReadinessProvider interface {
 
 type postSwitchSIMReloader interface {
 	UIMPostSwitchReload(ctx context.Context, readiness qmimanager.UIMReadiness, opts qmimanager.UIMPostSwitchReloadOptions) (uint8, error)
+}
+
+// This capability is used only for eSIM recovery, apart from regular radio readiness.
+type postSwitchOfflineSIMReloader interface {
+	SupportsOfflineSIMReload() bool
+	GetICCIDLive(context.Context) (string, error)
+	ReloadSIMOffline(context.Context) error
 }
 
 type postSwitchSIMPowerController interface {
@@ -311,12 +319,58 @@ func effectivePostSwitchReinitWindow(cfg config.ESIMSwitchConfig) time.Duration 
 	return 5 * time.Second
 }
 
+func (p *Pool) convergePostSwitchOfflineSIM(deviceID string, token uint64, worker *Worker,
+	snapshot esimSwitchContext, reloader postSwitchOfflineSIMReloader,
+) postSwitchConvergenceResult {
+	releaseOperation, err := p.AcquireDeviceOperation(deviceID)
+	if err != nil {
+		return postSwitchConvergenceResult{Degraded: true, Reason: err.Error()}
+	}
+	defer releaseOperation()
+
+	transition := p.policyTransitionFor(deviceID)
+	transition.Lock()
+	defer transition.Unlock()
+	if !p.switchTokenStillCurrent(deviceID, token, "offline_sim_reload") || !p.esimSwitchOwnerCurrent(deviceID, worker, snapshot) {
+		return postSwitchConvergenceResult{Degraded: true, Reason: "switch_superseded"}
+	}
+
+	ctx, cancel := context.WithTimeout(p.Context(), 5*time.Second)
+	defer cancel()
+	releaseAT, err := p.acquireDeviceAT(ctx, deviceID)
+	if err != nil {
+		return postSwitchConvergenceResult{Degraded: true, Reason: err.Error()}
+	}
+	defer releaseAT()
+
+	iccid, err := reloader.GetICCIDLive(ctx)
+	if err != nil {
+		return postSwitchConvergenceResult{Degraded: true, Reason: err.Error()}
+	}
+	current := normalizeSIMIdentityForCompare(iccid)
+	if current == normalizeSIMIdentityForCompare(snapshot.TargetICCID) {
+		return postSwitchConvergenceResult{Ready: true, Reason: "target_iccid_already_active"}
+	}
+	if current == "" || current != normalizeSIMIdentityForCompare(snapshot.ICCIDBefore) {
+		return postSwitchConvergenceResult{Degraded: true, Reason: "unexpected_iccid_before_reload"}
+	}
+	if err := reloader.ReloadSIMOffline(ctx); err != nil {
+		return postSwitchConvergenceResult{Degraded: true, Reason: fmt.Sprintf("offline SIM reload: %v", err)}
+	}
+	// The common identity refresh still waits for the target ICCID and IMSI.
+	return postSwitchConvergenceResult{Ready: true, Reason: "offline_sim_reloaded"}
+}
+
 func (p *Pool) runPostSwitchConvergence(deviceID string, token uint64, worker *Worker, snapshot esimSwitchContext) postSwitchConvergenceResult {
 	if worker == nil || worker.Backend == nil {
 		return postSwitchConvergenceResult{Degraded: true, Reason: "worker_or_backend_missing"}
 	}
 	if resolvedBackendMode(worker.Config) == backend.BackendPCSC {
 		return postSwitchConvergenceResult{Ready: true, Reason: "pcsc_card_reset_complete"}
+	}
+	if reloader, ok := worker.Backend.(postSwitchOfflineSIMReloader); ok && reloader.SupportsOfflineSIMReload() &&
+		snapshot.FlightModeBefore && !worker.Config.ESIMSwitch.RadioCycle && normalizeSIMIdentityForCompare(snapshot.TargetICCID) != "" {
+		return p.convergePostSwitchOfflineSIM(deviceID, token, worker, snapshot, reloader)
 	}
 	readiness, ok := worker.Backend.(postSwitchReadinessProvider)
 	if !ok {

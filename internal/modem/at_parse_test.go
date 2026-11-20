@@ -214,3 +214,33 @@ func TestParseCOPSOperator(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCCHO(t *testing.T) {
+	tests := []struct {
+		name    string
+		resp    string
+		profile ATProfile
+		channel int
+	}{
+		{name: "prefixed", resp: "\r\n+CCHO: 2\r\nOK\r\n", channel: 2},
+		{name: "default rejects bare channel", resp: "2\r\nOK", channel: -1},
+		{name: "ML307C prefixed", resp: "+CCHO: 2\r\nOK", profile: ATProfileML307C, channel: 2},
+		{name: "ML307C bare", profile: ATProfileML307C, resp: "\r\n2\r\nOK\r\n", channel: 2},
+		{name: "terminal stripped", profile: ATProfileML307C, resp: "2", channel: 2},
+		{name: "only OK", profile: ATProfileML307C, resp: "OK", channel: -1},
+		{name: "bare followed by ERROR", profile: ATProfileML307C, resp: "2\nERROR", channel: -1},
+		{name: "command rejected", profile: ATProfileML307C, resp: "+CME ERROR: 3", channel: -1},
+		{name: "multiple numbers", profile: ATProfileML307C, resp: "2\n3\nOK", channel: -1},
+		{name: "number with suffix", profile: ATProfileML307C, resp: "2,3\nOK", channel: -1},
+		{name: "basic channel", profile: ATProfileML307C, resp: "0\nOK", channel: -1},
+		{name: "out of range", profile: ATProfileML307C, resp: "258\nOK", channel: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channel, ok := tt.profile.dialect().parseCCHO(tt.resp)
+			if channel != tt.channel || ok != (tt.channel > 0) {
+				t.Fatalf("parseCCHO(%q) = (%d, %t), want (%d, %t)", tt.resp, channel, ok, tt.channel, tt.channel > 0)
+			}
+		})
+	}
+}

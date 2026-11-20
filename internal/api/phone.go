@@ -109,6 +109,12 @@ func (s *Server) usePhoneDevices(c businessContext) {
 				"software_ims_blocked": device.WorkerSoftwareIMSBlocked(worker),
 				"rf_lock":              class.RFLock(),
 			}
+			if err := worker.CheckPhoneModeSupported(device.PhoneModeVoLTE); err != nil {
+				item["native_voice_unavailable_reason"] = err.Error()
+			}
+			if reason := worker.CellularIMSUnavailableReason(); reason != "" {
+				item["cellular_ims_unavailable_reason"] = reason
+			}
 			if region := s.phoneNumberRegion(worker.ID); region != "" {
 				item["phone_region"] = region
 				if code := phonenumbers.GetCountryCodeForRegion(region); code != 0 {

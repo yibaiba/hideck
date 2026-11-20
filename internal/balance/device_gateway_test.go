@@ -25,7 +25,7 @@ func TestPoolGatewaySendVoWiFiSMSFallsBackToCSWithoutDoubleSend(t *testing.T) {
 		},
 		func(string, string, string) error { csCalls++; return nil },
 	)
-	if err := NewPoolGateway(pool).SendVoWiFiSMS(context.Background(), "wwan0", "85075", "INFO"); err != nil {
+	if err := NewPoolGateway(pool).SendVoWiFiSMS(context.Background(), DeviceSnapshot{DeviceID: "wwan0", ICCID: "8944100000000000001"}, "85075", "INFO"); err != nil {
 		t.Fatalf("SendVoWiFiSMS() = %v", err)
 	}
 	if vowifiCalls != 1 || csCalls != 1 {
@@ -46,11 +46,24 @@ func TestPoolGatewaySendVoWiFiSMSDoesNotFallbackAfterIMSAccept(t *testing.T) {
 		},
 		func(string, string, string) error { csCalls++; return nil },
 	)
-	if err := NewPoolGateway(pool).SendVoWiFiSMS(context.Background(), "wwan0", "85075", "INFO"); err == nil ||
+	if err := NewPoolGateway(pool).SendVoWiFiSMS(context.Background(), DeviceSnapshot{DeviceID: "wwan0", ICCID: "8944100000000000001"}, "85075", "INFO"); err == nil ||
 		!strings.Contains(err.Error(), "403") {
 		t.Fatalf("expected IMS 403 to stay on VoWiFi, got %v", err)
 	}
 	if vowifiCalls != 1 || csCalls != 0 {
 		t.Fatalf("calls vowifi=%d cs=%d", vowifiCalls, csCalls)
+	}
+}
+
+func TestPoolGatewayRejectsSMSAfterCardChanges(t *testing.T) {
+	pool := device.NewPool(&config.Config{})
+	worker := &device.Worker{ID: "wwan0", Pool: pool}
+	pool.AttachWorkerWithSMSIdentityForTest(worker, device.SMSIdentity{ICCID: "8944100000000000002", IMSI: "234150000000002"})
+	gateway := NewPoolGateway(pool)
+	stale := DeviceSnapshot{DeviceID: "wwan0", ICCID: "8944100000000000001"}
+	for _, send := range []func(context.Context, DeviceSnapshot, string, string) error{gateway.SendVoWiFiSMS, gateway.SendBackendSMS} {
+		if err := send(context.Background(), stale, "85075", "INFO"); !errors.Is(err, device.ErrSMSSelectorMismatch) {
+			t.Fatalf("send with stale ICCID = %v", err)
+		}
 	}
 }
