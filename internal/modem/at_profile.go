@@ -50,6 +50,7 @@ type atDialect struct {
 	simStatus          string
 	cpinPresence       *atCPINPresenceQuery
 	parseCCHO          func(string) (int, bool)
+	offlineSIMReload   bool
 	voiceInit          []string
 	ownedSMSSubmit     *atOwnedSMSSubmit
 }
@@ -83,6 +84,7 @@ var ml307cATDialect = atDialect{
 	radio:              atRadioQuery{"AT+COPS?", parseCOPSRadio},
 	cpinPresence:       &atCPINPresenceQuery{parse: parseML307CCPIN, isAbsentError: isML307CNoSIMError},
 	parseCCHO:          parseML307CCCHO,
+	offlineSIMReload:   true,
 	ownedSMSSubmit:     &atOwnedSMSSubmit{promptTimeout: ml307cSMSPromptTimeout, finalTimeout: ml307cSMSResultTimeout},
 }
 
@@ -91,6 +93,11 @@ func (profile ATProfile) dialect() *atDialect {
 		return &ml307cATDialect
 	}
 	return &defaultATDialect
+}
+
+// SupportsOfflineSIMReload reports whether the SIM can reload without enabling RF.
+func (profile ATProfile) SupportsOfflineSIMReload() bool {
+	return profile.dialect().offlineSIMReload
 }
 
 func parseML307CIMEI(resp string) string {
