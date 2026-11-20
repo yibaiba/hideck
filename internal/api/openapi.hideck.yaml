@@ -4007,6 +4007,9 @@ components:
         phone_region:
           type: string
           description: SIM 归属国家或地区的 ISO 3166-1 alpha-2 代码
+        native_voice_unavailable_reason:
+          type: string
+          description: 设备不支持模组原生语音模式时返回的原因
         cellular_ims_unavailable_reason:
           type: string
           description: 设备无法通过模组蜂窝数据使用软件 IMS 的原因
