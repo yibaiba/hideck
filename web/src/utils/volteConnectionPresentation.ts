@@ -38,18 +38,21 @@ export function volteServiceState(enabled: boolean, status?: NativeVoLTEStatus):
       detail: '打开卡策略里的电话后，模组会注册原生 IMS'
     })
   }
-  if (status?.reboot_required) {
-    return Object.freeze({
-      tone: 'is-pending',
-      title: 'VoLTE 需重启模组',
-      detail: status.last_error || 'USB/UAC 变更后需要重启模组'
-    })
-  }
+  // A failed pass can still carry a stale reboot_required flag (provisioning
+  // writes UAC before verifying), and showing "restart the modem" would hide
+  // the actual error the operator needs to read.
   if (status?.phase === 'failed') {
     return Object.freeze({
       tone: 'is-failed',
       title: 'VoLTE 失败',
       detail: status.last_error || '请检查模组 IMS 注册'
+    })
+  }
+  if (status?.reboot_required) {
+    return Object.freeze({
+      tone: 'is-pending',
+      title: 'VoLTE 需重启模组',
+      detail: status.last_error || 'USB/UAC 变更后需要重启模组'
     })
   }
   if (volteRegistered(status)) {

@@ -46,14 +46,26 @@ func (c *Controller) applyOtherCall(d *device, change modemvoice.Change) {
 	previousState := other.snapshot.State
 	held := change.Call.Call.State == modemvoice.Held
 	other.snapshot.Held = held
-	if change.Call.Call.State == modemvoice.Active || held {
+	switch change.Call.Call.State {
+	case modemvoice.Active, modemvoice.Held:
 		other.snapshot.State = "connected"
+	case modemvoice.Waiting:
+		other.snapshot.State = "waiting"
+	case modemvoice.Incoming:
+		// A call waiting offer the network withdrew and alerts again is
+		// answerable, not held: reporting it as "waiting" would keep the
+		// browser on a recovery panel that can restore audio but never
+		// answer the call.
+		other.snapshot.State = "ringing"
 	}
 	snapshot := other.snapshot
 	d.mu.Unlock()
 	kind := "CallMediaUpdated"
-	if previousState != "connected" && snapshot.State == "connected" {
+	switch {
+	case previousState != "connected" && snapshot.State == "connected":
 		kind = "CallAnswered"
+	case previousState != "ringing" && snapshot.State == "ringing":
+		kind = "CallRinging"
 	}
 	c.publish(notification{event: voicehost.CallEvent{Type: kind, DeviceID: d.id, CallID: id, State: snapshot.State, Held: held, Time: time.Now()}})
 }

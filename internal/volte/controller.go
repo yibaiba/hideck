@@ -278,7 +278,24 @@ func (c *Controller) Active(deviceID string) bool {
 	return st.Phase == PhaseRegistered || st.Phase == PhaseUnverified || st.Phase == PhaseEnabling || st.Phase == PhaseRegistering
 }
 
+// qmiVoiceHost exposes the native transport capability before provisioning.
+type qmiVoiceHost interface {
+	HasQMIVoice(deviceID string) bool
+}
+
 func (c *Controller) provisionConfig(ctx context.Context, deviceID string) error {
+	// IMS clients, the native IMS switch and voice indications all live on QMI.
+	// On a device without QMI the provisioning pass can still write UAC/USB
+	// settings over AT and then mark reboot_required, so the UI reports
+	// "restart the modem" while the real blocker is the missing QMI — and the
+	// settings stay written in the module NV for nothing.
+	if host, ok := c.host.(qmiVoiceHost); ok && !host.HasQMIVoice(deviceID) {
+		c.patch(deviceID, func(st *Status) {
+			st.RebootRequired = false
+			st.QMIIMSUnavailable = true
+		})
+		return c.fail(deviceID, errors.New("设备没有 QMI 语音接口，无法启用 VoLTE；该设备请使用模组直拨"))
+	}
 	mcc, mnc, plmnErr := c.readPLMN(deviceID)
 	if plmnErr != nil {
 		return c.fail(deviceID, fmt.Errorf("read serving PLMN: %w", plmnErr))

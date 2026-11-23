@@ -108,11 +108,16 @@ func (s *Service) Answer(ctx context.Context, request ControlRequest) (CallView,
 	s.mu.RLock()
 	incomingSDP, deviceID, callID := call.incomingSDP, call.view.DeviceID, call.view.CallID
 	s.mu.RUnlock()
-	if err := media.Attach(incomingSDP); err != nil {
-		rejectErr := s.gateway.RejectIncomingCall(voicehost.RejectRequest{
-			DeviceID: deviceID, CallID: callID, StatusCode: 488,
-		})
-		return CallView{}, errors.Join(err, rejectErr)
+	// A modem-voice call never exchanges SDP: CLCC reports a line index, not an
+	// offer, so a waiting call has nothing to attach before it is answered. The
+	// backend opens the endpoint while answering and hands it back below.
+	if incomingSDP != "" || !strings.HasPrefix(callID, "modemvoice-") {
+		if err := media.Attach(incomingSDP); err != nil {
+			rejectErr := s.gateway.RejectIncomingCall(voicehost.RejectRequest{
+				DeviceID: deviceID, CallID: callID, StatusCode: 488,
+			})
+			return CallView{}, errors.Join(err, rejectErr)
+		}
 	}
 	answer, err := s.gateway.AnswerIncomingCall(ctx, voicehost.AnswerRequest{
 		DeviceID: deviceID, CallID: callID, SDP: media.PlainSDP(),
@@ -120,9 +125,10 @@ func (s *Service) Answer(ctx context.Context, request ControlRequest) (CallView,
 	if err != nil {
 		return CallView{}, err
 	}
-	if answer.OfferSDP != "" && answer.OfferSDP != incomingSDP {
+	if incomingSDP == "" || (answer.OfferSDP != "" && answer.OfferSDP != incomingSDP) {
 		if err := media.Attach(answer.OfferSDP); err != nil {
-			return CallView{}, err
+			hangupErr := s.gateway.HangupCall(ctx, deviceID, callID)
+			return CallView{}, errors.Join(err, hangupErr)
 		}
 	}
 	if err := s.assignControl(call.view.CallID, reservation); err != nil {
@@ -134,28 +140,34 @@ func (s *Service) Answer(ctx context.Context, request ControlRequest) (CallView,
 }
 
 func (s *Service) Reject(request ControlRequest) error {
-	call, _, reservation, err := s.claimIncoming(request)
+	call, _, reservation, err := s.claimIncomingWithMedia(request, true)
 	if err != nil {
 		return err
 	}
 	defer s.releaseIncomingClaim(call)
 	defer s.releaseMediaReservation(reservation)
+	var pendingMediaDrop bool
 	s.mu.Lock()
 	if current := s.calls[request.CallID]; current != call || call.terminal {
 		s.mu.Unlock()
 		return errActiveCallNotFound
 	}
-	pendingMediaDrop, err := s.bindMediaLocked(request.CallID, reservation)
-	if err != nil {
-		s.mu.Unlock()
-		return err
+	// A reject with no media left is still a reject: the call is dropped at the
+	// modem, nothing needs an audio path.
+	if reservation != nil {
+		pendingMediaDrop, err = s.bindMediaLocked(request.CallID, reservation)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		call.owner, call.lease, call.mediaID = request.Owner, request.Lease, reservation.mediaID
+		call.view.MediaID = reservation.mediaID
 	}
 	call.userRejected = true
-	call.owner, call.lease, call.mediaID = request.Owner, request.Lease, reservation.mediaID
-	call.view.MediaID = reservation.mediaID
 	deviceID := call.view.DeviceID
+	mediaID := call.mediaID
 	s.mu.Unlock()
-	s.resumePendingMediaDrop(reservation.mediaID, pendingMediaDrop)
+	s.resumePendingMediaDrop(mediaID, pendingMediaDrop)
 	if err := s.gateway.RejectIncomingCall(voicehost.RejectRequest{
 		DeviceID: deviceID, CallID: request.CallID, StatusCode: 486,
 	}); err != nil {
@@ -257,9 +269,20 @@ func (s *Service) setCallHold(ctx context.Context, owner, callID, lease string, 
 }
 
 func (s *Service) claimIncoming(request ControlRequest) (*activeCall, *MediaSession, *mediaReservation, error) {
+	return s.claimIncomingWithMedia(request, false)
+}
+
+// claimIncomingWithMedia claims a pending inbound call. When allowMissingMedia
+// is set, a browser whose own media session was already released (the previous
+// call ended and took it with it) can still reject the waiting call: rejecting
+// needs no audio path, only the right to hang it up.
+func (s *Service) claimIncomingWithMedia(request ControlRequest, allowMissingMedia bool) (*activeCall, *MediaSession, *mediaReservation, error) {
 	media, reservation, err := s.reserveControlledMedia(request.Owner, request.MediaID, request.Lease)
 	if err != nil {
-		return nil, nil, nil, err
+		if !allowMissingMedia {
+			return nil, nil, nil, err
+		}
+		return s.claimIncomingWithoutMedia(request, err)
 	}
 	s.mu.Lock()
 	call := s.calls[request.CallID]
@@ -282,6 +305,30 @@ func (s *Service) claimIncoming(request ControlRequest) (*activeCall, *MediaSess
 	return call, media, reservation, nil
 }
 
+// claimIncomingWithoutMedia handles the reject path when the caller's media is
+// gone. It only applies to a call that no browser has bound yet; otherwise the
+// original lease error stands and nobody can silently take over a controlled
+// call.
+func (s *Service) claimIncomingWithoutMedia(request ControlRequest, cause error) (*activeCall, *MediaSession, *mediaReservation, error) {
+	s.mu.Lock()
+	call := s.calls[request.CallID]
+	if call == nil || call.terminal || call.view.Direction != "inbound" || call.controlPending {
+		s.mu.Unlock()
+		return nil, nil, nil, errors.New("phone: pending incoming call not found")
+	}
+	if call.lease != "" {
+		s.mu.Unlock()
+		return nil, nil, nil, cause
+	}
+	call.controlPending = true
+	if call.autoAnswerTimer != nil {
+		call.autoAnswerTimer.Stop()
+		call.autoAnswerTimer = nil
+	}
+	s.mu.Unlock()
+	return call, nil, nil, nil
+}
+
 func (s *Service) releaseIncomingClaim(call *activeCall) {
 	if call == nil {
 		return
@@ -301,7 +348,12 @@ func (s *Service) controlledCall(owner, callID, lease string) (*activeCall, erro
 		return nil, errActiveCallNotFound
 	}
 	if call.owner != owner || !secureEqual(call.lease, lease) {
-		return nil, errors.New("phone: control lease does not own this call")
+		// An unbound call (a ringing inbound call, or a waiting call the modem
+		// accepted on its own) has no lease to compare against. Requiring one
+		// turns "hang up the waiting call" into a permanent 403.
+		if !call.unbound() {
+			return nil, errors.New("phone: control lease does not own this call")
+		}
 	}
 	return call, nil
 }

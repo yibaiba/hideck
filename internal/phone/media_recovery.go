@@ -24,7 +24,10 @@ func (s *Service) RefreshMedia(request RefreshRequest) (CallView, string, error)
 		s.mu.RUnlock()
 		return CallView{}, "", errActiveCallNotFound
 	}
-	if !request.Takeover && !secureEqual(call.lease, request.Lease) {
+	// An unbound call has no owner to protect: the first browser to attach media
+	// takes it, exactly like answering a ringing call. This is how a waiting call
+	// the modem answered on its own gets its audio back.
+	if !request.Takeover && !call.unbound() && !secureEqual(call.lease, request.Lease) {
 		s.mu.RUnlock()
 		return CallView{}, "", errors.New("phone: control lease does not own this call")
 	}
@@ -43,7 +46,7 @@ func (s *Service) finishMediaRefresh(current *activeCall, request RefreshRequest
 		s.mu.Unlock()
 		return CallView{}, "", errors.New("phone: active call ended while refreshing media")
 	}
-	if !request.Takeover && !secureEqual(call.lease, request.Lease) {
+	if !request.Takeover && !call.unbound() && !secureEqual(call.lease, request.Lease) {
 		s.mu.Unlock()
 		return CallView{}, "", errors.New("phone: call control changed while refreshing media")
 	}
@@ -87,7 +90,22 @@ func (s *Service) attachCurrentMedia(callID string, media *MediaSession) error {
 		remoteSDP = snapshot.ClientSDP
 	}
 	if remoteSDP == "" {
-		return errors.New("phone: call media endpoint is not negotiated yet")
+		// A call the modem answered on its own never exchanged an offer, so
+		// there is no endpoint to attach to. Ask the backend to open one and
+		// hand back its offer; without this the audio of a waiting call that
+		// was accepted while the previous call was hung up stays dead.
+		attacher, ok := s.gateway.(callMediaAttacher)
+		if !ok {
+			return errors.New("phone: call media endpoint is not negotiated yet")
+		}
+		offer, err := attacher.AttachCallMedia(deviceID, callID, media.PlainSDP())
+		if err != nil {
+			return err
+		}
+		if offer == "" {
+			return errors.New("phone: call media endpoint is not negotiated yet")
+		}
+		remoteSDP = offer
 	}
 	if err := media.Attach(remoteSDP); err != nil {
 		return err

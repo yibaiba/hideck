@@ -205,6 +205,14 @@ func (p *Pool) SetNativeIMS(ctx context.Context, deviceID string, enabled bool) 
 	return w.QMICore.SetIMSServiceEnabled(ctx, enabled)
 }
 
+// HasQMIVoice reports whether this device has a QMI core to carry voice over.
+// AT-only devices (ECM mode, no QMI) return false and must not be asked to
+// reconcile QMI call state.
+func (p *Pool) HasQMIVoice(deviceID string) bool {
+	w := p.GetWorker(deviceID)
+	return w != nil && w.QMICore != nil
+}
+
 func (p *Pool) EnsureIMSClients(ctx context.Context, deviceID string) error {
 	w := p.GetWorker(deviceID)
 	if w == nil || w.QMICore == nil {

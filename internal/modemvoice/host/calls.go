@@ -11,6 +11,12 @@ import (
 	"github.com/yibaiba/hideck/internal/modemvoice"
 )
 
+const (
+	// CLCC needs a moment to drop a call the modem already released.
+	hangupConfirmAttempts = 5
+	hangupConfirmInterval = 250 * time.Millisecond
+)
+
 func (c *Controller) lockReady(ctx context.Context, id string) (*device, error) {
 	d := c.get(id)
 	if d == nil {
@@ -150,17 +156,29 @@ func (c *Controller) hangup(ctx context.Context, d *device, current *call) error
 	if err != nil {
 		return err
 	}
-	// A command OK is not proof the modem has removed the physical call.
+	// A command OK is not proof the modem has removed the physical call, but
+	// CLCC lags the command by a few hundred milliseconds: one immediate read
+	// reports the call as still up and turns a successful hangup into a failure
+	// the operator is told to retry. Poll briefly before believing it.
 	current.endReason = "local_hangup"
-	update, err = d.session.Refresh(ctx)
-	err = errors.Join(err, c.apply(d, update))
-	if err != nil {
-		return err
+	for attempt := 0; attempt < hangupConfirmAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(hangupConfirmInterval):
+			}
+		}
+		update, err = d.session.Refresh(ctx)
+		err = errors.Join(err, c.apply(d, update))
+		if err != nil {
+			return err
+		}
+		if !ownsCall(d, current) {
+			return nil
+		}
 	}
-	if ownsCall(d, current) {
-		return errors.New("挂断命令已发送，但模组仍报告通话存在，请重试")
-	}
-	return nil
+	return errors.New("挂断命令已发送，但模组仍报告通话存在，请重试")
 }
 
 func (c *Controller) RejectIncomingCall(req voicehost.RejectRequest) error {

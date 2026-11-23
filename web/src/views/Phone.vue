@@ -49,8 +49,8 @@ const callEnding = computed(() => call.value ? phone.isCallEnding(call.value.cal
 const connected = computed(() => call.value?.status === 'connected')
 const modemCall = computed(() => call.value?.call_id.startsWith('modemvoice-') === true)
 const incoming = computed(() => call.value?.direction === 'inbound'
-  && call.value.status === 'ringing'
-  && !call.value.media_id)
+  && (call.value.status === 'ringing' || call.value.status === 'waiting')
+  && !call.value.read_only)
 const waitingCall = computed(() => phone.calls.find((item) =>
   item.status === 'waiting' && item.call_id !== call.value?.call_id))
 const selected = computed(() => phone.devices.find((device) => device.id === selectedDevice.value))
