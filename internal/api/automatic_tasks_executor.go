@@ -38,6 +38,11 @@ func (e *automaticTaskExecutor) Execute(
 	if worker == nil {
 		return "", fmt.Errorf("device %s is offline", task.DeviceID)
 	}
+	if task.TaskType == automation.TaskTypeCall && task.Environment == automation.EnvironmentCellular {
+		if err := worker.CheckPhoneModeSupported(device.PhoneModeVoLTE); err != nil {
+			return "", automation.Permanent(err)
+		}
+	}
 	owner := captureAutomaticTaskDeviceOwner(e.server.pool, worker)
 	profileAction, err := resolveAutomaticTaskProfile(task, worker.CurrentICCID())
 	if err != nil {
@@ -236,8 +241,9 @@ func (e *automaticTaskExecutor) executeSMS(
 	if err := reportAutomationProgress(progress, "正在提交短信"); err != nil {
 		return "", err
 	}
+	selector := device.SMSIdentity{ICCID: task.ProfileICCID}
 	if task.Environment == automation.EnvironmentVoWiFi {
-		routed, err := e.server.pool.SendRoutedSMS(ctx, worker, task.Payload.Phone, task.Payload.Message, smscodec.SubmitOptions{})
+		routed, err := e.server.pool.SendRoutedSMSForIdentity(ctx, worker, task.Payload.Phone, task.Payload.Message, smscodec.SubmitOptions{}, selector)
 		if err != nil {
 			return "", automation.Permanent(fmt.Errorf("send VoWiFi SMS: %w", err))
 		}
@@ -256,7 +262,7 @@ func (e *automaticTaskExecutor) executeSMS(
 			routed.Outcome.MessageID, routed.Outcome.DeliveryState, routed.Outcome.PartsTotal,
 		), nil
 	}
-	if err := worker.SendSMS(task.Payload.Phone, task.Payload.Message); err != nil {
+	if err := worker.SendSMSForIdentity(ctx, task.Payload.Phone, task.Payload.Message, smscodec.SubmitOptions{}, selector); err != nil {
 		return "", automation.Permanent(fmt.Errorf("send cellular SMS: %w", err))
 	}
 	return "蜂窝短信已由模组提交", nil

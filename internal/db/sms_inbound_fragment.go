@@ -8,6 +8,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const ATSMSInboundPrefix = "at:"
+
 var ErrSMSInboundFragmentCollision = errors.New("SMS inbound fragment collision")
 
 type SMSInboundFragmentScope struct {
@@ -18,26 +20,27 @@ type SMSInboundFragmentScope struct {
 }
 
 type SMSInboundFragment struct {
-	ID            uint      `gorm:"primaryKey"`
-	DeviceID      string    `gorm:"column:device_id;index"`
-	ICCID         string    `gorm:"column:iccid"`
-	IMSI          string    `gorm:"column:imsi;index"`
-	SessionKey    string    `gorm:"column:session_key"`
-	Sequence      int       `gorm:"column:sequence"`
-	Reference     int       `gorm:"column:reference"`
-	ReferenceBits int       `gorm:"column:reference_bits"`
-	Total         int       `gorm:"column:total"`
-	Content       string    `gorm:"column:content"`
-	ArrivedAt     time.Time `gorm:"column:arrived_at;index"`
-	RPMR          int       `gorm:"column:rp_mr"`
-	CallID        string    `gorm:"column:call_id"`
-	ToURI         string    `gorm:"column:to_uri"`
-	ServiceCenter string    `gorm:"column:service_center"`
-	AckSent       bool      `gorm:"column:ack_sent"`
-	AckSentAt     time.Time `gorm:"column:ack_sent_at"`
-	DegradedAt    time.Time `gorm:"column:degraded_at;index"`
-	CreatedAt     time.Time `gorm:"column:created_at"`
-	UpdatedAt     time.Time `gorm:"column:updated_at"`
+	ID             uint      `gorm:"primaryKey"`
+	DeviceID       string    `gorm:"column:device_id;index"`
+	ICCID          string    `gorm:"column:iccid"`
+	IMSI           string    `gorm:"column:imsi;index"`
+	SessionKey     string    `gorm:"column:session_key"`
+	Sequence       int       `gorm:"column:sequence"`
+	Reference      int       `gorm:"column:reference"`
+	ReferenceBits  int       `gorm:"column:reference_bits"`
+	Total          int       `gorm:"column:total"`
+	Content        string    `gorm:"column:content"`
+	PDUFingerprint string    `gorm:"column:pdu_fingerprint"`
+	ArrivedAt      time.Time `gorm:"column:arrived_at;index"`
+	RPMR           int       `gorm:"column:rp_mr"`
+	CallID         string    `gorm:"column:call_id"`
+	ToURI          string    `gorm:"column:to_uri"`
+	ServiceCenter  string    `gorm:"column:service_center"`
+	AckSent        bool      `gorm:"column:ack_sent"`
+	AckSentAt      time.Time `gorm:"column:ack_sent_at"`
+	DegradedAt     time.Time `gorm:"column:degraded_at;index"`
+	CreatedAt      time.Time `gorm:"column:created_at"`
+	UpdatedAt      time.Time `gorm:"column:updated_at"`
 }
 
 func (SMSInboundFragment) TableName() string { return "sms_inbound_fragment" }

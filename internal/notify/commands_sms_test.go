@@ -12,6 +12,7 @@ import (
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/db"
 	"github.com/yibaiba/hideck/internal/device"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/pkg/smscodec"
 )
 
@@ -69,6 +70,33 @@ func TestHandleCmdSendSMSFallsBackToCSWithoutDoubleSend(t *testing.T) {
 	}
 	if vowifiCalls != 1 || csCalls != 1 {
 		t.Fatalf("calls vowifi=%d cs=%d", vowifiCalls, csCalls)
+	}
+}
+
+func TestHandleCmdSendSMSReportsUnknownSubmission(t *testing.T) {
+	pool, _ := newRoutedSMSTestPool(t)
+	csCalls := 0
+	pool.SetRoutedSMSTestSenders(
+		func(context.Context, string, string, string, smscodec.SubmitOptions) (messaging.SendOutcome, error) {
+			return messaging.SendOutcome{}, messaging.ErrSMSNotReady
+		},
+		func(string, string, string) error { csCalls++; return modem.ErrSMSSubmitUnknown },
+	)
+	replies := make(chan string, 1)
+	manager := &Manager{pool: pool}
+	_ = manager.handleCmdSendSMS(testCommandContext{replies: replies}, []string{"wwan0", "888", "BAL"})
+	select {
+	case got := <-replies:
+		if !strings.Contains(got, "提交未完全确认") || !strings.Contains(got, "请勿重发整条") {
+			t.Fatalf("reply=%q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("command SMS reply was not delivered")
+	}
+	var count int64
+	err := db.DB.Model(&db.SMS{}).Where("type = ? AND status = ?", 2, db.SMSStatusSubmitUnconfirmed).Count(&count).Error
+	if csCalls != 1 || err != nil || count != 1 {
+		t.Fatalf("calls=%d unconfirmed history=%d err=%v", csCalls, count, err)
 	}
 }
 

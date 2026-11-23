@@ -2,6 +2,7 @@ package modem
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,28 +12,40 @@ import (
 )
 
 func (m *Manager) QueryIMEI() (string, error) {
-	resp, err := m.ExecuteATSilent("AT+CGSN", 2*time.Second)
+	dialect := m.atProfile.dialect()
+	resp, err := m.ExecuteATSilent(dialect.imei.command, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return parseIMEI(resp), nil
+	imei := dialect.imei.parse(resp)
+	if imei == "" {
+		return "", dialect.missingIMEIError
+	}
+	return imei, nil
 }
 
 func (m *Manager) QueryFirmware() (string, error) {
-	resp, err := m.ExecuteATSilent("AT+CGMR", 2*time.Second)
+	query := m.atProfile.dialect().firmware
+	resp, err := m.ExecuteATSilent(query.command, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return parseFirmware(resp), nil
+	return query.parse(resp), nil
 }
 
 func (m *Manager) QuerySIMInserted() (bool, error) {
-	if resp, err := m.ExecuteATSilent("AT+QSIMSTAT?", 2*time.Second); err == nil {
-		if inserted, ok := parseQSIMSTATInserted(resp); ok {
-			return inserted, nil
+	dialect := m.atProfile.dialect()
+	if query := dialect.cpinPresence; query != nil {
+		return m.queryCPINSIMPresence(query)
+	}
+	if cmd := dialect.simStatus; cmd != "" {
+		if resp, err := m.ExecuteATSilent(cmd, 2*time.Second); err == nil {
+			if inserted, ok := parseQSIMSTATInserted(resp); ok {
+				return inserted, nil
+			}
 		}
 	}
-	resp, err := m.ExecuteATSilent("AT+CPIN?", 2*time.Second)
+	resp, err := m.ExecuteATSilent(cpinQuery, 2*time.Second)
 	if err != nil {
 		return false, err
 	}
@@ -51,15 +64,18 @@ func (m *Manager) QueryIMSI() (string, error) {
 }
 
 func (m *Manager) QueryICCID() (string, error) {
-	resp, err := m.ExecuteATSilent("AT+QCCID", 2*time.Second)
+	query := m.atProfile.dialect().iccid
+	resp, err := m.ExecuteATSilent(query.command, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
-	return parseQCCID(resp), nil
+	return query.parse(resp), nil
 }
 
 func (m *Manager) QueryOperator() (string, error) {
-	_, _ = m.ExecuteATSilent("AT+COPS=3,2", 2*time.Second)
+	if cmd := m.atProfile.dialect().operatorFormat; cmd != "" {
+		_, _ = m.ExecuteATSilent(cmd, 2*time.Second)
+	}
 	resp, err := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
 	if err != nil {
 		return "", err
@@ -68,11 +84,12 @@ func (m *Manager) QueryOperator() (string, error) {
 }
 
 func (m *Manager) QueryRegistration() (int, string, string, string, error) {
-	resp, err := m.ExecuteATSilent("AT+CREG?", 2*time.Second)
+	dialect := m.atProfile.dialect()
+	resp, err := m.ExecuteATSilent(dialect.registration, 2*time.Second)
 	if err != nil {
 		return 0, "", "", "", err
 	}
-	regStatus, lac, cellID, ok := parseCREG(resp)
+	regStatus, lac, cellID, ok := parseRegistration(resp, dialect.registrationPrefix)
 	if !ok {
 		return 0, "", "", "", nil
 	}
@@ -100,7 +117,11 @@ func (m *Manager) QueryServingCellLTE() (int, int, error) {
 }
 
 func (m *Manager) QueryServingCellLTEInfo() (ServingCellLTEInfo, error) {
-	resp, err := m.ExecuteATSilent("AT+QENG=\"servingcell\"", 3*time.Second)
+	cmd := m.atProfile.dialect().servingCell
+	if cmd == "" {
+		return ServingCellLTEInfo{}, nil
+	}
+	resp, err := m.ExecuteATSilent(cmd, 3*time.Second)
 	if err != nil {
 		return ServingCellLTEInfo{}, err
 	}
@@ -120,7 +141,11 @@ func (m *Manager) QueryAPN() (string, error) {
 }
 
 func (m *Manager) QueryIMSStatus() (int, error) {
-	resp, err := m.ExecuteATSilent("AT+QIMS?", 2*time.Second)
+	cmd := m.atProfile.dialect().imsStatus
+	if cmd == "" {
+		return 0, nil
+	}
+	resp, err := m.ExecuteATSilent(cmd, 2*time.Second)
 	if err != nil {
 		return 0, err
 	}
@@ -134,11 +159,12 @@ func (m *Manager) QueryNetworkModeAndDuplex() (string, string, error) {
 }
 
 func (m *Manager) QueryNetworkRadio() (string, string, string, uint32, error) {
-	resp, err := m.ExecuteATSilent("AT+QNWINFO", 2*time.Second)
+	query := m.atProfile.dialect().radio
+	resp, err := m.ExecuteATSilent(query.command, 2*time.Second)
 	if err != nil {
 		return "", "", "", 0, err
 	}
-	mode, duplex, band, channel := parseQNWInfoRadio(resp)
+	mode, duplex, band, channel := query.parse(resp)
 	return mode, duplex, band, channel, nil
 }
 
@@ -149,18 +175,19 @@ func (m *Manager) QueryNetworkMode() (string, error) {
 
 func (m *Manager) QueryNetworkModeFallbackAndDuplex() (string, string, error) {
 	networkMode, networkDuplex, err := m.QueryNetworkModeAndDuplex()
-	if err == nil && networkMode != "" {
-		return networkMode, networkDuplex, nil
+	fallback := m.atProfile.dialect().radioFallback
+	if fallback.command == "" || (err == nil && networkMode != "") {
+		return networkMode, networkDuplex, err
 	}
-	resp, err2 := m.ExecuteATSilent("AT+COPS?", 2*time.Second)
+	resp, err2 := m.ExecuteATSilent(fallback.command, 2*time.Second)
 	if err2 != nil {
 		if err != nil {
 			return "", "", err
 		}
 		return "", "", err2
 	}
-	mode, _ := parseCOPSAct(resp)
-	return mode, "", nil
+	mode, duplex, _, _ := fallback.parse(resp)
+	return mode, duplex, nil
 }
 
 func (m *Manager) QueryNetworkModeFallback() (string, error) {
@@ -187,19 +214,54 @@ func (m *Manager) SMSReadPDU(index string) (string, error) {
 }
 
 type SMSPDURecord struct {
-	Index int
-	PDU   string
+	Index  int
+	Status int
+	PDU    string
 }
 
+func (r SMSPDURecord) Received() bool { return r.Status == 0 || r.Status == 1 }
+
 func (m *Manager) SMSListAllPDURecords() ([]SMSPDURecord, error) {
-	resp, err := m.ExecuteAT("AT+CMGL=4", 10*time.Second)
+	return m.smsListAllPDURecords(false)
+}
+
+func (m *Manager) smsListAllPDURecords(verify bool) ([]SMSPDURecord, error) {
+	execute := m.ExecuteAT
+	if verify {
+		execute = m.ExecuteATSilent
+	}
+	resp, err := execute("AT+CMGL=4", 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(resp) == "OK" {
 		return nil, nil
 	}
-	return extractSMSPDURecordsAfterPrefix(resp, "+CMGL:"), nil
+	records := extractSMSPDURecordsAfterPrefix(resp, "+CMGL:")
+	if verify {
+		headers, data := 0, 0
+		for _, line := range splitLines(resp) {
+			switch {
+			case line == "", line == "OK":
+			case strings.HasPrefix(line, "+CMGL:"):
+				headers++
+			default:
+				if _, err := hex.DecodeString(line); err != nil {
+					return nil, errors.New("unexpected CMGL response line")
+				}
+				data++
+			}
+		}
+		if headers != len(records) || data != len(records) {
+			return nil, errors.New("incomplete CMGL response")
+		}
+		for _, record := range records {
+			if record.Index < 0 || record.Status < 0 || record.Status > 3 {
+				return nil, errors.New("invalid CMGL record")
+			}
+		}
+	}
+	return records, nil
 }
 
 func (m *Manager) SMSListAllPDU() ([]string, error) {
@@ -263,7 +325,11 @@ func (m *Manager) QueryMSISDN() (string, error) {
 
 // QueryUSBNetMode 查询 USBNET 模式
 func (m *Manager) QueryUSBNetMode() (int, error) {
-	resp, err := m.ExecuteATSilent("AT+QCFG=\"usbnet\"?", 2*time.Second)
+	cmd := m.atProfile.dialect().usbnet
+	if cmd == "" {
+		return -1, nil
+	}
+	resp, err := m.ExecuteATSilent(cmd, 2*time.Second)
 	if err != nil {
 		return -1, err
 	}
@@ -327,7 +393,7 @@ func (m *Manager) openLogicalChannel(aid, leaseOwner, sessionOwner string, class
 	if err != nil {
 		return -1, fmt.Errorf("打开 logical channel 失败: %w", err)
 	}
-	channel, ok := parseCCHO(resp)
+	channel, ok := m.atProfile.dialect().parseCCHO(resp)
 	if !ok {
 		return -1, fmt.Errorf("解析 logical channel 响应失败: %s", resp)
 	}

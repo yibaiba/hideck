@@ -104,8 +104,36 @@ func classifyBinarySMS(t *tpdu.TPDU, msg []byte) binarySMSClassification {
 		c.SummaryLines = append(c.SummaryLines, fmt.Sprintf("wsp_tid=0x%02x pdu=0x%02x", wsp.TransactionID, wsp.PDUType))
 	}
 
-	// OMA CP：优先由端口识别，其次由 content-type 识别。
-	if (hasDestPort && destPort == wapPushPort16) || isLikelyOMAContentType(c.ContentType) {
+	oma := isLikelyOMAContentType(c.ContentType)
+	si := isLikelySIContentType(c.ContentType)
+	sl := isLikelySLContentType(c.ContentType)
+	mms := isLikelyMMSContentType(c.ContentType)
+	unknownType := !oma && !si && !sl && !mms
+
+	// WAP SI / SL
+	if si || (unknownType && isLikelySIWBXML(c.Payload)) {
+		c.Kind = binaryKindWAPSI
+		c.Label = "WAP SI Push"
+		addSISLHints(&c, c.Payload)
+		return c
+	}
+	if sl || (unknownType && isLikelySLWBXML(c.Payload)) {
+		c.Kind = binaryKindWAPSL
+		c.Label = "WAP SL Push"
+		addSISLHints(&c, c.Payload)
+		return c
+	}
+
+	// MMS Notification
+	if mms || (unknownType && isLikelyMMSNotification(c.Payload)) {
+		c.Kind = binaryKindMMSNotification
+		c.Label = "MMS Notification"
+		addMMSHints(&c, c.Payload)
+		return c
+	}
+
+	// Recognized WAP payloads take precedence over the shared port fallback.
+	if oma || (hasDestPort && destPort == wapPushPort16) {
 		c.Kind = binaryKindOmaCP
 		c.Label = "OMA CP 运营商配置短信"
 		if cfg, err := DecodeOmaCPFromTPDU(c.Payload); err == nil {
@@ -115,28 +143,6 @@ func classifyBinarySMS(t *tpdu.TPDU, msg []byte) binarySMSClassification {
 			c.IsPossEncrypted = true
 			c.SummaryLines = append(c.SummaryLines, "wbxml_decode=failed (可能加密/非明文)")
 		}
-		return c
-	}
-
-	// WAP SI / SL
-	if isLikelySIContentType(c.ContentType) || isLikelySIWBXML(c.Payload) {
-		c.Kind = binaryKindWAPSI
-		c.Label = "WAP SI Push"
-		addSISLHints(&c, c.Payload)
-		return c
-	}
-	if isLikelySLContentType(c.ContentType) || isLikelySLWBXML(c.Payload) {
-		c.Kind = binaryKindWAPSL
-		c.Label = "WAP SL Push"
-		addSISLHints(&c, c.Payload)
-		return c
-	}
-
-	// MMS Notification
-	if isLikelyMMSContentType(c.ContentType) || isLikelyMMSNotification(c.Payload) {
-		c.Kind = binaryKindMMSNotification
-		c.Label = "MMS Notification"
-		addMMSHints(&c, c.Payload)
 		return c
 	}
 

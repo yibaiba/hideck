@@ -1,8 +1,14 @@
 package device
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/yibaiba/hideck/internal/modem"
+)
 
 const (
+	cmIoTVendorID                = 0x2ecc
+	ml307cProductID              = 0x3012
 	quectelVendorID              = 0x2c7c
 	qualcommVendorID             = 0x05c6
 	quectel0125ProductID         = 0x0125
@@ -27,6 +33,24 @@ type usbDeviceIdentity struct {
 	productID uint16
 }
 
+// usbATOnlyLayout describes USB compositions managed only through an AT port.
+type usbATOnlyLayout struct {
+	profile            modem.ATProfile
+	preferredInterface int
+	alternateInterface int
+}
+
+func (id usbDeviceIdentity) atOnlyLayout() (usbATOnlyLayout, bool) {
+	if id.vendorID == cmIoTVendorID && id.productID == ml307cProductID {
+		return usbATOnlyLayout{
+			profile:            modem.ATProfileML307C,
+			preferredInterface: 2,
+			alternateInterface: 3,
+		}, true
+	}
+	return usbATOnlyLayout{}, false
+}
+
 type usbATPortRule struct {
 	interfaceNumber int
 	serialPortCount int
@@ -34,6 +58,9 @@ type usbATPortRule struct {
 }
 
 func usbATPortRuleFor(identity usbDeviceIdentity, mode string) (usbATPortRule, bool) {
+	if layout, ok := identity.atOnlyLayout(); ok {
+		return usbInterfaceATPortRule(layout.preferredInterface), true
+	}
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if identity.vendorID == qualcommVendorID && mode == "qmi" {
 		return usbInterfaceATPortRule(2), true
@@ -109,6 +136,16 @@ func supportsStaticQuectelATInterface(mode string) bool {
 
 func discoverATPortsForUSBDevice(usbPath string, identity usbDeviceIdentity, mode string) (ports []string, bestPort, imei string) {
 	portScan := scanATPortsForUSBDevice(usbPath)
+	if layout, ok := identity.atOnlyLayout(); ok {
+		var atOnly usbATPortScan
+		for _, port := range portScan.interfaceOrdered {
+			if port.interfaceNumber == layout.preferredInterface || port.interfaceNumber == layout.alternateInterface {
+				atOnly.interfaceOrdered = append(atOnly.interfaceOrdered, port)
+				atOnly.candidates = append(atOnly.candidates, port.path)
+			}
+		}
+		portScan = atOnly
+	}
 	bestPort, imei = selectBestATPortForUSBDevice(identity, mode, portScan)
 	return portScan.candidates, bestPort, imei
 }

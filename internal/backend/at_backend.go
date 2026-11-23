@@ -261,6 +261,32 @@ func (a *ATBackend) GetOperatingMode(ctx context.Context) (OperatingMode, error)
 	return OperatingMode(mode), nil
 }
 
+func (a *ATBackend) SupportsOfflineSIMReload() bool {
+	return a.modem.ATProfile().SupportsOfflineSIMReload()
+}
+
+// ReloadSIMOffline refreshes the SIM while keeping the radio off.
+func (a *ATBackend) ReloadSIMOffline(ctx context.Context) error {
+	mode, err := a.GetOperatingMode(ctx)
+	if err != nil {
+		return err
+	}
+	if mode != ModeRFOff {
+		return fmt.Errorf("offline SIM reload requires CFUN=4, got %d", mode)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	reloadErr := a.SetOperatingMode(ctx, ModeLowPower)
+	if reloadErr == nil {
+		time.Sleep(time.Second)
+	}
+	// A command that timed out might still have taken effect.
+	restoreErr := a.SetOperatingMode(ctx, ModeRFOff)
+	return errors.Join(reloadErr, restoreErr)
+}
+
 func (a *ATBackend) Reboot(ctx context.Context) error {
 	_, err := a.modem.ExecuteAT("AT+CFUN=1,1", 5*time.Second)
 	return err

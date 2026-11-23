@@ -114,7 +114,11 @@ func parseIMSI(resp string) string {
 }
 
 func parseQCCID(resp string) string {
-	line, ok := findLineWithPrefix(resp, "+QCCID:")
+	return parseICCID(resp, "+QCCID:")
+}
+
+func parseICCID(resp, prefix string) string {
+	line, ok := findLineWithPrefix(resp, prefix)
 	if !ok {
 		return ""
 	}
@@ -165,7 +169,11 @@ func parseCOPSAct(resp string) (string, bool) {
 }
 
 func parseCREG(resp string) (int, string, string, bool) {
-	line, ok := findLineWithPrefix(resp, "+CREG:")
+	return parseRegistration(resp, "+CREG:")
+}
+
+func parseRegistration(resp, prefix string) (int, string, string, bool) {
+	line, ok := findLineWithPrefix(resp, prefix)
 	if !ok {
 		return 0, "", "", false
 	}
@@ -428,7 +436,13 @@ func extractSMSPDURecordsAfterPrefix(resp string, prefix string) []SMSPDURecord 
 			index, err := strconv.Atoi(strings.TrimSpace(fields[0]))
 			if err == nil {
 				pdu, _ := smscodec.TrimFullPDUHexByATHeader(next, lines[i])
-				out = append(out, SMSPDURecord{Index: index, PDU: pdu})
+				status := -1
+				if len(fields) > 1 {
+					if parsed, err := strconv.Atoi(fields[1]); err == nil {
+						status = parsed
+					}
+				}
+				out = append(out, SMSPDURecord{Index: index, Status: status, PDU: pdu})
 			}
 		}
 		i++
@@ -540,7 +554,7 @@ func ParseUSBNetMode(resp string) (int, error) {
 }
 
 // parseCCHO 解析 AT+CCHO 响应，提取逻辑通道号
-// 响应格式: +CCHO: <channel>
+// 响应格式: +CCHO: <channel>。ML307C 返回单行裸通道号。
 func parseCCHO(resp string) (int, bool) {
 	line, ok := findLineWithPrefix(resp, "+CCHO:")
 	if !ok {
@@ -556,6 +570,27 @@ func parseCCHO(resp string) (int, bool) {
 		return channel, true
 	}
 	return -1, false
+}
+
+func parseML307CCCHO(resp string) (int, bool) {
+	if channel, ok := parseCCHO(resp); ok {
+		return channel, true
+	}
+	var channel int
+	for _, line := range splitLines(resp) {
+		if line == "" || line == "OK" {
+			continue
+		}
+		value, err := strconv.ParseUint(line, 10, 8)
+		if channel != 0 || err != nil || value == 0 {
+			return -1, false
+		}
+		channel = int(value)
+	}
+	if channel == 0 {
+		return -1, false
+	}
+	return channel, true
 }
 
 // parseCGLA 解析 AT+CGLA 响应，提取 APDU 响应

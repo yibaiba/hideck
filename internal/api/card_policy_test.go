@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +18,14 @@ import (
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/db"
 	"github.com/yibaiba/hideck/internal/device"
+	"github.com/yibaiba/hideck/internal/modem"
+	"github.com/yibaiba/hideck/internal/phone"
+	"github.com/yibaiba/hideck/internal/vowifihost"
 )
 
 type cardPolicyStoreStub struct {
 	policy     db.CardPolicy
 	getErr     error
-	resolveErr error
 	upsertErr  error
 	cleared    []string
 	remembered bool
@@ -46,10 +49,6 @@ func (s *cardPolicyRestarterStub) RestartVoWiFiForICCID(iccid string) error {
 
 func (s *cardPolicyStoreStub) Get(string) (db.CardPolicy, error) {
 	return s.policy, s.getErr
-}
-
-func (s *cardPolicyStoreStub) Resolve(string) (db.CardPolicy, error) {
-	return s.policy, s.resolveErr
 }
 
 func (s *cardPolicyStoreStub) Upsert(policy db.CardPolicy) error {
@@ -524,19 +523,19 @@ func TestApplyNetworkAndVoWiFiInterlock(t *testing.T) {
 	}
 
 	wifiPhone := db.CardPolicy{PhoneMode: "wifi", NetworkEnabled: true}
-	applyVoWiFiEnableToCardPolicy(&wifiPhone)
+	applyVoWiFiEnableToCardPolicy(&wifiPhone, wifiPhone.PhoneMode)
 	if !wifiPhone.VoWiFiEnabled || !wifiPhone.AirplaneEnabled || wifiPhone.NetworkEnabled {
 		t.Fatalf("开 WiFi calling 应锁定飞行并关流量: %+v", wifiPhone)
 	}
 
 	cellPhone := db.CardPolicy{PhoneMode: "cellular", DataStrategy: "on_demand", AirplaneEnabled: true}
-	applyVoWiFiEnableToCardPolicy(&cellPhone)
+	applyVoWiFiEnableToCardPolicy(&cellPhone, cellPhone.PhoneMode)
 	if !cellPhone.VoWiFiEnabled || cellPhone.AirplaneEnabled || cellPhone.NetworkEnabled {
 		t.Fatalf("开蜂窝软件电话应驻网且默认不开流量: %+v", cellPhone)
 	}
 
 	voltePhone := db.CardPolicy{PhoneMode: "volte", AirplaneEnabled: true, NetworkEnabled: false}
-	applyVoWiFiEnableToCardPolicy(&voltePhone)
+	applyVoWiFiEnableToCardPolicy(&voltePhone, voltePhone.PhoneMode)
 	if !voltePhone.VoWiFiEnabled || voltePhone.AirplaneEnabled || voltePhone.NetworkEnabled {
 		t.Fatalf("开 VoLTE 应驻网且不强制开上网流量: %+v", voltePhone)
 	}
@@ -604,6 +603,122 @@ func TestPutCardPolicyAirplaneField(t *testing.T) {
 	}
 }
 
+func TestPhoneModePatchUsesEffectivePolicy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name, imsi, workerMode, storedMode, body, wantReason string
+		wantEnabled, defaultProfile, missingPolicy           bool
+	}{
+		{name: "AT-only default profile rejects VoLTE", imsi: "530010000000001", workerMode: "modem_voice", storedMode: "modem_voice", body: `{"enabled":true,"mode":"volte"}`, defaultProfile: true,
+			wantReason: "该设备没有 QMI 语音接口"},
+		{name: "AT-only default profile does not create rejected policy", imsi: "530010000000001", workerMode: "modem_voice", body: `{"enabled":true,"mode":"volte"}`, defaultProfile: true, missingPolicy: true,
+			wantReason: "该设备没有 QMI 语音接口"},
+		{name: "native VoLTE", imsi: "530010000000001", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"volte"}`},
+		{name: "cellular IMS on demand", imsi: "530010000000001", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"cellular","data_strategy":"on_demand"}`,
+			wantReason: "ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS"},
+		{name: "saved cellular IMS mode", imsi: "530010000000001", workerMode: "wifi", storedMode: "cellular", body: `{"enabled":true}`,
+			wantReason: "ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS"},
+		{name: "direct dial", imsi: "530010000000001", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"modem_voice"}`},
+		{name: "China software fallback", imsi: "460011234567890", workerMode: "wifi", storedMode: "wifi", body: `{"enabled":true,"mode":"wifi"}`},
+		{name: "stored VoLTE ahead of worker", imsi: "530010000000001", workerMode: "wifi", storedMode: "volte", body: `{"enabled":true}`},
+		{name: "stored WiFi ahead of worker", imsi: "530010000000001", workerMode: "volte", storedMode: "wifi", body: `{"enabled":true}`, wantEnabled: true},
+		{name: "default profile honors stored WiFi over worker cellular", imsi: "530010000000001", workerMode: "cellular", storedMode: "wifi", body: `{"enabled":true}`, wantEnabled: true, defaultProfile: true},
+		{name: "Lebara projects stored VoLTE to WiFi", imsi: "234870000000001", workerMode: "wifi", storedMode: "volte", body: `{"enabled":true}`, wantEnabled: true},
+		{name: "explicit Lebara VoLTE remains unsupported", imsi: "234870000000001", workerMode: "wifi", storedMode: "volte", body: `{"enabled":true,"mode":"volte"}`},
+		{name: "unsupported mode on a card without a saved policy", imsi: "530010000000001", workerMode: "wifi", body: `{"enabled":true,"mode":"volte"}`, missingPolicy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DeviceConfig{ID: "test-phone", DeviceBackend: "at", ATPort: "/dev/test-phone", PhoneMode: tc.workerMode, DataStrategy: "on_demand"}
+			profile := modem.ATProfileML307C
+			if tc.defaultProfile {
+				profile = modem.ATProfileDefault
+			}
+			manager, err := modem.NewWithATProfile(cfg, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool := device.NewPool(&config.Config{})
+			host := vowifihost.NewManager()
+			host.LifecycleControllerForTest().TestRun = func(context.Context, vowifihost.LifecycleCommand) error { return nil }
+			setNestedPrivateField(t, pool, []string{"vowifiHost"}, host)
+			w := &device.Worker{ID: cfg.ID, Config: cfg, Modem: manager}
+			policy := db.CardPolicy{ICCID: "8986012345678901234", PhoneMode: tc.storedMode, DataStrategy: "always", Source: "auto"}
+			setNestedPrivateField(t, w, []string{"state", "Identity", "ICCID"}, policy.ICCID)
+			setNestedPrivateField(t, w, []string{"state", "Identity", "IMSI"}, tc.imsi)
+			injectWorker(pool, w)
+			store := &cardPolicyStoreStub{policy: policy}
+			if tc.missingPolicy {
+				store.getErr = db.ErrCardPolicyNotFound
+			}
+			s := &Server{pool: pool, cardPolicies: store}
+			r := gin.New()
+			r.PATCH("/api/devices/:device_id/vowifi", s.handleDeviceVoWiFiPatch)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPatch, "/api/devices/"+cfg.ID+"/vowifi", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			r.ServeHTTP(rec, req)
+
+			if tc.wantEnabled {
+				if rec.Code != http.StatusOK || !store.policy.VoWiFiEnabled || !w.Config.VoWiFiEnabled ||
+					store.policy.PhoneMode != tc.storedMode || w.Config.PhoneMode != device.PhoneModeWiFi ||
+					w.Config.DataStrategy != policy.DataStrategy || !w.Config.AirplaneEnabled || w.Config.NetworkEnabled {
+					t.Fatalf("code=%d body=%s policy=%+v worker=%+v", rec.Code, rec.Body.String(), store.policy, w.Config)
+				}
+				return
+			}
+			wantReason := tc.wantReason
+			if wantReason == "" {
+				wantReason = "ML307C 在 HiDeck 中不支持原生 VoLTE 和模组直拨"
+			}
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), wantReason) {
+				t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if store.policy != policy || w.Config != cfg {
+				t.Fatalf("the rejected request changed policy or worker: %+v, %+v", store.policy, w.Config)
+			}
+		})
+	}
+}
+
+func TestPhoneDevicesReportsCellularIMSAvailability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pool := device.NewPool(&config.Config{})
+	for id, profile := range map[string]modem.ATProfile{
+		"ml307c":  modem.ATProfileML307C,
+		"default": modem.ATProfileDefault,
+	} {
+		cfg := config.DeviceConfig{ID: id, DeviceBackend: "at", ATPort: "/dev/test-" + id}
+		manager, err := modem.NewWithATProfile(cfg, profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		injectWorker(pool, &device.Worker{ID: id, Config: cfg, Modem: manager})
+	}
+	s := &Server{pool: pool, phone: &phone.Service{}}
+	r := gin.New()
+	r.GET("/api/phone/devices", s.handlePhoneDevices)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/phone/devices", nil))
+
+	var response struct {
+		Devices []struct {
+			ID     string  `json:"id"`
+			Reason *string `json:"cellular_ims_unavailable_reason"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); rec.Code != http.StatusOK || err != nil || len(response.Devices) != 2 {
+		t.Fatalf("code=%d error=%v body=%s", rec.Code, err, rec.Body.String())
+	}
+	for _, item := range response.Devices {
+		if item.ID == "ml307c" && (item.Reason == nil || *item.Reason != "ML307C 在 HiDeck 中不支持通过模组蜂窝数据使用软件 IMS") {
+			t.Fatalf("missing ML307C reason: %s", rec.Body.String())
+		}
+		if item.ID == "default" && item.Reason != nil {
+			t.Fatalf("unexpected default-profile restriction: %s", rec.Body.String())
+		}
+	}
+}
+
 func TestLebaraUKRFLockRejectsNetworkAndCellular(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	openTestDB(t)
@@ -651,6 +766,41 @@ func TestLebaraUKRFLockRejectsNetworkAndCellular(t *testing.T) {
 	}
 	if got.NetworkEnabled {
 		t.Fatalf("Lebara 拒绝后不得改写 card-policy: %+v", got)
+	}
+}
+
+func TestLebaraUKRFLockProjectsSavedCellularModeOnPhoneEnable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	iccid := "8944000000000000087"
+	policy := db.CardPolicy{ICCID: iccid, PhoneMode: device.PhoneModeCellular, DataStrategy: "always", AirplaneEnabled: true}
+	store := &cardPolicyStoreStub{policy: policy}
+	pool := device.NewPool(&config.Config{})
+	host := vowifihost.NewManager()
+	host.LifecycleControllerForTest().TestRun = func(context.Context, vowifihost.LifecycleCommand) error { return nil }
+	setNestedPrivateField(t, pool, []string{"vowifiHost"}, host)
+	w := &device.Worker{ID: "lebara", Config: config.DeviceConfig{ID: "lebara", PhoneMode: device.PhoneModeWiFi, AirplaneEnabled: true}}
+	setNestedPrivateField(t, w, []string{"state", "Identity", "ICCID"}, iccid)
+	setNestedPrivateField(t, w, []string{"state", "Identity", "IMSI"}, "234870000000001")
+	injectWorker(pool, w)
+
+	s := &Server{pool: pool, cardPolicies: store}
+	r := gin.New()
+	r.PATCH("/api/devices/:device_id/vowifi", s.handleDeviceVoWiFiPatch)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/devices/lebara/vowifi", strings.NewReader(`{"enabled":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := store.policy; got.PhoneMode != policy.PhoneMode || got.DataStrategy != policy.DataStrategy ||
+		!got.VoWiFiEnabled || !got.AirplaneEnabled || got.NetworkEnabled {
+		t.Fatalf("unexpected saved policy: %+v", got)
+	}
+	if got := w.Config; got.PhoneMode != device.PhoneModeWiFi || !got.VoWiFiEnabled || !got.AirplaneEnabled || got.NetworkEnabled {
+		t.Fatalf("unexpected runtime policy: %+v", got)
 	}
 }
 

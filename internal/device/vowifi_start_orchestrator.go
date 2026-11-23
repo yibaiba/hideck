@@ -151,6 +151,9 @@ func (p *Pool) prepareVoWiFiStartContext(ctx context.Context, deviceID, traceID,
 	if w == nil {
 		return startCtx, fmt.Errorf("设备 %s 不存在", deviceID)
 	}
+	if err := w.CheckPhoneModeSupported(w.Config.PhoneMode); err != nil {
+		return startCtx, err
+	}
 	startCtx.worker = w
 	if IsModemVoiceMode(w.Config.PhoneMode) {
 		return startCtx, ErrModemVoiceSoftwareIMS

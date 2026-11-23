@@ -125,6 +125,9 @@ func (p *Pool) validateNativeVoLTEStart(deviceID string, start *nativeVoLTEStart
 	if w == nil || w != start.worker || currentSIMOwnership(w) != start.sim || p.IsESIMSwitching(deviceID) {
 		return errors.New("VoLTE 启动已失效：设备或 SIM 已更换或正在切卡")
 	}
+	if err := w.CheckPhoneModeSupported(PhoneModeVoLTE); err != nil {
+		return err
+	}
 	if !IsNativeVoLTEMode(w.Config.PhoneMode) || !PhoneServiceEnabled(w.Config) || w.Config.AirplaneEnabled {
 		return errors.New("VoLTE 启动已失效：电话模式已切换或处于飞行模式")
 	}

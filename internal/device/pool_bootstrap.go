@@ -13,6 +13,7 @@ import (
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/esim"
 	mbimcore "github.com/yibaiba/hideck/internal/mbim"
+	"github.com/yibaiba/hideck/internal/modem"
 	qmicore "github.com/yibaiba/hideck/internal/qmi"
 	"github.com/yibaiba/hideck/pkg/logger"
 	"github.com/yibaiba/hideck/pkg/smscodec"
@@ -126,20 +127,56 @@ func resolveDiscoveredCompatibleModem(dev CompatibleModem, timeout time.Duration
 	})
 }
 
-func configuredDevicesNeedCompatibleATDiscovery(devices []config.DeviceConfig) bool {
+type compatibleATDiscoveryScope uint8
+
+const (
+	compatibleATDiscoveryNone compatibleATDiscoveryScope = iota
+	compatibleATDiscoveryLiveIdentity
+	compatibleATDiscoveryAll
+)
+
+func configuredDevicesATDiscovery(devices []config.DeviceConfig) compatibleATDiscoveryScope {
+	scope := compatibleATDiscoveryNone
 	for _, dev := range devices {
-		if requiresQMICore(dev) {
+		if requiresQMICore(dev) || resolvedBackendMode(dev) == backend.BackendPCSC || strings.TrimSpace(dev.ModemIMEI) == "" {
 			continue
 		}
-		if strings.TrimSpace(dev.ModemIMEI) == "" {
-			continue
+		if strings.TrimSpace(dev.ATPort) == "" && strings.TrimSpace(dev.ManagePort) == "" {
+			return compatibleATDiscoveryAll
 		}
-		if strings.TrimSpace(dev.ATPort) != "" || strings.TrimSpace(dev.ManagePort) != "" {
-			continue
+		if resolvedBackendMode(dev) == backend.BackendAT {
+			// Profiles that require live identity must verify even an
+			// explicitly configured tty. Other explicit ports do not expand discovery.
+			scope = compatibleATDiscoveryLiveIdentity
 		}
-		return true
 	}
-	return false
+	return scope
+}
+
+func configuredATPort(cfg config.DeviceConfig) string {
+	if port := strings.TrimSpace(cfg.ATPort); port != "" {
+		return port
+	}
+	return strings.TrimSpace(cfg.ManagePort)
+}
+
+// configuredATDevice finds which USB device owns the explicitly selected port.
+func configuredATDevice(cfg config.DeviceConfig) (CompatibleModem, bool) {
+	port := configuredATPort(cfg)
+	if port == "" {
+		return CompatibleModem{}, false
+	}
+	port = resolveUSBPathForScan(port)
+	devices, err := discoverFallbackModemsFn()
+	if err == nil {
+		for _, dev := range devices {
+			if containsPort(dev.ATPorts, port) {
+				dev.ATPort = port
+				return dev, true
+			}
+		}
+	}
+	return CompatibleModem{}, false
 }
 
 type qmiBootstrapDiscoveryCache struct {
@@ -210,6 +247,8 @@ type apduArbiterAwareTransport interface {
 	SetAPDUArbiter(arbiter *apduarbiter.Arbiter)
 }
 
+var startWorkerModem = (*modem.Manager).StartWithExpectedIMEI
+
 func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) {
 	p.mu.Lock()
 	if _, exists := p.workers[devCfg.ID]; exists {
@@ -270,16 +309,32 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 
 	var matched *QMIDevice
+	var atProfile modem.ATProfile
+	explicitATIdentity := configuredATPort(devCfg) != "" && strings.TrimSpace(devCfg.ModemIMEI) != ""
 	discoveryCache := &qmiBootstrapDiscoveryCache{}
 	liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), false)
 	configuredIndex := BuildConfiguredDeviceIndex(config.ListDevices())
 	if !needsQMICore {
-		liveWorkerIndex := BuildWorkerDiscoveryIndex(p.GetAllWorkers(), true)
-		hardware := p.collectRescanHardware(nil, liveWorkerIndex)
+		scan := configuredDevicesATDiscovery([]config.DeviceConfig{devCfg})
+		if scan == compatibleATDiscoveryNone && configuredDevicesATDiscovery(config.ListDevices()) == compatibleATDiscoveryAll {
+			scan = compatibleATDiscoveryAll
+		}
+		hardware, _ := p.collectRescanHardware(nil, liveWorkerIndex, scan)
 		resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 
 		if len(resolved.Matched) > 0 {
 			hw := resolved.Matched[0].Hardware
+			atProfile = hw.ATProfile()
+			if atDeviceRulesFor(atProfile).verifyLiveIMEI {
+				if resolvedBackendMode(devCfg) == backend.BackendAT {
+					if port, _ := liveWorkerIndex.ownedATPort(hw.ATPorts); port != "" {
+						return nil, fmt.Errorf("AT 口 %s 已由现有设备接管", port)
+					}
+				}
+				devCfg.USBPath = hw.USBPath
+				devCfg.ATPort = hw.ATPort
+				devCfg.ManagePort = hw.ATPort
+			}
 			if devCfg.Interface == "" {
 				devCfg.Interface = hw.NetInterface
 			}
@@ -298,10 +353,8 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 				devCfg.ModemIMEI = resolved.Matched[0].BackfillIMEI
 				logger.Info(fmt.Sprintf("[%s] MBIM/AT 通过 USB 路径认领成功，回填实时 IMEI", devCfg.ID), "imei", devCfg.ModemIMEI)
 			}
-		} else {
-			if strings.TrimSpace(devCfg.ATPort) == "" && strings.TrimSpace(devCfg.ControlDevice) == "" {
-				return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
-			}
+		} else if configuredATPort(devCfg) == "" && strings.TrimSpace(devCfg.ControlDevice) == "" {
+			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
 		}
 	} else if hasManagedQMINetwork(devCfg) {
 		configuredStatic := QMIDevice{
@@ -317,7 +370,11 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			if qmiErr != nil {
 				logger.Debug("QMI 静态路径启动前发现失败", "device", devCfg.ID, "err", qmiErr)
 			} else {
-				hardware := p.collectRescanHardware(qmiList, liveWorkerIndex)
+				scan := compatibleATDiscoveryNone
+				if configuredDevicesATDiscovery(config.ListDevices()) == compatibleATDiscoveryAll {
+					scan = compatibleATDiscoveryAll
+				}
+				hardware, _ := p.collectRescanHardware(qmiList, liveWorkerIndex, scan)
 				resolved := ResolveDeviceIdentities(hardware, []config.DeviceConfig{devCfg})
 				if len(resolved.Matched) > 0 {
 					hw := resolved.Matched[0].Hardware
@@ -370,7 +427,27 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 
 	backendMode := resolvedBackendMode(devCfg)
-	m, err := newWorkerModem(devCfg, backendMode)
+	if backendMode == backend.BackendAT && atProfile == modem.ATProfileDefault &&
+		(strings.TrimSpace(devCfg.ModemIMEI) == "" || explicitATIdentity) {
+		ports := []string{configuredATPort(devCfg)}
+		if hw, ok := configuredATDevice(devCfg); ok {
+			atProfile = hw.ATProfile()
+			ports = hw.ATPorts
+			if atDeviceRulesFor(atProfile).verifyLiveIMEI {
+				devCfg.USBPath, devCfg.ATPort, devCfg.ManagePort = hw.USBPath, hw.ATPort, hw.ATPort
+			}
+		} else if usb := resolveUSBPathForScan(devCfg.USBPath); explicitATIdentity && usb != "" &&
+			atDeviceRulesFor(readUSBDeviceIdentity(usb).atProfile()).verifyLiveIMEI {
+			// The selected path is not a recognized AT interface of the attached modem.
+			return nil, fmt.Errorf("未找到匹配的非 QMI 硬件（AT-only 或 MBIM），跳过启动")
+		}
+		if explicitATIdentity || atDeviceRulesFor(atProfile).verifyLiveIMEI {
+			if port, _ := liveWorkerIndex.ownedATPort(ports); port != "" {
+				return nil, fmt.Errorf("AT 口 %s 已由现有设备接管", port)
+			}
+		}
+	}
+	m, err := newWorkerModem(devCfg, backendMode, atProfile)
 	if err != nil {
 		return nil, fmt.Errorf("初始化 Modem 失败: %w", err)
 	}
@@ -571,6 +648,11 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			p.scheduleATDisconnectRecovery(owner, reason)
 		})
 		p.bindModemReadyIndications(w)
+		if source := atDeviceRulesFor(atProfile).simStatusSource; source != "" {
+			m.SetSIMStatusHandler(func(inserted *bool, state string) {
+				p.handleSIMStatusEventForOwner(owner, source, inserted, state)
+			})
+		}
 	}
 
 	if backendMode == backend.BackendQMI {
@@ -603,7 +685,11 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 	}
 	logger.Info(fmt.Sprintf("[%s] 短信模式已配置", w.ID), "sms_mode", w.smsMode.String(), "backend", backendMode)
 
-	if err := m.Start(); err != nil {
+	expectedOpenedIMEI := ""
+	if backendMode == backend.BackendAT && (explicitATIdentity || atDeviceRulesFor(atProfile).verifyLiveIMEI) {
+		expectedOpenedIMEI = strings.TrimSpace(devCfg.ModemIMEI)
+	}
+	if err := startWorkerModem(m, expectedOpenedIMEI); err != nil {
 		if qmiTransportLifecycle != nil {
 			_ = qmiTransportLifecycle.Stop()
 		}
@@ -706,6 +792,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 		default:
 		}
 		worker.PreWarmCache()
+		worker.scanATSMS()
 		// 缓存预热完成后，触发一次状态广播，强制前端 SSE 推流更新最新设备数据
 		p.broadcastVoWiFiStateChange(worker.ID)
 	}(w)
@@ -749,6 +836,7 @@ func (p *Pool) AddWorkerFromConfig(devCfg config.DeviceConfig) (*Worker, error) 
 			case <-ticker.C:
 				switch worker.smsMode {
 				case smsModeAT:
+					worker.scanATSMS()
 				case smsModeQMI:
 					if worker.QMICore != nil {
 						if err := worker.CheckAllSMSQMI(); err != nil {

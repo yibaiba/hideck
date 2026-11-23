@@ -50,18 +50,20 @@ type commandRequest struct {
 	highPriority bool
 
 	// 交互式模式支持
-	interactive bool   // 是否为交互式命令 (如发送短信)
-	waitPrompt  bool   // 是否等待 "> " 提示符
-	followUp    string // 后续指令 (当 waitPrompt=true 且收到提示符时发送)
+	interactive     bool          // 是否为交互式命令 (如发送短信)
+	waitPrompt      bool          // 是否等待 "> " 提示符
+	followUp        string        // 后续指令 (当 waitPrompt=true 且收到提示符时发送)
+	smsFinalTimeout time.Duration // ML307C CMGS budget after a complete Ctrl+Z write.
 }
 
 // Manager 管理单个 EC20 模块的 AT 指令通信
 type Manager struct {
-	cfg      config.DeviceConfig
-	atPort   string
-	port     serial.Port
-	portMode *serial.Mode
-	role     runtimeRole
+	atProfile ATProfile
+	cfg       config.DeviceConfig
+	atPort    string
+	port      serial.Port
+	portMode  *serial.Mode
+	role      runtimeRole
 
 	// 通道驱动的异步架构
 	stop        chan struct{}
@@ -120,6 +122,8 @@ type Manager struct {
 	smsCallback            SMSCallback
 	smsProcessor           SMSProcessor
 	smsReadinessCheck      func() error
+	smsStorageMu           sync.Mutex
+	storedSMSHandler       func(storage, index string)
 	newSMSHandler          func(index string) // 处理新短信索引的回调 (用于 bubble up URC)
 	disableURCRead         bool               // 如果启用 QMI，禁用 AT 自动读取
 	simStatusHandler       func(inserted *bool, state string)
@@ -176,19 +180,26 @@ func (m *Manager) pureQMIBackend() bool {
 }
 
 func New(cfg config.DeviceConfig) (*Manager, error) {
-	return newManager(cfg, runtimeRoleDefault)
+	return NewWithATProfile(cfg, ATProfileDefault)
 }
+
+func NewWithATProfile(cfg config.DeviceConfig, profile ATProfile) (*Manager, error) {
+	return newManager(cfg, runtimeRoleDefault, profile)
+}
+
+func (m *Manager) ATProfile() ATProfile { return m.atProfile }
 
 // NewSMSAuxiliary creates the single AT runtime used by an MBIM worker for
 // SMS, SMSC, URCs, and manual AT commands. Network, identity, and APDU remain
 // owned by the MBIM backend.
 func NewSMSAuxiliary(cfg config.DeviceConfig) (*Manager, error) {
-	return newManager(cfg, runtimeRoleSMSAuxiliary)
+	return newManager(cfg, runtimeRoleSMSAuxiliary, ATProfileDefault)
 }
 
-func newManager(cfg config.DeviceConfig, role runtimeRole) (*Manager, error) {
+func newManager(cfg config.DeviceConfig, role runtimeRole, profile ATProfile) (*Manager, error) {
 	m := &Manager{
 		cfg:          cfg,
+		atProfile:    profile,
 		atPort:       cfg.ATPort,
 		role:         role,
 		stop:         make(chan struct{}),
@@ -511,6 +522,11 @@ func (m *Manager) tripATTimeoutWatchdog(cmd string, failures int) {
 
 // Start 启动 AT 管理器的后台协程
 func (m *Manager) Start() error {
+	return m.StartWithExpectedIMEI("")
+}
+
+// StartWithExpectedIMEI verifies the opened AT port before modem initialization.
+func (m *Manager) StartWithExpectedIMEI(expected string) error {
 	m.startStopMu.Lock()
 	defer m.startStopMu.Unlock()
 	select {
@@ -533,7 +549,7 @@ func (m *Manager) Start() error {
 
 	var err error
 	for attempt := 0; attempt < 8; attempt++ {
-		m.port, err = serial.Open(m.atPort, m.portMode)
+		m.port, err = openManagerSerialPort(m.atPort, m.portMode)
 		if err == nil {
 			break
 		}
@@ -546,6 +562,13 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("打开串口 %s 失败: %w", m.atPort, err)
 	}
 
+	if expected != "" {
+		if err := m.verifyOpenedIMEI(expected); err != nil {
+			_ = m.port.Close()
+			m.port = nil
+			return err
+		}
+	}
 	m.port.SetReadTimeout(100 * time.Millisecond)
 	m.setRunning(true)
 
@@ -581,6 +604,8 @@ func (m *Manager) Start() error {
 	logger.Info(fmt.Sprintf("[%s] AT 管理器已启动", m.cfg.ID), "port", m.atPort)
 	return nil
 }
+
+var openManagerSerialPort = serial.Open
 
 func isRetryableSerialOpenErr(err error) bool {
 	if err == nil {
@@ -708,6 +733,12 @@ func (m *Manager) handleCommand(req commandRequest) {
 		m.handleFileUpload(req)
 		return
 	}
+	if req.smsFinalTimeout > 0 {
+		m.handleML307CSMS(req)
+		return
+	}
+	cpinPresence := m.atProfile.dialect().cpinPresence
+	queryingPresence := cpinPresence != nil && req.cmd == cpinQuery
 	startTime := time.Now()
 
 	// 发送命令
@@ -769,7 +800,9 @@ RespLoop:
 						"resp", logATResponse(req.cmd, strings.Join(fullResponse, " | ")),
 						"cost", time.Since(startTime).Truncate(time.Millisecond).String())
 				}
-				if req.cmd == "AT+CLCC" {
+				if queryingPresence && cpinPresence.isAbsentError(line) {
+					req.errChan <- errSIMNotInserted
+				} else if req.cmd == "AT+CLCC" {
 					req.errChan <- &clccResponseError{response: strings.Join(fullResponse, "\n"), terminal: line}
 				} else {
 					req.errChan <- fmt.Errorf("设备返回错误: %s", logATResponse(req.cmd, strings.Join(fullResponse, "\n")))
@@ -796,6 +829,8 @@ RespLoop:
 
 				req.respChan <- "> "
 				break RespLoop
+			} else if queryingPresence && strings.HasPrefix(line, cpinPrefix) {
+				fullResponse = append(fullResponse, line)
 			} else if m.isURC(line) {
 				// 对于确认为 URC 的行，始终分发出去
 				m.handleURC(line)
@@ -1010,8 +1045,11 @@ func (m *Manager) collectDeviceInfo() {
 			imsi = v
 		}
 	}
-	if v, err := m.QueryICCID(); err == nil {
-		iccid = v
+	tracksSIMByCPIN := m.atProfile.dialect().cpinPresence != nil
+	if simInserted || !tracksSIMByCPIN {
+		if v, err := m.QueryICCID(); err == nil {
+			iccid = v
+		}
 	}
 	if v, err := m.QueryOperator(); err == nil {
 		operator = v
@@ -1062,7 +1100,9 @@ func (m *Manager) collectDeviceInfo() {
 	if operator != "" {
 		m.operator = operator
 	}
-	m.simInserted = simInserted
+	if !tracksSIMByCPIN {
+		m.simInserted = simInserted
+	}
 	if signalDBM != -999 {
 		m.signalDBM = signalDBM
 	}
@@ -1279,6 +1319,13 @@ func (m *Manager) RefreshStatus(onAlert func(msg string), onRecover func(msg str
 
 	// 检查 SIM 卡是否存活
 	simInserted, simErr := m.QuerySIMInserted()
+	if m.atProfile.dialect().cpinPresence != nil {
+		if errors.Is(simErr, ErrSIMPINRequired) {
+			m.dispatchSIMStatusURC(nil, "SIM PIN")
+		} else if simErr == nil {
+			m.dispatchSIMStatusURC(&simInserted, "")
+		}
+	}
 
 	if v, err := m.QueryOperator(); err == nil {
 		operator = v
@@ -1474,7 +1521,15 @@ func (m *Manager) handleURC(line string) {
 		m.infoMu.RLock()
 		disabled := m.disableURCRead
 		handler := m.newSMSHandler
+		storedHandler := m.storedSMSHandler
 		m.infoMu.RUnlock()
+
+		if storedHandler != nil {
+			if !disabled {
+				storedHandler(storage, index)
+			}
+			return
+		}
 
 		if handler != nil {
 			go handler(index)
@@ -1847,6 +1902,7 @@ func (m *Manager) executeAT(cmd string, timeout time.Duration, silent, highPrior
 	req.interactive = false
 	req.waitPrompt = false
 	req.followUp = ""
+	req.smsFinalTimeout = 0
 
 	// 确保回收资源
 	defer func() {
@@ -2098,6 +2154,25 @@ func (m *Manager) DeleteSMS(index uint32) error {
 	return err
 }
 
+// ErrSMSSubmitUnknown means the payload was written but acceptance is unconfirmed.
+var ErrSMSSubmitUnknown = errors.New("短信发送结果未知，请勿自动重发")
+
+// SMSSubmitError retains the segment counts when submission stopped early.
+type SMSSubmitError struct {
+	PartsTotal     int
+	PartsConfirmed int
+	Err            error
+}
+
+func (e *SMSSubmitError) Error() string {
+	if e.PartsConfirmed == 0 {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("短信已确认提交 %d/%d 段: %v", e.PartsConfirmed, e.PartsTotal, e.Err)
+}
+
+func (e *SMSSubmitError) Unwrap() error { return e.Err }
+
 // SendSMS 使用 PDU 模式发送短信
 func (m *Manager) SendSMS(phone, message string) error {
 	return m.SendSMSWithOptions(phone, message, smscodec.SubmitOptions{})
@@ -2105,10 +2180,17 @@ func (m *Manager) SendSMS(phone, message string) error {
 
 // SendSMSWithOptions 使用 PDU 模式发送短信，并允许调用方指定文本编码策略。
 func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.SubmitOptions) error {
+	ownedSubmit := m.atProfile.dialect().ownedSMSSubmit
+	if ownedSubmit != nil {
+		m.smsStorageMu.Lock()
+		defer m.smsStorageMu.Unlock()
+	}
 	m.SetBusy(true)
 	defer m.SetBusy(false)
 
-	logger.Info(fmt.Sprintf("[%s] 准备发送短信 (PDU)", m.cfg.ID), "to", phone)
+	if ownedSubmit == nil {
+		logger.Info(fmt.Sprintf("[%s] 准备发送短信 (PDU)", m.cfg.ID), "to", phone)
+	}
 
 	// 确保处于 PDU 模式
 	if _, err := m.ExecuteATHigh("AT+CMGF=0", 3*time.Second); err != nil {
@@ -2123,8 +2205,6 @@ func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.Submit
 
 	for i, pduHex := range pduHexList {
 		tpduLen := tpduLenList[i]
-		logger.Debug(fmt.Sprintf("[%s] PDU 编码完成 (分片 %d/%d)", m.cfg.ID, i+1, len(pduHexList)), "pdu", pduHex, "tpdu_len", tpduLen)
-
 		req := commandRequest{
 			cmd:          fmt.Sprintf("AT+CMGS=%d", tpduLen), // PDU 长度 (不含 SMSC)
 			respChan:     make(chan string, 1),
@@ -2136,23 +2216,36 @@ func (m *Manager) SendSMSWithOptions(phone, message string, opts smscodec.Submit
 			followUp:     pduHex + "\x1A", // PDU + Ctrl+Z
 		}
 
-		// 使用高优先级通道原子执行
-		select {
-		case m.cmdChanHigh <- req:
-		case <-time.After(5 * time.Second):
-			return errors.New("command queue full")
-		}
-
-		// 等待最终响应 (OK)
-		select {
-		case resp := <-req.respChan:
-			if !strings.Contains(resp, "OK") && !strings.Contains(resp, "+CMGS:") {
-				return fmt.Errorf("发送分片 %d 失败: %s", i+1, resp)
+		if ownedSubmit != nil {
+			req.timeout = ownedSubmit.promptTimeout
+			req.smsFinalTimeout = ownedSubmit.finalTimeout
+			if err := m.sendML307CSMSPart(req); err != nil {
+				partErr := fmt.Errorf("发送分片 %d: %w", i+1, err)
+				if i > 0 || errors.Is(err, ErrSMSSubmitUnknown) {
+					return &SMSSubmitError{PartsTotal: len(pduHexList), PartsConfirmed: i, Err: partErr}
+				}
+				return partErr
 			}
-		case err := <-req.errChan:
-			return fmt.Errorf("发送分片 %d 失败: %w", i+1, err)
-		case <-time.After(20 * time.Second):
-			return errors.New("发送超时")
+		} else {
+			logger.Debug(fmt.Sprintf("[%s] PDU 编码完成 (分片 %d/%d)", m.cfg.ID, i+1, len(pduHexList)), "pdu", pduHex, "tpdu_len", tpduLen)
+			// 使用高优先级通道原子执行
+			select {
+			case m.cmdChanHigh <- req:
+			case <-time.After(5 * time.Second):
+				return errors.New("command queue full")
+			}
+
+			// 等待最终响应 (OK)
+			select {
+			case resp := <-req.respChan:
+				if !strings.Contains(resp, "OK") && !strings.Contains(resp, "+CMGS:") {
+					return fmt.Errorf("发送分片 %d 失败: %s", i+1, resp)
+				}
+			case err := <-req.errChan:
+				return fmt.Errorf("发送分片 %d 失败: %w", i+1, err)
+			case <-time.After(20 * time.Second):
+				return errors.New("发送超时")
+			}
 		}
 
 		// 稍微等待下一段发信，防止模组队列溢出

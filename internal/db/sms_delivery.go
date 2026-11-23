@@ -14,6 +14,7 @@ const (
 	SMSDeliveryStatePartialAck = "partial_ack"
 	SMSDeliveryStateAcked      = "acked"
 	SMSDeliveryStateFailed     = "failed"
+	SMSDeliveryStateUnknown    = "unknown"
 )
 
 const (

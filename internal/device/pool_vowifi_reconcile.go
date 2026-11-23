@@ -125,9 +125,6 @@ func (p *Pool) shouldReconcileVoWiFiForReason(w *Worker, reason string) bool {
 		logger.Warn("VoWiFi 目标态恢复跳过：SIM 身份未就绪", "event", "VOWIFI_DESIRED_RECOVER_SKIPPED_IDENTITY", "device", deviceID)
 		return false
 	}
-	if !p.currentCardPolicyAllowsVoWiFi(w, status.ICCID, reason) {
-		return false
-	}
 	mcc, _, _ := vowifiProfileMCCMNC(status)
 	if mcc != "" && carrier.IsVoWiFiBlockedMCC(mcc) {
 		p.clearDesiredVoWiFiRecoverState(deviceID)
@@ -147,7 +144,7 @@ func (p *Pool) shouldReconcileVoWiFiForReason(w *Worker, reason string) bool {
 			"device", deviceID, "imsi", class.LiveIMSI)
 		return false
 	}
-	return true
+	return p.currentCardPolicyAllowsVoWiFi(w, status.ICCID, reason, class)
 }
 
 func (p *Pool) stopLebaraUKFlippedVoWiFi(w *Worker, class LebaraUKClass) {
@@ -181,7 +178,7 @@ func (p *Pool) isWorkerRebuilding(deviceID string) bool {
 	return rebuilding
 }
 
-func (p *Pool) currentCardPolicyAllowsVoWiFi(w *Worker, statusICCID, reason string) bool {
+func (p *Pool) currentCardPolicyAllowsVoWiFi(w *Worker, statusICCID, reason string, class LebaraUKClass) bool {
 	if p == nil || w == nil {
 		return false
 	}
@@ -223,6 +220,7 @@ func (p *Pool) currentCardPolicyAllowsVoWiFi(w *Worker, statusICCID, reason stri
 			"err", err)
 		return false
 	}
+	pol = effectiveCardPhonePolicy(w, pol, class)
 	if UsesModemPhoneControl(pol.PhoneMode) || UsesModemPhoneControl(w.Config.PhoneMode) {
 		p.clearDesiredVoWiFiRecoverState(deviceID)
 		return false

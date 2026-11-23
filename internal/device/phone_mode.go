@@ -11,6 +11,14 @@ import (
 
 var ErrModemVoiceSoftwareIMS = errors.New("模组直拨模式不使用软件 IMS")
 
+type PhoneModeUnsupportedError struct {
+	Reason string
+}
+
+func (e *PhoneModeUnsupportedError) Error() string {
+	return e.Reason
+}
+
 const (
 	PhoneModeWiFi       = "wifi"
 	PhoneModeCellular   = "cellular"
@@ -51,21 +59,45 @@ func cellularAlwaysData(cfg config.DeviceConfig) bool {
 	return strings.TrimSpace(cfg.PhoneMode) == PhoneModeCellular && strings.TrimSpace(cfg.DataStrategy) == "always"
 }
 
-// WorkerSoftwareIMSBlocked reports China MCC 460/461, which has no ePDG
-// software IMS path in this stack. Phone service must use modem call control.
+// WorkerSoftwareIMSBlocked reports whether the SIM's MCC is blocked by the
+// software IMS policy. Phone service must use modem call control.
 func WorkerSoftwareIMSBlocked(w *Worker) bool {
 	if w == nil {
 		return false
 	}
+	w.cacheMu.RLock()
 	mcc := strings.TrimSpace(w.state.Identity.NativeMCC)
+	imsi := strings.TrimSpace(w.state.Identity.IMSI)
+	w.cacheMu.RUnlock()
 	if carrier.IsVoWiFiBlockedMCC(mcc) {
 		return true
 	}
-	imsi := strings.TrimSpace(w.state.Identity.IMSI)
 	if len(imsi) >= 3 && carrier.IsVoWiFiBlockedMCC(imsi[:3]) {
 		return true
 	}
 	return false
+}
+
+// CellularIMSUnavailableReason reports the modem data-path limitation, independent of SIM policy.
+func (w *Worker) CellularIMSUnavailableReason() string {
+	if w.NetworkController() != nil {
+		return ""
+	}
+	return w.atDeviceRules().cellularIMSUnavailableReason
+}
+
+// CheckPhoneModeSupported checks the device and SIM capabilities for a phone mode.
+func (w *Worker) CheckPhoneModeSupported(mode string) error {
+	if reason := w.atDeviceRules().nativeVoiceUnavailableReason; reason != "" &&
+		(UsesModemPhoneControl(mode) || WorkerSoftwareIMSBlocked(w)) {
+		return &PhoneModeUnsupportedError{Reason: reason}
+	}
+	if strings.TrimSpace(mode) == PhoneModeCellular {
+		if reason := w.CellularIMSUnavailableReason(); reason != "" {
+			return &PhoneModeUnsupportedError{Reason: reason}
+		}
+	}
+	return nil
 }
 
 func forceSoftwareIMSBlockedToVoLTE(w *Worker, pol cardpolicy.Policy) {

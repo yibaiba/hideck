@@ -121,10 +121,13 @@ export const smsService = {
   },
   send(payload: SmsSendPayload) {
     return callService(async () => {
-      const res = await api.post<{ parts_total?: number; destination: string }>('/sms/send', payload)
+      const res = await api.post<{ parts_total?: number; destination: string; delivery_state?: string; message?: string }>('/sms/send', payload)
+      const { delivery_state, message } = res.data
+      const uncertain = res.status === 202 && (delivery_state === 'unknown' || delivery_state === 'partial_ack')
       return {
         partsTotal: Number(res.data?.parts_total || 0),
-        destination: res.data.destination
+        destination: res.data.destination,
+        submissionWarning: uncertain ? (message || '短信提交未完全确认，请勿重发整条') : ''
       }
     })
   },

@@ -1276,7 +1276,7 @@ func (p *Pool) handleESIMSwitchAfter(deviceID string, token uint64) {
 		"network_enabled_before", snapshot.NetworkEnabledBefore)
 
 	convergence := p.runPostSwitchConvergence(deviceID, token, worker, snapshot)
-	if !p.esimSwitchOwnerCurrent(deviceID, worker, snapshot) {
+	if !p.switchTokenStillCurrent(deviceID, token, "sim_convergence") || !p.esimSwitchOwnerCurrent(deviceID, worker, snapshot) {
 		return
 	}
 	if convergence.Degraded {

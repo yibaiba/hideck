@@ -61,9 +61,7 @@ func TestNativeStartCanceledDuringReadinessCannotOutliveHandoff(t *testing.T) {
 	if err := p.stopNativeVoLTEForModemVoice(port.worker.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyPolicyToWorker(port.worker, cardpolicy.Policy{PhoneMode: PhoneModeModemVoice, VoWiFiEnabled: true}); err != nil {
-		t.Fatal(err)
-	}
+	applyTestCardPolicy(t, port.worker, cardpolicy.Policy{PhoneMode: PhoneModeModemVoice, VoWiFiEnabled: true})
 	// Readiness must stop without waiting for the backend to become ready.
 	select {
 	case err := <-done:

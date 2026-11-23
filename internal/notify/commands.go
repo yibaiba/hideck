@@ -80,19 +80,30 @@ func (m *Manager) handleCmdSendSMS(cmdCtx CommandContext, args []string) string 
 		ctx = messaging.WithSuppressSendTGSuccess(ctx)
 		routed, sendErr := m.pool.SendRoutedSMS(ctx, worker, phone, message, smscodec.SubmitOptions{})
 		channel := smsRouteChannelLabel(routed.Via)
-		if sendErr != nil {
+		state := routed.Outcome.DeliveryState
+		unconfirmed := routed.Via == device.RoutedSMSViaCS &&
+			(state == db.SMSDeliveryStateUnknown || state == db.SMSDeliveryStatePartialAck)
+		if sendErr != nil && !unconfirmed {
 			cmdCtx.Reply(fmt.Sprintf("发送短信 / 失败\n设备    %s\n号码    %s\n通道    %s\n原因    %v", displayName, phone, channel, sendErr))
 			return
 		}
 		if routed.Via == device.RoutedSMSViaCS {
+			status := 2
+			if unconfirmed {
+				status = db.SMSStatusSubmitUnconfirmed
+			}
 			err := db.SaveSMSForIdentity(db.SMSRecord{
 				Identity: db.SMSIdentity{ICCID: routed.Identity.ICCID, IMSI: routed.Identity.IMSI},
 				Sender:   worker.ID, Recipient: phone, Content: message,
-				Type: 2, Status: 2, Timestamp: time.Now(),
+				Type: 2, Status: status, Timestamp: time.Now(),
 			})
 			if err != nil {
-				logger.Warn("短信发送成功但入库失败", "device", deviceID, "err", err)
+				logger.Warn("短信发送记录入库失败", "device", deviceID, "err", err)
 			}
+		}
+		if unconfirmed {
+			cmdCtx.Reply(fmt.Sprintf("发送短信 / 提交未完全确认\n设备    %s\n号码    %s\n通道    %s\n结果    %v\n请勿重发整条", displayName, phone, channel, sendErr))
+			return
 		}
 		cmdCtx.Reply(fmt.Sprintf("发送短信 / 完成\n设备    %s\n号码    %s\n通道    %s\n内容    %s", displayName, phone, channel, message))
 	}()

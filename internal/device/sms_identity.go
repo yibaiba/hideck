@@ -1,6 +1,7 @@
 package device
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,9 +10,11 @@ import (
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/config"
 	"github.com/yibaiba/hideck/internal/db"
+	"github.com/yibaiba/hideck/internal/modem"
 )
 
 var (
+	ErrSMSSelectorMismatch      = errors.New("所选 SIM 身份已变更，请重新选择")
 	ErrSMSIdentityUnknown       = errors.New("短信身份未知")
 	ErrSMSIdentityConflict      = errors.New("短信身份冲突")
 	ErrSMSIdentityTransitioning = errors.New("SIM 身份正在切换")
@@ -52,6 +55,34 @@ func (databaseSMSIdentityStore) SaveReceived(identity SMSIdentity, message inbou
 		Sender:   message.Sender, Content: message.Content,
 		Type: 1, Status: 0, Timestamp: message.Timestamp,
 	})
+}
+
+func (p *Pool) smsSendOwnerCheck(worker *Worker, selector SMSIdentity) func() error {
+	checkOwner := p.outboundOwnerCheck(worker)
+	if selector == (SMSIdentity{}) {
+		return checkOwner
+	}
+	return func() error {
+		if selector.IMSI != "" && worker.cachedSMSIdentity().IMSI != selector.IMSI {
+			return ErrSMSSelectorMismatch
+		}
+		if err := checkOwner(); err != nil {
+			return ErrSMSSelectorMismatch
+		}
+		return nil
+	}
+}
+
+func (w *Worker) cachedSMSIdentity() SMSIdentity {
+	w.cacheMu.RLock()
+	defer w.cacheMu.RUnlock()
+	return normalizeSMSIdentity(SMSIdentity{ICCID: w.state.Identity.ICCID, IMSI: w.state.Identity.IMSI})
+}
+
+func (selector SMSIdentity) matches(identity SMSIdentity) bool {
+	return selector != (SMSIdentity{}) &&
+		(selector.ICCID == "" || selector.ICCID == identity.ICCID) &&
+		(selector.IMSI == "" || selector.IMSI == identity.IMSI)
 }
 
 func (p *Pool) ResolveSMSIdentity(deviceID string) (SMSIdentity, error) {
@@ -108,6 +139,9 @@ func (p *Pool) runtimeSMSIdentity(deviceID string) (smsIdentityCandidate, error)
 	}
 	worker.cacheMu.RLock()
 	defer worker.cacheMu.RUnlock()
+	if worker.atDeviceRules().strictSIMIdentity && (!worker.state.Identity.Ready || !worker.Modem.IsSimInserted()) {
+		return smsIdentityCandidate{}, ErrSMSIdentityUnknown
+	}
 	phase := worker.state.Identity.Phase
 	if phase == simIdentityPhaseTransitioning || phase == simIdentityPhaseDegraded {
 		return smsIdentityCandidate{}, fmt.Errorf("%w: device=%s phase=%s", ErrSMSIdentityTransitioning, deviceID, phase)
@@ -125,6 +159,76 @@ func (p *Pool) runtimeSMSIdentity(deviceID string) (smsIdentityCandidate, error)
 		present:  identity.ICCID != "" || identity.IMSI != "",
 		imei:     imei,
 	}, nil
+}
+
+func (w *Worker) strictSMSSendIdentity() (SMSIdentity, error) {
+	w.cacheMu.RLock()
+	state := w.state.Identity
+	w.cacheMu.RUnlock()
+	identity := normalizeSMSIdentity(SMSIdentity{ICCID: state.ICCID, IMSI: state.IMSI})
+	if !state.Ready || state.Phase != simIdentityPhaseReady || identity.ICCID == "" || identity.IMSI == "" {
+		return SMSIdentity{}, ErrSMSIdentityUnknown
+	}
+	return identity, nil
+}
+
+// Caller holds the outbound operation through confirmation and submission.
+func (w *Worker) confirmCSSMSIdentity(ctx context.Context, intended SMSIdentity, checkOwner func() error) error {
+	if err := checkOwner(); err != nil || !w.atDeviceRules().strictSIMIdentity {
+		return err
+	}
+	reader, ok := w.Backend.(liveSIMIdentityReader)
+	if !ok {
+		return ErrSMSIdentityUnknown
+	}
+	const source = "cs_sms_identity"
+	generation := w.SIMIdentityGeneration()
+	ctx, cancel := context.WithTimeout(contextOrBackground(ctx), 8*time.Second)
+	defer cancel()
+	inserted, err := w.Backend.IsSimInserted(ctx)
+	if err != nil {
+		if errors.Is(err, modem.ErrSIMPINRequired) {
+			w.recordStrictSIMLock(generation, source)
+		}
+		return err
+	}
+	if !inserted {
+		w.recordStrictSIMAbsence(generation, source)
+		return ErrSMSIdentityUnknown
+	}
+	iccid, err := reader.GetICCIDLive(ctx)
+	if err != nil {
+		return err
+	}
+	imsi, err := reader.GetIMSILive(ctx)
+	if err != nil {
+		return err
+	}
+	live := normalizeSMSIdentity(SMSIdentity{ICCID: iccid, IMSI: imsi})
+	cached, err := w.strictSMSSendIdentity()
+	if err != nil {
+		return err
+	}
+	if err := checkOwner(); err != nil {
+		return err
+	}
+	switch {
+	case live.ICCID == "" || live.IMSI == "":
+		err = ErrSMSIdentityUnknown
+	case live != intended || cached != intended:
+		err = ErrSMSIdentityConflict
+	}
+	if err != nil {
+		return w.rejectLiveCSSMSIdentity(generation, source, err)
+	}
+	return ctx.Err()
+}
+
+func (w *Worker) rejectLiveCSSMSIdentity(generation uint64, source string, err error) error {
+	if w.degradeStrictSIMIdentity(generation, source, err) {
+		w.scheduleSIMStatusCheck(source, nil, "READY")
+	}
+	return err
 }
 
 // smsIMSIAliasChecker is implemented by stores that remember every IMSI read on a

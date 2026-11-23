@@ -15,6 +15,10 @@ func configureWorkerATSMS(w *Worker) {
 	}
 	w.Modem.SetNewSMSHandler(nil)
 	w.Modem.SetDisableURCRead(false)
+	if w.atDeviceRules().storedSMSInbox {
+		w.Modem.SetStoredSMSHandler(w.handleStoredSMS)
+		return
+	}
 	w.Modem.SetSMSReadinessCheck(func() error {
 		_, err := w.resolveSMSIdentity()
 		return err

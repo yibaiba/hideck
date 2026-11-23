@@ -206,6 +206,57 @@ func (s *postSwitchRunBackendStub) UIMPowerOnSIM(ctx context.Context, slot uint8
 	return nil
 }
 
+type offlineSIMReloadBackendStub struct {
+	workerStatusBackendStub
+	iccid       string
+	reloadCalls int
+}
+
+func (s *offlineSIMReloadBackendStub) SupportsOfflineSIMReload() bool { return true }
+
+func (s *offlineSIMReloadBackendStub) GetICCIDLive(context.Context) (string, error) {
+	return s.iccid, nil
+}
+
+func (s *offlineSIMReloadBackendStub) ReloadSIMOffline(context.Context) error {
+	s.reloadCalls++
+	return nil
+}
+
+func TestPostSwitchOfflineSIMReloadUsesLiveICCID(t *testing.T) {
+	const deviceID = "dev-1"
+	const previousICCID = "8985203103011907194"
+	const targetICCID = "8985203103011907195"
+	for _, tc := range []struct {
+		name, liveICCID string
+		token           uint64
+		radioCycle      bool
+		wantReady       bool
+		wantReloads     int
+	}{
+		{name: "target already active", liveICCID: targetICCID + "F", token: 2, wantReady: true},
+		{name: "old ICCID needs reload", liveICCID: previousICCID, token: 2, wantReady: true, wantReloads: 1},
+		{name: "different live card", liveICCID: "8985203103011907196", token: 2},
+		{name: "newer switch owns device", liveICCID: previousICCID, token: 1},
+		{name: "radio cycle may enable RF", liveICCID: previousICCID, token: 2, radioCycle: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deviceBackend := &offlineSIMReloadBackendStub{iccid: tc.liveICCID}
+			worker := &Worker{
+				ID: deviceID, Backend: deviceBackend,
+				Config: config.DeviceConfig{ESIMSwitch: config.ESIMSwitchConfig{RadioCycle: tc.radioCycle}},
+			}
+			pool := &Pool{workers: map[string]*Worker{deviceID: worker}, switchTokens: map[string]uint64{deviceID: 2}}
+			snapshot := esimSwitchContext{ICCIDBefore: previousICCID, TargetICCID: targetICCID, FlightModeBefore: true}
+			result := pool.runPostSwitchConvergence(deviceID, tc.token, worker, snapshot)
+			if result.Ready != tc.wantReady || result.Degraded == tc.wantReady || deviceBackend.reloadCalls != tc.wantReloads {
+				t.Fatalf("result=%+v, reloads=%d; want ready=%t and reloads=%d",
+					result, deviceBackend.reloadCalls, tc.wantReady, tc.wantReloads)
+			}
+		})
+	}
+}
+
 func TestRunPostSwitchConvergenceFlagOffUsesLegacyPollingOnly(t *testing.T) {
 	worker := &Worker{Config: config.DeviceConfig{}}
 	backend := &postSwitchRunBackendStub{

@@ -6,6 +6,7 @@ import (
 
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/config"
+	"github.com/yibaiba/hideck/internal/modem"
 )
 
 func TestRequiresMBIMCore(t *testing.T) {
@@ -48,7 +49,7 @@ func TestNewWorkerModemUsesSMSAuxiliaryForMBIM(t *testing.T) {
 		ID:            "dev-mbim",
 		DeviceBackend: backend.BackendMBIM,
 		ATPort:        "/dev/ttyUSB2",
-	}, backend.BackendMBIM)
+	}, backend.BackendMBIM, modem.ATProfileDefault)
 	if err != nil {
 		t.Fatalf("newWorkerModem() error = %v", err)
 	}

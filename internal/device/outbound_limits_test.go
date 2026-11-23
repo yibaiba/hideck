@@ -11,6 +11,7 @@ import (
 	"github.com/iniwex5/vowifi-go/runtimehost/messaging"
 	"github.com/iniwex5/vowifi-go/runtimehost/voicehost"
 	"github.com/yibaiba/hideck/internal/config"
+	"github.com/yibaiba/hideck/internal/modem"
 	"github.com/yibaiba/hideck/internal/outbound"
 	"github.com/yibaiba/hideck/pkg/smscodec"
 )
@@ -141,5 +142,91 @@ func TestQueuedSMSSIMReplacementStopsBeforeNewRuntimeSend(t *testing.T) {
 	})
 	if err == nil || errors.Is(err, context.DeadlineExceeded) || newRuntime.sendCount() != 0 {
 		t.Fatalf("queued send crossed SIM: err=%v sent=%d", err, newRuntime.sendCount())
+	}
+}
+
+func TestML307CCSSMSChecksLiveSIMBeforeSubmitting(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		iccid, imsi  string
+		simErr, want error
+		simAbsent    bool
+	}{
+		{name: "matching", iccid: "card-old", imsi: "imsi-old"},
+		{name: "different_card", iccid: "card-new", imsi: "imsi-new", want: ErrSMSIdentityConflict},
+		{name: "same_iccid_different_imsi", iccid: "card-old", imsi: "imsi-new", want: ErrSMSIdentityConflict},
+		{name: "incomplete", iccid: "card-old", want: ErrSMSIdentityUnknown},
+		{name: "absent", simAbsent: true, want: ErrSMSIdentityUnknown},
+		{name: "pin_required", iccid: "card-old", imsi: "imsi-old", simErr: modem.ErrSIMPINRequired, want: modem.ErrSIMPINRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, w, be := newML307CIdentityWorker(t)
+			limiter := &recordingOutboundLimiter{}
+			p.SetOutboundLimiter(limiter)
+			be.liveICCID, be.liveIMSI, be.simErr, be.simAbsent = tc.iccid, tc.imsi, tc.simErr, tc.simAbsent
+			if err := w.SendSMS("10010", "test"); !errors.Is(err, tc.want) {
+				t.Fatalf("SendSMS() = %v, want %v", err, tc.want)
+			}
+			count := 0
+			if tc.want == nil {
+				count = 1
+			}
+			if be.sends != count || len(limiter.requests) != 1 || limiter.requests[0].ICCID != "card-old" {
+				t.Fatalf("sends=%d want %d; charges=%+v want one on intended card", be.sends, count, limiter.requests)
+			}
+			if tc.want != nil && !w.SIMIdentityConvergenceMatches("", 0) {
+				t.Fatal("confirmed SIM state did not invalidate cached readiness")
+			}
+		})
+	}
+}
+
+func TestML307CCSSMSRejectsSilentSIMSwapDuringAuthorization(t *testing.T) {
+	p, w, be := newML307CIdentityWorker(t)
+	be.liveICCID, be.liveIMSI = "card-old", "imsi-old"
+	limiter := &recordingOutboundLimiter{after: func() {
+		be.liveICCID, be.liveIMSI = "card-new", "imsi-new"
+	}}
+	p.SetOutboundLimiter(limiter)
+	if err := w.SendSMS("10010", "test"); !errors.Is(err, ErrSMSIdentityConflict) {
+		t.Fatalf("SendSMS() = %v, want SIM conflict", err)
+	}
+	if be.sends != 0 || len(limiter.requests) != 1 || limiter.requests[0].ICCID != "card-old" {
+		t.Fatalf("wrong send or quota owner: sends=%d charges=%+v", be.sends, limiter.requests)
+	}
+}
+
+type directSMSSelectorBackend struct {
+	workerStatusBackendStub
+	sends int
+}
+
+func (b *directSMSSelectorBackend) SendSMS(context.Context, string, string) error {
+	b.sends++
+	return nil
+}
+
+func TestDirectSMSMatchesICCIDWithoutIMSI(t *testing.T) {
+	_, w, limiter := outboundTestWorker(t)
+	backend := &directSMSSelectorBackend{workerStatusBackendStub: workerStatusBackendStub{mode: "qmi"}}
+	w.Backend = backend
+	setWorkerSMSIdentity(w, SMSIdentity{ICCID: "123"})
+	err := w.SendSMSForIdentity(context.Background(), "10010", "test", smscodec.SubmitOptions{}, SMSIdentity{ICCID: "123f"})
+	if err != nil || backend.sends != 1 || len(limiter.requests) != 1 || limiter.requests[0].ICCID != "123" {
+		t.Fatalf("send error=%v, sends=%d, quota=%+v", err, backend.sends, limiter.requests)
+	}
+}
+
+func TestRoutedSMSReportsStaleSelectorBeforeFallback(t *testing.T) {
+	p, w, limiter := outboundTestWorker(t)
+	w.Config.VoWiFiEnabled, w.Config.PhoneMode = true, "wifi"
+	cs := false
+	p.SetRoutedSMSTestSenders(func(context.Context, string, string, string, smscodec.SubmitOptions) (messaging.SendOutcome, error) {
+		setWorkerSMSIdentity(w, SMSIdentity{ICCID: "456", IMSI: "234150123456789"})
+		return messaging.SendOutcome{}, messaging.ErrSMSNotReady
+	}, func(string, string, string) error { cs = true; return nil })
+	_, err := p.SendRoutedSMSForIdentity(context.Background(), w, "10010", "test", smscodec.SubmitOptions{}, SMSIdentity{ICCID: "123"})
+	if !errors.Is(err, ErrSMSSelectorMismatch) || cs || len(limiter.requests) != 1 || limiter.requests[0].ICCID != "123" {
+		t.Fatalf("fallback: error=%v CS sent=%v quota=%+v", err, cs, limiter.requests)
 	}
 }
