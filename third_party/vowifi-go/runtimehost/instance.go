@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iniwex5/vowifi-go/engine/swu"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/common"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/logging"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/runtimecore"
@@ -63,7 +64,10 @@ func (i *Instance) SetSMSNotifier(n SMSNotifier) {
 	i.mu.Unlock()
 }
 
-// Stop shuts the runtime host down.
+// Stop shuts the runtime host down. The first call starts one release task
+// that owns the resources until the IMS service, the tunnel and the runtime
+// core runner are all gone; every call waits for that task with its own ctx.
+// ErrRunnerNotExited means ctx ended first and the task still owns them.
 func (i *Instance) Stop(ctx context.Context) error {
 	if i == nil {
 		return nil
@@ -72,35 +76,82 @@ func (i *Instance) Stop(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	i.mu.Lock()
-	if i.stopped {
+	done := i.stopDone
+	if done == nil {
+		done = make(chan struct{})
+		i.stopDone = done
+		i.stopped = true
+		release := stopRelease{
+			svc: i.service, tunnel: i.tunnel, cancel: i.cancel,
+			voiceDetach: i.voiceDetach, exited: i.exited,
+		}
+		i.service = nil
+		i.session = nil
+		i.tunnel = nil
+		i.cancel = nil
+		i.voiceDetach = nil
 		i.mu.Unlock()
-		return nil
+		go i.release(done, release)
+	} else {
+		i.mu.Unlock()
 	}
-	i.stopped = true
-	svc := i.service
-	tunnel := i.tunnel
-	cancel := i.cancel
-	voiceDetach := i.voiceDetach
-	i.service = nil
-	i.session = nil
-	i.tunnel = nil
-	i.cancel = nil
-	i.voiceDetach = nil
-	i.mu.Unlock()
+	select {
+	case <-done:
+		return i.stopResult()
+	default:
+	}
+	select {
+	case <-done:
+		return i.stopResult()
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", ErrRunnerNotExited, ctx.Err())
+	}
+}
+
+// Stopped reports whether Stop has been called, even if the release task has
+// not finished yet.
+func (i *Instance) Stopped() bool {
+	if i == nil {
+		return false
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.stopDone != nil
+}
+
+// serviceStopTimeout bounds the signalling part of the IMS stop (ending the
+// reg-event and MWI subscriptions; the binding is left to expire) inside the
+// release task, kept well below the host's 10 s teardown budget so that a peer
+// that does not answer still leaves time for the runner to exit. The rest of
+// the IMS stop (closing sockets, waiting for its readers and recoveries) is
+// not bounded by this context.
+const serviceStopTimeout = 5 * time.Second
+
+type stopRelease struct {
+	svc         messaging.Service
+	tunnel      Tunnel
+	cancel      func()
+	voiceDetach func() error
+	exited      <-chan struct{}
+}
+
+func (i *Instance) release(done chan struct{}, r stopRelease) {
 	var stopErr error
-	if voiceDetach != nil {
-		stopErr = voiceDetach()
+	if r.voiceDetach != nil {
+		stopErr = r.voiceDetach()
 	}
-	if svc != nil {
-		stopErr = errors.Join(stopErr, svc.Stop(ctx))
+	if r.svc != nil {
+		svcCtx, cancelSvc := context.WithTimeout(context.Background(), serviceStopTimeout)
+		stopErr = errors.Join(stopErr, r.svc.Stop(svcCtx))
+		cancelSvc()
 	}
-	if cancel != nil {
-		cancel()
+	if r.cancel != nil {
+		r.cancel()
 	}
-	if tunnel != nil {
-		tunnel.Shutdown()
+	if r.tunnel != nil {
+		r.tunnel.Shutdown()
 	}
-	i.updateStateWithEvent(ctx, "stopped", func(state *State) {
+	i.updateStateWithEvent(context.Background(), "stopped", func(state *State) {
 		state.Phase = "stopped"
 		state.LastEvent = "stopped"
 		state.SessionState = "stopped"
@@ -113,11 +164,41 @@ func (i *Instance) Stop(ctx context.Context) error {
 		state.SMSHealthReady = false
 		state.LastReason = "stopped"
 	})
-	if tunnel == nil {
-		return stopErr
+	if r.tunnel != nil {
+		stopErr = errors.Join(stopErr, r.tunnel.WaitDoneContext(context.Background()))
 	}
-	return errors.Join(stopErr, tunnel.WaitDoneContext(ctx))
+	if r.exited != nil {
+		<-r.exited
+	}
+	i.mu.Lock()
+	i.stopErr = errors.Join(stopErr, i.runnerCleanupErr)
+	i.mu.Unlock()
+	close(done)
 }
+
+func (i *Instance) stopResult() error {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.stopErr
+}
+
+// recordRunnerExit keeps the runner's local cleanup failures for Stop.
+func (i *Instance) recordRunnerExit(err error) {
+	if !errors.Is(err, swu.ErrSessionCleanup) {
+		return
+	}
+	i.mu.Lock()
+	i.runnerCleanupErr = err
+	i.mu.Unlock()
+}
+
+// ErrCleanupFailed marks a stop whose tasks exited but failed to release a
+// local resource such as the data plane, routes or the TUN device.
+var ErrCleanupFailed = swu.ErrSessionCleanup
+
+// ErrRunnerNotExited reports that Stop gave up before the runtime core runner
+// returned; the runner may still be using the SIM channel and the modem.
+var ErrRunnerNotExited = errors.New("runtimehost: runtime runner has not exited")
 
 // StopShared stops the host without tearing down shared resources.
 func (i *Instance) StopShared(ctx context.Context) error {
@@ -402,12 +483,22 @@ func (i *Instance) setTunnelReauthenticationRequired(err error) {
 // setService installs the IMS service.
 func (i *Instance) setService(s messaging.Service) {
 	i.mu.Lock()
-	i.service = s
+	// A late ims_registered after Stop must not reattach a service that the
+	// release task will never stop.
+	if s == nil || !i.stopped {
+		i.service = s
+	}
 	i.mu.Unlock()
 }
 
 func (i *Instance) setVoiceDetach(detach func() error) {
 	i.mu.Lock()
+	if detach != nil && i.stopped {
+		// Attached after Stop: the release task already ran, detach now.
+		i.mu.Unlock()
+		_ = detach()
+		return
+	}
 	i.voiceDetach = detach
 	i.mu.Unlock()
 }
@@ -415,6 +506,10 @@ func (i *Instance) setVoiceDetach(detach func() error) {
 // setSession wires a new session into the host.
 func (i *Instance) setSession(session *runtimecore.SessionResult) {
 	i.mu.Lock()
+	if session != nil && i.stopped {
+		i.mu.Unlock()
+		return
+	}
 	i.session = session
 	if session != nil && i.startedAt.IsZero() {
 		i.startedAt = time.Now()

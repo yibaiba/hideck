@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,9 @@ type swuTunnelAdapter struct {
 	activeSession *swu.Session
 	connectCancel context.CancelFunc
 	closed        bool
+	// stopWait is the stop of the last session, published under lifecycleMu
+	// before the stop is issued.
+	stopWait *pendingStop
 }
 
 type epdgSessionManager interface {
@@ -99,13 +103,82 @@ func (adapter *swuTunnelAdapter) Shutdown() {
 	adapter.connectCancel = nil
 	session := adapter.activeSession
 	adapter.activeSession = nil
+	var stop *pendingStop
+	if session != nil {
+		stop = newPendingStop()
+		adapter.stopWait = stop
+	}
 	adapter.lifecycleMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	if session != nil {
-		_ = adapter.manager.Stop(adapter.deviceID)
+	if stop != nil {
+		stop.issue(adapter.manager, adapter.deviceID)
 	}
+}
+
+// WaitDoneContext waits, after a stop, until the stopped session goroutine has
+// returned and its local cleanup is done; before any stop it waits for the
+// current session as before. Without a session there is nothing to wait for.
+func (adapter *swuTunnelAdapter) WaitDoneContext(ctx context.Context) error {
+	adapter.lifecycleMu.Lock()
+	stop, session := adapter.stopWait, adapter.Session
+	adapter.lifecycleMu.Unlock()
+	if stop != nil {
+		return stop.Wait(ctx)
+	}
+	if session == nil {
+		return nil
+	}
+	return session.WaitDoneContext(ctx)
+}
+
+// pendingStop is published under lifecycleMu before the stop is issued, so no
+// WaitDoneContext can miss it. It waits until the stop has been issued, then
+// until the stopped sessions have exited and finished local cleanup.
+type pendingStop struct {
+	issued chan struct{}
+	wait   func(context.Context) error
+}
+
+func newPendingStop() *pendingStop {
+	return &pendingStop{issued: make(chan struct{})}
+}
+
+func (p *pendingStop) issue(manager epdgSessionManager, deviceID string) {
+	p.wait = stopSessionAsync(manager, deviceID)
+	close(p.issued)
+}
+
+func (p *pendingStop) Wait(ctx context.Context) error {
+	select {
+	case <-p.issued:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if p.wait == nil {
+		return nil
+	}
+	return p.wait(ctx)
+}
+
+// stopSessionAsync stops the device's sessions and returns a wait for their
+// exit; a manager without StopAsync falls back to the plain Stop.
+func stopSessionAsync(manager epdgSessionManager, deviceID string) func(context.Context) error {
+	if async, ok := manager.(interface {
+		StopAsync(string) (func(context.Context) error, error)
+	}); ok {
+		wait, err := async.StopAsync(deviceID)
+		if err == nil {
+			return wait
+		}
+		if !strings.Contains(err.Error(), "session id") {
+			logging.Info("SWu tunnel stop failed", "device", deviceID, "error", err)
+		}
+		return nil
+	}
+	_ = manager.Stop(deviceID)
+	return nil
 }
 
 func (adapter *swuTunnelAdapter) beginConnect(cancel context.CancelFunc) error {
@@ -137,6 +210,7 @@ func (adapter *swuTunnelAdapter) startSession(ctx context.Context) (*swu.Session
 	}
 	adapter.Session = session
 	adapter.activeSession = session
+	adapter.stopWait = nil // the previous failed attempt has been waited for
 	return session, nil
 }
 
@@ -147,8 +221,15 @@ func (adapter *swuTunnelAdapter) stopSession(session *swu.Session) {
 		return
 	}
 	adapter.activeSession = nil
+	// A failed attempt is retried with a fresh session: wait until the old one
+	// has stopped using the SIM. A Shutdown meanwhile sees the same wait.
+	stop := newPendingStop()
+	adapter.stopWait = stop
 	adapter.lifecycleMu.Unlock()
-	_ = adapter.manager.Stop(adapter.deviceID)
+	stop.issue(adapter.manager, adapter.deviceID)
+	if err := stop.Wait(context.Background()); err != nil {
+		logging.Info("SWu failed session cleanup reported an error", "device", adapter.deviceID, "error", err)
+	}
 }
 
 func (adapter *swuTunnelAdapter) UpdateAddresses(oldIP, newIP net.IP) error {

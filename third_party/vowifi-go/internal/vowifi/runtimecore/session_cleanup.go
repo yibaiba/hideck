@@ -2,6 +2,7 @@ package runtimecore
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -25,18 +26,31 @@ func defaultStopSession(ctx context.Context, result *SessionResult) {
 		return
 	}
 	if result.IMSService != nil {
-		_ = result.IMSService.Stop(ctx)
+		if err := result.IMSService.Stop(ctx); err != nil {
+			zap.S().Warnw("failed to stop IMS service", "device", result.DeviceID, "error", err)
+		}
 	}
+	var waitEPDG func(context.Context) error
 	if result.EPDGMgr != nil {
-		if err := result.EPDGMgr.Stop(result.DeviceID); err != nil && !strings.Contains(err.Error(), "session id") {
+		wait, err := result.EPDGMgr.StopAsync(result.DeviceID)
+		if err != nil && !strings.Contains(err.Error(), "session id") {
 			zap.S().Warnw("failed to stop ePDG session", "device", result.DeviceID, "error", err)
 		}
+		waitEPDG = wait
 	}
 	if result.XCAPNetwork != nil && result.XCAPNetwork != result.IMSNetwork {
 		_ = result.XCAPNetwork.Close()
 	}
 	if result.IMSNetwork != nil {
 		_ = result.IMSNetwork.Close()
+	}
+	// Wait after the networks are closed, as before; the runner exits only
+	// once the SWu session goroutines and their local cleanup are done.
+	if waitEPDG != nil {
+		if err := waitEPDG(context.Background()); err != nil {
+			zap.S().Warnw("SWu session cleanup failed", "device", result.DeviceID, "error", err)
+			result.cleanupErr = errors.Join(result.cleanupErr, err)
+		}
 	}
 	waitSessionCleanup(result.Session, result.DeviceID)
 	CleanupDataplaneInterface(result.DeviceID, result.Snapshot.TUNName)

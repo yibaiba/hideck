@@ -228,6 +228,14 @@ type Instance struct {
 	tunnel      Tunnel
 	voiceDetach func() error
 	stopped     bool
+	// exited is closed when the runtime core runner goroutine returns; nil
+	// for instances that have no background runner.
+	exited <-chan struct{}
+	// stopDone is closed when the release task started by Stop has finished;
+	// stopErr is its result.
+	stopDone         chan struct{}
+	stopErr          error
+	runnerCleanupErr error
 }
 
 func NewTraceID() string { return newTraceID() }

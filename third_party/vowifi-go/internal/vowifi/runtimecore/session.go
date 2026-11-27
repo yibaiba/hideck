@@ -40,7 +40,7 @@ func RunSession(ctx context.Context, cfg SessionConfig) (*SessionResult, error) 
 	}
 	if err := startIMS(ctx, cfg, result); err != nil {
 		defaultStopSession(context.Background(), result)
-		return nil, err
+		return nil, errors.Join(err, result.cleanupErr)
 	}
 	attachAdditionalPDNs(ctx, cfg, result)
 	return result, nil

@@ -3,6 +3,7 @@ package swu
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -15,7 +16,14 @@ const DefaultSessionSlot = ""
 type managedSession struct {
 	session *Session
 	cancel  context.CancelFunc
+	// runDone is closed when the session goroutine returns; nil for sessions
+	// registered without one.
+	runDone chan struct{}
 }
+
+// ErrSessionStillRunning reports that a stopped session's goroutine has not
+// returned yet and may still use the SIM or the network.
+var ErrSessionStillRunning = errors.New("swu: session goroutine has not exited")
 
 // SessionManager owns sessions and cancellation functions by device ID and
 // optional slot. The empty slot is the default IKE session for a device.
@@ -66,9 +74,13 @@ func (m *SessionManager) StartSlot(
 		cancel()
 		return nil, errors.New("session id 已存在")
 	}
-	slots[slot] = &managedSession{session: session, cancel: cancel}
+	entry := &managedSession{session: session, cancel: cancel, runDone: make(chan struct{})}
+	slots[slot] = entry
 	m.mu.Unlock()
-	go m.run(sessionContext, session)
+	go func() {
+		defer close(entry.runDone)
+		m.run(sessionContext, session)
+	}()
 	return session, nil
 }
 
@@ -88,6 +100,64 @@ func (m *SessionManager) run(ctx context.Context, session *Session) {
 
 // Stop removes and closes every session for the device.
 func (m *SessionManager) Stop(deviceID string) error {
+	_, err := m.stopDevice(deviceID)
+	return err
+}
+
+// StopAndWait is StopAsync followed by waiting with ctx.
+func (m *SessionManager) StopAndWait(ctx context.Context, deviceID string) error {
+	wait, err := m.StopAsync(deviceID)
+	if err != nil {
+		return err
+	}
+	return wait(ctx)
+}
+
+// StopAsync removes and starts stopping every session for the device. The
+// returned wait blocks until each session goroutine has returned and local
+// cleanup has finished, and reports local cleanup failures.
+func (m *SessionManager) StopAsync(deviceID string) (func(context.Context) error, error) {
+	slots, err := m.stopDevice(deviceID)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) error { return waitStopped(ctx, slots) }, nil
+}
+
+// waitStopped waits for the session goroutine and for session.done: when
+// another goroutine is already shutting a session down, Shutdown returns
+// early and only done marks the end of local cleanup.
+func waitStopped(ctx context.Context, slots map[string]*managedSession) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var cleanupErr error
+	for _, entry := range slots {
+		if entry == nil {
+			continue
+		}
+		var sessionDone <-chan struct{}
+		if entry.session != nil {
+			sessionDone = entry.session.done
+		}
+		for _, done := range []<-chan struct{}{entry.runDone, sessionDone} {
+			if done == nil {
+				continue
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return fmt.Errorf("%w: %w", ErrSessionStillRunning, ctx.Err())
+			}
+		}
+		if entry.session != nil {
+			cleanupErr = errors.Join(cleanupErr, entry.session.CleanupError())
+		}
+	}
+	return cleanupErr
+}
+
+func (m *SessionManager) stopDevice(deviceID string) (map[string]*managedSession, error) {
 	m.mu.Lock()
 	slots, exists := m.devices[deviceID]
 	if exists {
@@ -95,10 +165,10 @@ func (m *SessionManager) Stop(deviceID string) error {
 	}
 	m.mu.Unlock()
 	if !exists || len(slots) == 0 {
-		return errors.New("session id 不存在")
+		return nil, errors.New("session id 不存在")
 	}
 	stopManagedSessions(slots)
-	return nil
+	return slots, nil
 }
 
 // StopSlot removes one named session. Other sessions for the device stay up.
@@ -118,7 +188,7 @@ func (m *SessionManager) StopSlot(deviceID, slot string) error {
 		return errors.New("session id 不存在")
 	}
 	stopManagedSession(entry)
-	return nil
+	return waitStopped(context.Background(), map[string]*managedSession{slot: entry})
 }
 
 // SwapDefault promotes slot to the default session and returns the retired
