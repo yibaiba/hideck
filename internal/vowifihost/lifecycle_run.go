@@ -2,6 +2,7 @@ package vowifihost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,8 +50,8 @@ func (m *Manager) runLifecycleCommand(ctx context.Context, cmd LifecycleCommand)
 		return m.recoverRuntime(ctx, cmd.DeviceID, cmd.Reason, cmd.Generation, cmd.OverrideEPDG)
 	case LifecycleCommandSwitchBegin:
 		m.EndWiFiCallingHealth(cmd.DeviceID, "switch")
-		m.TeardownForSwitch(ctx, cmd.DeviceID)
-		return nil
+		_, err := m.teardownForSwitch(ctx, cmd.DeviceID)
+		return err
 	case LifecycleCommandSwitchEnd:
 		if cmd.RestoreRadio {
 			return m.enableRuntime(ctx, runtimeEnableRequest{
@@ -96,6 +97,11 @@ func (m *Manager) enableRuntime(ctx context.Context, req runtimeEnableRequest) (
 		return err
 	}
 	if startClaim.Active {
+		// Stopped never turns back, so checking after the claim also covers a
+		// Stop that raced it.
+		if inst := m.RuntimeStore().Instance(deviceID); inst != nil && inst.Stopped() {
+			return fmt.Errorf("设备 %s 的旧 VoWiFi 任务仍在退出，暂不能启动", deviceID)
+		}
 		return nil
 	}
 	if startClaim.Starting {
@@ -151,6 +157,11 @@ func (m *Manager) enableRuntime(ctx context.Context, req runtimeEnableRequest) (
 	})
 	if err != nil {
 		if startCtx.Err() != nil || !m.ShouldRun(deviceID, startupEpoch) {
+			if errors.Is(err, runtimehost.ErrCleanupFailed) {
+				logger.Error("取消的 VoWiFi 启动已退出，但本地清理失败", "trace_id", traceID, "device", deviceID, "err", err)
+			} else {
+				logger.Info("取消的 VoWiFi 启动已退出", "trace_id", traceID, "device", deviceID, "cost_ms", time.Since(startedAt).Milliseconds())
+			}
 			return context.Canceled
 		}
 		state, ok := m.State(deviceID)
@@ -205,12 +216,21 @@ func (m *Manager) disableRuntime(ctx context.Context, reasonDeviceID, reason str
 		devIDs = m.InstanceIDs()
 	}
 
+	var disableErr error
 	for _, devID := range devIDs {
-		stopped := m.TeardownSession(ctx, devID, TeardownOptions{
+		stopped, err := m.teardownSession(ctx, devID, TeardownOptions{
 			Reason:         reason,
 			RestoreSMS:     true,
 			SkipInvalidate: skipInvalidate,
 		})
+		if err != nil {
+			disableErr = errors.Join(disableErr, err)
+			if !IsCleanupOnlyError(err) {
+				// The old runner may still own the SIM and modem: leave SMS mode
+				// and radio untouched; a later disable restores them.
+				continue
+			}
+		}
 		if !stopped {
 			logger.Info("VoWiFi 实例不存在，执行强制恢复流程", "device", devID, "reason", reason, "restore_radio", restoreRadio)
 			adapter.RestoreSMSMode(devID)
@@ -222,7 +242,7 @@ func (m *Manager) disableRuntime(ctx context.Context, reasonDeviceID, reason str
 		}
 		logger.Info("VoWiFi 已禁用、QMI/AT 短信轮询已恢复，当前未自动恢复射频/数据", "device", devID, "reason", reason)
 	}
-	return nil
+	return disableErr
 }
 
 func (m *Manager) restartRuntime(ctx context.Context, deviceID string, generation uint64) error {
@@ -240,7 +260,10 @@ func (m *Manager) restartRuntime(ctx context.Context, deviceID string, generatio
 
 	logger.Info("准备重启 VoWiFi 隧道...", "device", deviceID)
 	if err := m.disableRuntime(ctx, deviceID, "restart", false, false); err != nil {
-		logger.Warn("停用旧 VoWiFi 隧道时发生错误", "device", deviceID, "err", err)
+		if !IsCleanupOnlyError(err) {
+			return fmt.Errorf("重启 VoWiFi 失败，旧任务未停止: %w", err)
+		}
+		logger.Error("重启 VoWiFi：旧任务已退出但本地清理失败，继续启动", "device", deviceID, "err", err)
 	}
 	if err := m.enableWhenReady(ctx, deviceID, lifecycleReadyTimeout, "restart", "", generation); err != nil {
 		return fmt.Errorf("重启 VoWiFi 失败: %w", err)
@@ -257,11 +280,19 @@ func (m *Manager) recoverRuntime(ctx context.Context, deviceID, reason string, g
 	if strings.TrimSpace(reason) == "" {
 		reason = "recover"
 	}
+	if inst := m.RuntimeStore().Instance(deviceID); inst != nil && inst.Stopped() {
+		return fmt.Errorf("恢复 VoWiFi 失败(%s)：设备 %s 的旧任务仍在退出", reason, deviceID)
+	}
 	if m.Active(deviceID) || m.Starting(deviceID) {
 		logger.Debug("VoWiFi recover 跳过：运行态仍活跃或正在启动", "device", deviceID, "reason", reason)
 		return nil
 	}
-	_ = m.TeardownSession(ctx, deviceID, TeardownOptions{Reason: reason, RestoreSMS: true})
+	if _, err := m.teardownSession(ctx, deviceID, TeardownOptions{Reason: reason, RestoreSMS: true}); err != nil {
+		if !IsCleanupOnlyError(err) {
+			return fmt.Errorf("恢复 VoWiFi 失败(%s)，旧任务未停止: %w", reason, err)
+		}
+		logger.Error("恢复 VoWiFi：旧任务已退出但本地清理失败，继续启动", "device", deviceID, "reason", reason, "err", err)
+	}
 	if err := m.enableWhenReady(ctx, deviceID, lifecycleReadyTimeout, reason, overrideEPDG, generation); err != nil {
 		return fmt.Errorf("恢复 VoWiFi 失败(%s): %w", reason, err)
 	}

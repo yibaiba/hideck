@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -20,6 +21,26 @@ func (p *Pool) stopVoWiFiAppForTeardown(ctx context.Context, deviceID, reason st
 
 func (p *Pool) teardownVoWiFiForReconnect(deviceID string) bool {
 	return p.voWiFiHost().TeardownForReconnect(p.ctx, deviceID)
+}
+
+// StopVoWiFiBeforeReboot cancels the device's VoWiFi start or session and waits
+// until the old runner has exited, so the modem reset never races it.
+// hadVoWiFi tells the reboot recovery whether to start VoWiFi again.
+func (p *Pool) StopVoWiFiBeforeReboot(ctx context.Context, deviceID string) (hadVoWiFi bool, err error) {
+	host := p.voWiFiHost()
+	// A stopped instance whose runtime is still exiting was turned off before:
+	// it must not be restarted after the reboot.
+	hadVoWiFi = host.Running(deviceID)
+	return hadVoWiFi, host.StopOrDrain(ctx, deviceID, "manual_reboot", false)
+}
+
+// voWiFiStopWaitTimeout bounds how long a caller waits for the old VoWiFi task
+// before switching, rebooting or removing hardware; the task keeps the modem
+// until it really exits, the caller gets an error instead of waiting forever.
+var voWiFiStopWaitTimeout = 20 * time.Second
+
+func (p *Pool) voWiFiStopContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(p.Context(), voWiFiStopWaitTimeout)
 }
 
 func (p *Pool) RestoreSMSMode(deviceID string) {
@@ -146,25 +167,30 @@ func (p *Pool) DisableVoWiFi(deviceID ...string) error {
 			if err := p.stopModemVoice(target); err != nil {
 				return err
 			}
-			if err := p.voWiFiHost().Disable(p.ctx, target, "disable", false); err != nil {
-				return err
-			}
-			p.ClearVoWiFiMWI(target)
-			p.applyCardPolicyAfterVoWiFiDisable(target, "vowifi_disabled")
-			return nil
+			return p.disableVoWiFiForDevice(target, "disable")
 		}
 	}
 
-	devIDs := p.voWiFiHost().InstanceIDs()
-
-	for _, devID := range devIDs {
-		if err := p.voWiFiHost().Disable(p.ctx, devID, "disable_all", false); err != nil {
-			return err
-		}
-		p.ClearVoWiFiMWI(devID)
-		p.applyCardPolicyAfterVoWiFiDisable(devID, "vowifi_disabled")
+	// Every device gets its stop request; failures are reported together.
+	var disableErr error
+	for _, devID := range p.voWiFiHost().InstanceIDs() {
+		disableErr = errors.Join(disableErr, p.disableVoWiFiForDevice(devID, "disable_all"))
 	}
-	return nil
+	return disableErr
+}
+
+// disableVoWiFiForDevice disables one device within voWiFiStopWaitTimeout. A
+// cleanup-only failure still finishes the handover steps and is reported.
+func (p *Pool) disableVoWiFiForDevice(deviceID, reason string) error {
+	stopCtx, cancel := p.voWiFiStopContext()
+	err := p.voWiFiHost().Disable(stopCtx, deviceID, reason, false)
+	cancel()
+	if err != nil && !vowifihost.IsCleanupOnlyError(err) {
+		return err
+	}
+	p.ClearVoWiFiMWI(deviceID)
+	p.applyCardPolicyAfterVoWiFiDisable(deviceID, "vowifi_disabled")
+	return err
 }
 
 func (p *Pool) applyCardPolicyAfterVoWiFiDisable(deviceID, reason string) {
@@ -179,7 +205,9 @@ func (p *Pool) applyCardPolicyAfterVoWiFiDisable(deviceID, reason string) {
 }
 
 func (p *Pool) RestartVoWiFi(deviceID string) error {
-	return p.voWiFiHost().Restart(p.ctx, deviceID)
+	// As in main, Restart cancels the current command first; only its wait for
+	// that command is bounded, the new start keeps p.ctx.
+	return p.voWiFiHost().RestartWithQueueTimeout(p.ctx, deviceID, voWiFiStopWaitTimeout)
 }
 
 // RedetectMWIForICCID clears the card's local MWI backoff, then has every

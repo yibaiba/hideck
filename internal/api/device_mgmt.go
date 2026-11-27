@@ -3007,6 +3007,10 @@ func (s *Server) handleDeviceMgmtReboot(c *gin.Context) {
 	s.useDeviceMgmtReboot(c)
 }
 
+// manualRebootVoWiFiStopTimeout bounds how long a manual reboot waits for the
+// old VoWiFi runner to exit before giving up without resetting the modem.
+var manualRebootVoWiFiStopTimeout = 20 * time.Second
+
 func (s *Server) useDeviceMgmtReboot(c businessContext) {
 	releaseOperation, allowed := s.acquireBusinessMutation(c)
 	if !allowed {
@@ -3037,7 +3041,29 @@ func (s *Server) useDeviceMgmtReboot(c businessContext) {
 		return
 	}
 
+	// Cancel the old VoWiFi start or session and wait for its runner to exit
+	// before resetting the modem; without that exit the reset is not sent.
+	stopCtx, cancelStop := context.WithTimeout(businessRequestContext(c), manualRebootVoWiFiStopTimeout)
+	hadVoWiFi, err := s.pool.StopVoWiFiBeforeReboot(stopCtx, id)
+	cancelStop()
+	if err != nil {
+		logger.Warn("手动重启前停止 VoWiFi 失败，未发送重启指令", "device", id, "had_vowifi", hadVoWiFi, "err", err)
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "message": "已请求停止 VoWiFi，但旧任务尚未确认退出，未发送重启指令，本次操作不会重新开启 VoWiFi: " + err.Error()})
+		return
+	}
+	// The wait may take seconds; reset only the Worker the VoWiFi stop was for.
+	if s.pool.GetWorker(id) != worker {
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "message": "设备实例已更换，未发送重启指令；VoWiFi 已停止，本次操作不会重新开启"})
+		return
+	}
+
+	// VoWiFi stopped for the reboot is not restarted when sending fails: a
+	// written reset whose reply was lost (QMI) may still reset the modem.
 	rebootSent := false
+	vowifiNote := ""
+	if hadVoWiFi {
+		vowifiNote = "；VoWiFi 已停止，本次操作不会重新开启"
+	}
 
 	useATFirst := worker.Backend == nil || shouldUseATFirstReboot(worker.Backend.Mode())
 
@@ -3058,18 +3084,18 @@ func (s *Server) useDeviceMgmtReboot(c businessContext) {
 	// QMI 模式设备的主路径；AT 模式设备在 AT 端口不可用/发送失败时的降级路径
 	if !rebootSent && worker.Backend != nil {
 		if err := worker.Backend.Reboot(businessRequestContext(c)); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "重启指令失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "重启指令失败: " + err.Error() + vowifiNote})
 			return
 		}
 		rebootSent = true
 	}
 
 	if !rebootSent {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "无法发送重启指令，无可用通道"})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "无法发送重启指令，无可用通道" + vowifiNote})
 		return
 	}
 
-	if !s.pool.ScheduleModemRebootRecoveryForWorker(worker, "manual_reboot") {
+	if !s.pool.ScheduleModemRebootRecoveryAfterVoWiFiStop(worker, "manual_reboot", hadVoWiFi) {
 		c.JSON(http.StatusConflict, gin.H{
 			"status": "error", "message": "重启指令已发送，但设备实例已更换，未启动旧设备恢复任务",
 		})

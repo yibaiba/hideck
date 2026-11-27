@@ -49,7 +49,7 @@ func NewManagerWithRuntimeStore(store RuntimeStore) *Manager {
 		subscriptionRetries: runtimehost.NewSubscriptionRetries(),
 	}
 	m.lifecycle = NewLifecycleController(LifecycleControllerOptions{
-		IsActive: m.Active,
+		IsActive: m.Running,
 		Run:      m.runLifecycleCommand,
 	})
 	return m
@@ -169,7 +169,7 @@ func (m *Manager) ConfigureLifecycle(options LifecycleControllerOptions) {
 		return
 	}
 	if options.IsActive == nil {
-		options.IsActive = m.Active
+		options.IsActive = m.Running
 	}
 	if options.Run == nil {
 		options.Run = m.runLifecycleCommand
@@ -179,6 +179,12 @@ func (m *Manager) ConfigureLifecycle(options LifecycleControllerOptions) {
 
 func (m *Manager) SubmitLifecycle(ctx context.Context, cmd LifecycleCommand) error {
 	return m.lifecycleController().Submit(ctx, cmd)
+}
+
+// WaitLifecycleIdle waits, bounded by ctx, until no lifecycle command runs for
+// the device, so a cancelled start has released the modem.
+func (m *Manager) WaitLifecycleIdle(ctx context.Context, deviceID string) error {
+	return m.lifecycleController().WaitIdle(ctx, deviceID)
 }
 
 func (m *Manager) NextLifecycleGeneration(deviceID string) uint64 {
