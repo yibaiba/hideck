@@ -8,6 +8,7 @@ import (
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/db"
 	"github.com/yibaiba/hideck/internal/modem"
+	"github.com/yibaiba/hideck/internal/vowifihost"
 	"github.com/yibaiba/hideck/pkg/logger"
 )
 
@@ -128,10 +129,19 @@ func (p *Pool) retirePhoneRuntimesForSIMChangeLocked(owner workerLifecycleOwner)
 	if err := p.stopModemVoice(deviceID); err != nil {
 		return fmt.Errorf("stop modem voice: %w", err)
 	}
-	if !p.IsVoWiFiActive(deviceID) && !p.voWiFiHost().Starting(deviceID) && p.GetVoWiFiAppForDevice(deviceID) == nil {
-		return nil
+	stopCtx, cancel := p.voWiFiStopContext()
+	defer cancel()
+	var err error
+	if p.GetVoWiFiAppForDevice(deviceID) != nil {
+		err = p.voWiFiHost().Disable(stopCtx, deviceID, "sim_identity_changed", false)
+		if vowifihost.IsCleanupOnlyError(err) {
+			logger.Error("SIM 变化停止 VoWiFi：旧任务已退出但本地清理失败", "device", deviceID, "err", err)
+			err = nil
+		}
+	} else {
+		err = p.voWiFiHost().StopOrDrain(stopCtx, deviceID, "sim_identity_changed", false)
 	}
-	if err := p.voWiFiHost().Disable(p.Context(), deviceID, "sim_identity_changed", false); err != nil {
+	if err != nil {
 		return fmt.Errorf("stop VoWiFi: %w", err)
 	}
 	if !p.workerLifecycleOwnerCurrent(owner) {

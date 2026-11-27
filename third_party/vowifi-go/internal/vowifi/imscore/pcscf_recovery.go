@@ -87,7 +87,42 @@ func (s *Service) observeInitialInvite503(response *sipResponse) {
 	s.mu.RLock()
 	failedRegistrar := s.registrar
 	s.mu.RUnlock()
-	go s.recoverPCSCFAfter503(failedRegistrar, decision)
+	if !s.startPCSCFRecovery(func() { s.recoverPCSCFAfter503(failedRegistrar, decision) }) {
+		s.pcscfRecoveryPending.Store(false)
+	}
+}
+
+// startPCSCFRecovery runs a P-CSCF recovery that registers again, which may
+// run AKA on the SIM, so StopCurrent can wait for it. It is counted under
+// s.mu: StopCurrent closes stop and then takes s.mu before it waits, so a
+// recovery is either counted or never started.
+func (s *Service) startPCSCFRecovery(run func()) bool {
+	s.mu.Lock()
+	if s.stopped() {
+		s.mu.Unlock()
+		return false
+	}
+	s.pcscfRecoveryWG.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.pcscfRecoveryWG.Done()
+		run()
+	}()
+	return true
+}
+
+// recoveryRegistrationContext bounds a recovery registration and cancels it
+// when the service stops.
+func (s *Service) recoveryRegistrationContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), pcscfInitialRegistrationTimeout)
+	go func() {
+		select {
+		case <-s.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 func (s *Service) inviteTimerB() time.Duration {
@@ -104,6 +139,9 @@ func (s *Service) recoverPCSCFAfter503(
 	defer s.finishPCSCFRecovery()
 	s.registerMu.Lock()
 	defer s.registerMu.Unlock()
+	if s.stopped() {
+		return
+	}
 	next, current := s.markRegistrarUnavailableAndAdvance(
 		failedRegistrar, decision.unavailableUntil,
 	)
@@ -124,7 +162,7 @@ func (s *Service) recoverPCSCFAfter503(
 	logging.Info("IMS P-CSCF recovery starting initial registration",
 		"device", s.DeviceID(), "previous", failedRegistrar, "next", next,
 		"retry_after_seconds", int(decision.retryAfter/time.Second))
-	ctx, cancel := context.WithTimeout(context.Background(), pcscfInitialRegistrationTimeout)
+	ctx, cancel := s.recoveryRegistrationContext()
 	defer cancel()
 	if err := s.registerLocked(ctx); err != nil {
 		s.reportRegistrationRuntimeError(fmt.Errorf("imscore: alternate P-CSCF registration failed: %w", err))

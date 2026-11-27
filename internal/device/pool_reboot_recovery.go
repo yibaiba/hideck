@@ -85,6 +85,7 @@ type modemRebootRecoveryOptions struct {
 	delays                 []time.Duration
 	removeBeforeScan       bool
 	restoreVoWiFi          bool
+	hadVoWiFi              bool // VoWiFi was stopped before the reset; used when restoreVoWiFi is false.
 	transportEvent         *TransportRecoveryEvent
 	transportEventObserved bool
 }
@@ -493,6 +494,21 @@ func (p *Pool) ScheduleModemRebootRecoveryForWorker(worker *Worker, reason strin
 	return true
 }
 
+// ScheduleModemRebootRecoveryAfterVoWiFiStop is used after StopVoWiFiBeforeReboot:
+// recovery does not tear VoWiFi down again and restarts it only if hadVoWiFi.
+func (p *Pool) ScheduleModemRebootRecoveryAfterVoWiFiStop(worker *Worker, reason string, hadVoWiFi bool) bool {
+	if p == nil || worker == nil || p.GetWorker(worker.ID) != worker {
+		return false
+	}
+	opts := defaultModemRebootRecoveryOptions(worker.ID, reason)
+	opts.delays = recoveryDelaysForReason(reason)
+	opts.initialWorker = worker
+	opts.restoreVoWiFi = false
+	opts.hadVoWiFi = hadVoWiFi
+	go p.runModemRebootRecovery(opts)
+	return true
+}
+
 func (p *Pool) scheduleWorkerRecoveryWithTransportEvent(deviceID string, reason string, event *TransportRecoveryEvent) bool {
 	deviceID = strings.TrimSpace(deviceID)
 	reason = strings.TrimSpace(reason)
@@ -628,7 +644,7 @@ func (p *Pool) runModemRebootRecovery(opts modemRebootRecoveryOptions) {
 		})
 	}
 
-	hadVoWiFi := false
+	hadVoWiFi := opts.hadVoWiFi
 	if opts.restoreVoWiFi {
 		hadVoWiFi = p.teardownVoWiFiForReconnect(opts.deviceID)
 	}

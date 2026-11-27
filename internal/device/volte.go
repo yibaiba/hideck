@@ -190,11 +190,9 @@ func (p *Pool) stopSoftwareIMS(deviceID string, restoreRadio bool) error {
 	if p == nil {
 		return nil
 	}
-	if !p.IsVoWiFiActive(deviceID) && !p.voWiFiHost().Starting(deviceID) {
-		p.voWiFiHost().InvalidateRuntime(deviceID, "native_phone")
-		return nil
-	}
-	return p.voWiFiHost().Disable(p.Context(), deviceID, "native_volte", restoreRadio)
+	stopCtx, cancel := p.voWiFiStopContext()
+	defer cancel()
+	return p.voWiFiHost().StopOrDrain(stopCtx, deviceID, "native_volte", restoreRadio)
 }
 
 func (p *Pool) SetNativeIMS(ctx context.Context, deviceID string, enabled bool) error {

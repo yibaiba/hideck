@@ -2,9 +2,11 @@ package vowifihost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yibaiba/hideck/pkg/logger"
 )
@@ -48,6 +50,9 @@ type LifecycleCommand struct {
 	AllowSwitch        bool
 	RuntimeInvalidated bool
 	Generation         uint64
+	// QueueTimeout, when set, bounds only the wait for the previous command;
+	// the command itself still runs with the caller's context.
+	QueueTimeout time.Duration
 }
 
 type LifecycleControllerOptions struct {
@@ -65,7 +70,9 @@ type LifecycleController struct {
 }
 
 type deviceLifecycle struct {
-	runMu        sync.Mutex
+	// runSlot serializes lifecycle commands (capacity 1). Waiters give up when
+	// their context ends, so a runner that never exits does not hang callers.
+	runSlot      chan struct{}
 	generationMu sync.Mutex
 	generation   uint64
 	runCancel    context.CancelFunc
@@ -117,8 +124,10 @@ func (c *LifecycleController) Submit(ctx context.Context, cmd LifecycleCommand) 
 		return c.submitPreempting(ctx, lifecycle, lifecycleSubmission{command: cmd, invalidation: invalidation, preempt: true})
 	}
 
-	lifecycle.runMu.Lock()
-	defer lifecycle.runMu.Unlock()
+	if err := lifecycle.acquireRun(ctx, cmd); err != nil {
+		return err
+	}
+	defer lifecycle.releaseRun()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -169,13 +178,61 @@ func (c *LifecycleController) submitPreempting(ctx context.Context, lifecycle *d
 	defer clearRun()
 	// Preemption requests cancellation immediately, but hardware ownership is
 	// transferred only after the previous command has finished its cleanup.
-	lifecycle.runMu.Lock()
-	defer lifecycle.runMu.Unlock()
+	if err := lifecycle.acquireRun(runCtx, cmd); err != nil {
+		return err
+	}
+	defer lifecycle.releaseRun()
 	if err := runCtx.Err(); err != nil {
 		return err
 	}
 	return c.runCommand(runCtx, cmd)
 }
+
+func (lifecycle *deviceLifecycle) acquireRun(ctx context.Context, cmd LifecycleCommand) error {
+	if cmd.QueueTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cmd.QueueTimeout)
+		defer cancel()
+	}
+	select {
+	case lifecycle.runSlot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			logger.Warn("VoWiFi lifecycle 命令等待前一个命令结束超时，前一个命令可能仍在等旧任务退出",
+				"device", cmd.DeviceID, "kind", cmd.Kind.String(), "reason", strings.TrimSpace(cmd.Reason), "err", ctx.Err())
+		} else {
+			logger.Debug("VoWiFi lifecycle 命令在排队时被取消",
+				"device", cmd.DeviceID, "kind", cmd.Kind.String(), "reason", strings.TrimSpace(cmd.Reason), "err", ctx.Err())
+			return fmt.Errorf("%w: 设备 %s 的排队请求已被新的操作取代: %w", ErrPreviousCommandRunning, cmd.DeviceID, ctx.Err())
+		}
+		return fmt.Errorf("%w: 设备 %s: %w", ErrPreviousCommandRunning, cmd.DeviceID, ctx.Err())
+	}
+}
+
+// ErrPreviousCommandRunning reports that the wait for the device's previous
+// lifecycle command ended first; that command may still own the modem.
+var ErrPreviousCommandRunning = errors.New("VoWiFi 前一个操作尚未结束")
+
+// WaitIdle returns once no lifecycle command runs for the device, or with an
+// error when ctx ends first.
+func (c *LifecycleController) WaitIdle(ctx context.Context, deviceID string) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	lifecycle := c.device(deviceID)
+	if err := lifecycle.acquireRun(ctx, LifecycleCommand{DeviceID: deviceID, Reason: "wait_idle"}); err != nil {
+		return err
+	}
+	lifecycle.releaseRun()
+	return nil
+}
+
+func (lifecycle *deviceLifecycle) releaseRun() { <-lifecycle.runSlot }
 
 func (c *LifecycleController) runCommand(ctx context.Context, cmd LifecycleCommand) error {
 	if c.TestRun != nil {
@@ -248,7 +305,7 @@ func (c *LifecycleController) device(deviceID string) *deviceLifecycle {
 	if lifecycle := c.devices[deviceID]; lifecycle != nil {
 		return lifecycle
 	}
-	lifecycle := &deviceLifecycle{}
+	lifecycle := &deviceLifecycle{runSlot: make(chan struct{}, 1)}
 	c.devices[deviceID] = lifecycle
 	return lifecycle
 }

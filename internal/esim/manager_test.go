@@ -1036,14 +1036,14 @@ func TestSwitchProfileFailedCallbackReceivesOriginalError(t *testing.T) {
 			calls: &enableCalls,
 		}}, nil
 	}
-	mgr.onBeforeSwitch = func(operation SwitchOperation, target string) uint64 {
+	mgr.onBeforeSwitch = func(operation SwitchOperation, target string) (uint64, error) {
 		if operation != SwitchOperationEnableProfile {
 			t.Fatalf("operation=%q want %q", operation, SwitchOperationEnableProfile)
 		}
 		if target != targetICCID {
 			t.Fatalf("target=%q want %q", target, targetICCID)
 		}
-		return 42
+		return 42, nil
 	}
 	var callbackErr error
 	var callbackToken uint64
@@ -1079,8 +1079,8 @@ func TestSwitchProfilePostSwitchHookStillRunsWhenBackendPowerWouldFail(t *testin
 	mgr := newTestQMIManagerForPowerCycle(t, be, &enableCalls)
 	mgr.postSwitchMinDelay = time.Millisecond
 	hookDone := make(chan uint64, 1)
-	mgr.onBeforeSwitch = func(operation SwitchOperation, target string) uint64 {
-		return 12
+	mgr.onBeforeSwitch = func(operation SwitchOperation, target string) (uint64, error) {
+		return 12, nil
 	}
 	mgr.onAfterSwitch = func(operation SwitchOperation, token uint64) {
 		hookDone <- token

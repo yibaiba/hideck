@@ -370,6 +370,7 @@ type Session struct {
 	ikeWaiters        map[ikeWaitKey]chan []byte
 	ikePending        map[ikeWaitKey][]byte
 	terminalErr       error
+	cleanupErr        error // local cleanup failures only, see CleanupError
 	initErr           error
 	state             string
 	dataPlaneStarted  bool
@@ -980,12 +981,25 @@ func (s *Session) cleanupResources(preserveResume bool) {
 func (s *Session) recordCleanupError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cleanupErr := fmt.Errorf("swu: clean up session: %w", err)
+	cleanupErr := fmt.Errorf("%w: %w", ErrSessionCleanup, err)
+	s.cleanupErr = errors.Join(s.cleanupErr, cleanupErr)
 	if s.terminalErr == nil {
 		s.terminalErr = cleanupErr
 		return
 	}
 	s.terminalErr = errors.Join(s.terminalErr, cleanupErr)
+}
+
+// ErrSessionCleanup marks a failure to release a local session resource
+// (data plane, routes, TUN, kernel state).
+var ErrSessionCleanup = errors.New("swu: clean up session")
+
+// CleanupError returns the local cleanup failures recorded when the session
+// was shut down, wrapping ErrSessionCleanup; nil when cleanup succeeded.
+func (s *Session) CleanupError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cleanupErr
 }
 
 // WaitDone blocks until the session is shut down.

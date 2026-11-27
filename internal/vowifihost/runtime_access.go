@@ -44,6 +44,16 @@ func (m *Manager) Active(deviceID string) bool {
 	return m.RuntimeStore().Active(deviceID)
 }
 
+// Running reports an instance that has not been stopped; Active also counts an
+// instance whose stopped runtime has not exited yet.
+func (m *Manager) Running(deviceID string) bool {
+	if m == nil {
+		return false
+	}
+	inst := m.RuntimeStore().Instance(strings.TrimSpace(deviceID))
+	return inst != nil && !inst.Stopped()
+}
+
 func (m *Manager) Starting(deviceID string) bool {
 	if m == nil {
 		return false

@@ -31,6 +31,10 @@ func RunLoop(
 		}
 		err := run(ctx)
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Keep local cleanup failures visible to the host after a stop.
+			if errors.Is(err, swu.ErrSessionCleanup) {
+				return errors.Join(ctxErr, err)
+			}
 			return ctxErr
 		}
 		// A rejected candidate may cancel its own Delete exchange. The parent

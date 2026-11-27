@@ -2,6 +2,7 @@ package vowifihost
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -28,22 +29,40 @@ func (m *Manager) releaseFailedRuntime(deviceID string, inst *runtimehost.Instan
 	}
 	stateMu := m.stateLock(deviceID)
 	stateMu.Lock()
-	if !m.RuntimeStore().DeleteInstance(deviceID, inst) {
+	// Claim once: the first terminal event or teardown to stop the instance
+	// owns its release; later events see Stopped and leave it alone.
+	if m.RuntimeStore().Instance(deviceID) != inst || inst.Stopped() {
 		stateMu.Unlock()
 		return false
 	}
+	claimCtx, claimed := context.WithCancel(context.Background())
+	claimed()
+	_ = inst.Stop(claimCtx) // starts the release task without waiting
 	m.lifecycleController().Invalidate(deviceID)
 	m.ClearDesiredRecoverState(deviceID)
 	epoch := m.invalidateRuntimeStateLocked(deviceID, invalidationReason)
 	stateMu.Unlock()
 	m.BroadcastState(deviceID)
 
+	// Keep the instance registered until its runtime has exited, so teardowns
+	// arriving meanwhile wait for it instead of finding nothing to stop.
 	stopCtx, cancel := context.WithTimeout(context.Background(), failedRuntimeStopTimeout)
-	defer cancel()
-	if err := inst.Stop(stopCtx); err != nil {
+	err := inst.Stop(stopCtx)
+	cancel()
+	if errors.Is(err, runtimehost.ErrRunnerNotExited) {
+		logger.Error("VoWiFi 故障实例未在期限内退出，保留实例直到退出", "device", deviceID, "err", err)
+		err = inst.Stop(context.Background())
+	}
+	if err != nil {
 		logger.Warn("VoWiFi 故障实例停止失败", "device", deviceID, "err", err)
 	}
 	stateMu.Lock()
+	if !m.RuntimeStore().DeleteInstance(deviceID, inst) {
+		// A teardown that waited for the same exit already handed over.
+		stateMu.Unlock()
+		return true
+	}
+	m.BroadcastState(deviceID)
 	if !m.ShouldRun(deviceID, epoch) || m.Active(deviceID) || m.Starting(deviceID) {
 		stateMu.Unlock()
 		return true

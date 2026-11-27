@@ -420,12 +420,11 @@ func (s *Service) StopCurrent() {
 	if service := s.existingUSSIService(); service != nil {
 		service.Stop()
 	}
-	select {
-	case <-s.stop:
-	default:
+	// Host release and runner cleanup may stop the same service concurrently.
+	s.stopOnce.Do(func() {
 		s.transitionRegStatus(registrationStopping)
 		close(s.stop)
-	}
+	})
 	s.stopInboundStatsLogger()
 	// The replaced SAs' flows hold readers that networkDone waits for.
 	s.retireReplacedSecurity(s.saRetirement.Load(), "stop")
@@ -485,6 +484,7 @@ func (s *Service) StopCurrent() {
 	}
 	s.protectedConnMu.Unlock()
 	s.networkDone.Wait()
+	s.pcscfRecoveryWG.Wait()
 	if dialogs := s.dialogs(); dialogs != nil {
 		dialogs.closeAll()
 	}
