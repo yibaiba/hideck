@@ -9,9 +9,19 @@ import (
 
 	"github.com/yibaiba/hideck/internal/backend"
 	"github.com/yibaiba/hideck/internal/esim"
+	"github.com/yibaiba/hideck/internal/vowifihost"
 	"github.com/yibaiba/hideck/pkg/logger"
 	"github.com/yibaiba/hideck/pkg/simidentity"
 )
+
+// ErrSwitchVoWiFiNotStopped aborts an eSIM switch whose old VoWiFi task did not
+// stop within voWiFiStopWaitTimeout; VoWiFi has been stopped and is not restored.
+var ErrSwitchVoWiFiNotStopped = errors.New("已请求停止 VoWiFi，但旧任务尚未确认退出，未切换 profile")
+
+// ErrSwitchRadioNotReleased aborts a switch to a Lebara UK target (or one that
+// could not be classified) whose radio could not be turned off first: with the
+// radio on, the new profile could attach and move the card to another IMSI.
+var ErrSwitchRadioNotReleased = errors.New("切入 Lebara UK 或无法识别的目标前关闭射频失败")
 
 var postSwitchSIMAuthRecoveryDelays = []time.Duration{
 	500 * time.Millisecond,
@@ -318,25 +328,56 @@ func (p *Pool) applyNetworkPreferenceForSwitchSnapshot(worker *Worker, snapshot 
 	return worker.StopNetwork()
 }
 
-func releaseRadioBeforeSwitch(deviceID string, worker *Worker) {
+func releaseRadioBeforeSwitch(deviceID string, worker *Worker) error {
 	if worker == nil || worker.Backend == nil || resolvedBackendMode(worker.Config) == backend.BackendPCSC {
-		return
+		return nil
 	}
 	controller, ok := worker.Backend.(backend.OperatingModeController)
 	if !ok {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := controller.SetOperatingMode(ctx, backend.ModeLowPower); err != nil {
-		logger.Warn("eSIM 切卡前释放 radio 失败，继续切卡",
-			"device", deviceID,
-			"err", err)
-		return
+	err := controller.SetOperatingMode(ctx, backend.ModeLowPower)
+	cancel()
+	if err != nil {
+		// The mode is read back only to report it. A failed release stays a
+		// failure even when the mode reads back as off: the QMI backend passes
+		// a reset in progress (ModeReset, 4) through unchanged, the same value
+		// it maps persistent flight (ModePersistLow, 6) to.
+		readCtx, cancelRead := context.WithTimeout(context.Background(), 2*time.Second)
+		mode, readErr := controller.GetOperatingMode(readCtx)
+		cancelRead()
+		if readErr != nil {
+			return fmt.Errorf("%w（读回射频模式失败: %v）", err, readErr)
+		}
+		return fmt.Errorf("%w（读回射频模式 %d）", err, mode)
 	}
 	logger.Info("eSIM 切卡前已释放 radio",
 		"device", deviceID,
 		"mode", backend.ModeLowPower)
+	return nil
+}
+
+// releaseRadioForSwitchTarget turns the radio off before the profile changes.
+// Only a Lebara UK target (or an unclassified one) aborts the switch when that
+// fails; the RadioCycle release of other cards keeps going as before.
+func (p *Pool) releaseRadioForSwitchTarget(worker *Worker, snapshot esimSwitchContext) error {
+	if snapshot.TargetLebaraCandidate || snapshot.TargetClassifyFailed {
+		if err := p.holdRadioOffForLebaraSwitchTarget(worker); err != nil {
+			logger.Error("切入受保护目标前关闭射频失败，中止切卡",
+				"device", worker.ID, "switch_token", snapshot.SwitchToken, "target_iccid", snapshot.TargetICCID,
+				"target_lebara_uk", snapshot.TargetLebaraCandidate, "target_classify_failed", snapshot.TargetClassifyFailed,
+				"err", err)
+			return fmt.Errorf("%w: %w", ErrSwitchRadioNotReleased, err)
+		}
+		return nil
+	}
+	if worker.Config.ESIMSwitch.RadioCycle {
+		if err := releaseRadioBeforeSwitch(worker.ID, worker); err != nil {
+			logger.Warn("eSIM 切卡前释放 radio 失败，继续切卡", "device", worker.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 func (p *Pool) bringRadioOnlineAfterSwitch(deviceID string, worker *Worker, snapshot esimSwitchContext, attachTimeout time.Duration) {
@@ -398,10 +439,35 @@ func (p *Pool) handleESIMSwitchBeforeWorkerLocked(
 }
 
 func (p *Pool) handleESIMSwitchBeforeSnapshot(deviceID string, snapshot esimSwitchContext) uint64 {
+	token, _ := p.prepareESIMSwitch(deviceID, snapshot)
+	return token
+}
+
+// prepareESIMSwitch returns an error when the old VoWiFi task has not stopped
+// (the switch is then aborted before any radio, data or profile change), or
+// when the radio could not be turned off for a Lebara UK target or one that
+// could not be classified (the switch is then aborted before any profile
+// change and the failure path restores the snapshot).
+func (p *Pool) prepareESIMSwitch(deviceID string, snapshot esimSwitchContext) (uint64, error) {
 	if snapshot.SwitchToken == 0 {
-		return 0
+		return 0, nil
 	}
-	holdTargetRadio := snapshot.TargetLebaraCandidate || snapshot.TargetClassifyFailed
+	// Stop the old VoWiFi task first: until it has exited, nothing about the
+	// SIM, its identity or the radio changes, so an abort leaves nothing to undo.
+	if snapshot.VoWiFiActiveBefore {
+		logger.Info("ESIM 触发切卡，正在为该设备主动注销 VoWiFi 隧道", "device", deviceID)
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), voWiFiStopWaitTimeout)
+	err := p.voWiFiHost().SwitchBegin(stopCtx, deviceID)
+	cancelStop()
+	if vowifihost.IsCleanupOnlyError(err) {
+		logger.Error("切卡前停止 VoWiFi：旧任务已退出但本地清理失败，继续切卡", "device", deviceID, "err", err)
+		err = nil
+	}
+	if err != nil {
+		logger.Error("切卡前 VoWiFi 旧任务未停止，中止切卡", "device", deviceID, "switch_token", snapshot.SwitchToken, "err", err)
+		return snapshot.SwitchToken, fmt.Errorf("%w: %w", ErrSwitchVoWiFiNotStopped, err)
+	}
 	if worker := p.GetWorker(deviceID); worker != nil {
 		worker.markHealthRecoveryWindow(qmiHealthGraceAfterSwitch)
 		snapshot.IdentityGeneration = worker.BeginSIMIdentityTransition(snapshot.TargetICCID, "esim_switch_begin")
@@ -419,17 +485,9 @@ func (p *Pool) handleESIMSwitchBeforeSnapshot(deviceID string, snapshot esimSwit
 				"switch_token", snapshot.SwitchToken)
 		}
 	}
-	if snapshot.VoWiFiActiveBefore {
-		logger.Info("ESIM 触发切卡，正在为该设备主动注销 VoWiFi 隧道", "device", deviceID)
-	}
-	if err := p.voWiFiHost().SwitchBegin(context.Background(), deviceID); err != nil {
-		logger.Warn("切卡前注销 VoWiFi 隧道失败", "device", deviceID, "err", err)
-	}
 	if worker := p.GetWorker(deviceID); worker != nil && worker.QMICore != nil {
-		if holdTargetRadio {
-			p.holdRadioOffForLebaraSwitchTarget(worker)
-		} else if worker.Config.ESIMSwitch.RadioCycle {
-			releaseRadioBeforeSwitch(deviceID, worker)
+		if err := p.releaseRadioForSwitchTarget(worker, snapshot); err != nil {
+			return snapshot.SwitchToken, err
 		}
 		worker.QMICore.ReleaseAPDULeasesForSwitchTeardown()
 		// 切卡前主动清空 DeviceSnapshot 中缓存的 ICCID/IMSI，
@@ -438,18 +496,16 @@ func (p *Pool) handleESIMSwitchBeforeSnapshot(deviceID string, snapshot esimSwit
 			snap.ResetIdentities(false)
 		}
 	} else if worker := p.GetWorker(deviceID); worker != nil {
-		if holdTargetRadio {
-			p.holdRadioOffForLebaraSwitchTarget(worker)
-		} else if worker.Config.ESIMSwitch.RadioCycle {
-			releaseRadioBeforeSwitch(deviceID, worker)
+		if err := p.releaseRadioForSwitchTarget(worker, snapshot); err != nil {
+			return snapshot.SwitchToken, err
 		}
 	}
-	return snapshot.SwitchToken
+	return snapshot.SwitchToken, nil
 }
 
-func (p *Pool) holdRadioOffForLebaraSwitchTarget(worker *Worker) {
+func (p *Pool) holdRadioOffForLebaraSwitchTarget(worker *Worker) error {
 	if worker == nil {
-		return
+		return nil
 	}
 	worker.setCellularRadioSuppressed(true)
 	if nc := worker.NetworkController(); nc != nil && nc.IsConnected() {
@@ -457,7 +513,7 @@ func (p *Pool) holdRadioOffForLebaraSwitchTarget(worker *Worker) {
 			logger.Warn("切换 Lebara UK 前关闭数据连接失败", "device", worker.ID, "err", err)
 		}
 	}
-	releaseRadioBeforeSwitch(worker.ID, worker)
+	return releaseRadioBeforeSwitch(worker.ID, worker)
 }
 
 func (p *Pool) refreshPostSwitchIdentity(deviceID string, worker *Worker, snapshot esimSwitchContext) (bool, error) {
@@ -665,33 +721,33 @@ func (p *Pool) waitPostSwitchCoreReady(deviceID string, worker *Worker, snapshot
 	return true
 }
 
-func (p *Pool) newESIMSwitchCallbacks(deviceID string) (func(esim.SwitchOperation, string) uint64, func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
+func (p *Pool) newESIMSwitchCallbacks(deviceID string) (func(esim.SwitchOperation, string) (uint64, error), func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
 	return p.newESIMSwitchCallbacksForWorker(deviceID, nil)
 }
 
-func (p *Pool) newESIMSwitchCallbacksForWorker(deviceID string, worker *Worker) (func(esim.SwitchOperation, string) uint64, func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
+func (p *Pool) newESIMSwitchCallbacksForWorker(deviceID string, worker *Worker) (func(esim.SwitchOperation, string) (uint64, error), func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
 	return p.buildESIMSwitchCallbacks(deviceID, worker, false)
 }
 
-func (p *Pool) newLeasedESIMSwitchCallbacksForWorker(deviceID string, worker *Worker) (func(esim.SwitchOperation, string) uint64, func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
+func (p *Pool) newLeasedESIMSwitchCallbacksForWorker(deviceID string, worker *Worker) (func(esim.SwitchOperation, string) (uint64, error), func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
 	return p.buildESIMSwitchCallbacks(deviceID, worker, true)
 }
 
-func (p *Pool) buildESIMSwitchCallbacks(deviceID string, worker *Worker, ownershipLeaseHeld bool) (func(esim.SwitchOperation, string) uint64, func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
+func (p *Pool) buildESIMSwitchCallbacks(deviceID string, worker *Worker, ownershipLeaseHeld bool) (func(esim.SwitchOperation, string) (uint64, error), func(uint64), func(uint64, error), func(uint64, esim.SwitchPhase, error), func(uint64, esim.SwitchPhase)) {
 	isCurrentWorker := func() bool {
 		return worker == nil || p.GetWorker(deviceID) == worker
 	}
-	onBefore := func(operation esim.SwitchOperation, targetICCID string) uint64 {
+	onBefore := func(operation esim.SwitchOperation, targetICCID string) (uint64, error) {
 		if !isCurrentWorker() {
-			return 0
+			return 0, nil
 		}
 		if operation != esim.SwitchOperationEnableProfile {
 			targetICCID = ""
 		}
 		if ownershipLeaseHeld {
-			return p.handleESIMSwitchBeforeWorkerLocked(deviceID, targetICCID, worker)
+			return p.prepareESIMSwitch(deviceID, p.beginESIMSwitchForWorkerLocked(deviceID, targetICCID, worker))
 		}
-		return p.handleESIMSwitchBeforeWorker(deviceID, targetICCID, worker)
+		return p.prepareESIMSwitch(deviceID, p.beginESIMSwitchForWorker(deviceID, targetICCID, worker))
 	}
 	onAfter := func(token uint64) {
 		if !isCurrentWorker() {
@@ -1181,7 +1237,24 @@ func (p *Pool) handleESIMSwitchFailed(deviceID string, token uint64) {
 }
 
 func (p *Pool) handleESIMSwitchFailedWithError(deviceID string, token uint64, err error) {
+	if errors.Is(err, ErrSwitchVoWiFiNotStopped) {
+		p.abortESIMSwitchBeforeRadioChange(deviceID, token)
+		return
+	}
 	p.handleESIMSwitchFailed(deviceID, token)
+}
+
+// abortESIMSwitchBeforeRadioChange ends a switch aborted by prepareESIMSwitch
+// before any SIM identity, radio, data or profile change; the old VoWiFi task
+// may still use the modem, so only the switch tables are cleared.
+func (p *Pool) abortESIMSwitchBeforeRadioChange(deviceID string, token uint64) {
+	snapshot, ok := p.finishESIMSwitchForFailure(deviceID, token)
+	if !ok {
+		return
+	}
+	logger.Warn("eSIM 切卡已中止：VoWiFi 旧任务未停止，未改动射频、数据和 profile",
+		"device", deviceID, "switch_token", snapshot.SwitchToken)
+	p.broadcastVoWiFiStateChange(deviceID)
 }
 
 func (p *Pool) handleESIMSwitchDegradedWithError(deviceID string, token uint64, phase esim.SwitchPhase, err error) {

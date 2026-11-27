@@ -8,6 +8,7 @@ import (
 
 	"github.com/iniwex5/vowifi-go/engine/swu"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/logging"
+	"go.uber.org/zap"
 )
 
 func runUntilInterrupted(
@@ -39,6 +40,10 @@ func runUntilInterrupted(
 				req.voiceBinding.AttachIfReady(successor.IMSService)
 			}
 			stopper(context.Background(), old)
+			if old != nil && old.cleanupErr != nil {
+				zap.S().Warnw("retired SWu session cleanup failed",
+					"device", req.DeviceID, "trace_id", req.TraceID, "error", old.cleanupErr)
+			}
 			continue
 		}
 		stopper(context.Background(), current)
@@ -46,7 +51,11 @@ func runUntilInterrupted(
 			req.voiceBinding.Detach()
 		}
 		emitStopped(ctx, req, current)
-		return interruptionError(ctx, outcome, current)
+		err := interruptionError(ctx, outcome, current)
+		if current != nil && current.cleanupErr != nil {
+			err = errors.Join(err, current.cleanupErr)
+		}
+		return err
 	}
 }
 

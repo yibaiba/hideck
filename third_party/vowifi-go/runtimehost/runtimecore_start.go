@@ -69,16 +69,17 @@ func startInstance(
 	options runtimeLaunchOptions,
 ) (*Instance, error) {
 	instance, ready, done := launchRuntimeCore(ctx, request, options)
+	// Stop waits for the runner to exit, so the caller does not hand the
+	// modem to the next lifecycle command while the old runner still runs.
 	select {
 	case <-ctx.Done():
-		_ = instance.Stop(context.Background())
-		return nil, ctx.Err()
+		return nil, errors.Join(ctx.Err(), instance.Stop(context.Background()))
 	case err := <-done:
-		_ = instance.Stop(context.Background())
+		stopErr := instance.Stop(context.Background())
 		if err == nil {
 			err = errors.New("runtimehost: runtime core stopped before IPsec became ready")
 		}
-		return nil, err
+		return nil, errors.Join(err, stopErr)
 	case <-ready:
 		return instance, nil
 	}
@@ -99,7 +100,8 @@ func launchRuntimeCore(
 	options runtimeLaunchOptions,
 ) (*Instance, <-chan struct{}, <-chan error) {
 	runCtx, cancel := context.WithCancel(ctx)
-	instance := &Instance{cancel: cancel}
+	exited := make(chan struct{})
+	instance := &Instance{cancel: cancel, exited: exited}
 	instance.setState(coreInitialState(request))
 	instance.AddObserver(options.observer)
 	ready := make(chan struct{})
@@ -118,7 +120,10 @@ func launchRuntimeCore(
 	done := make(chan error, 1)
 	go func() {
 		_, err := runner(runCtx, request)
-		done <- apiErrorToInternal(err)
+		err = apiErrorToInternal(err)
+		instance.recordRunnerExit(err)
+		close(exited)
+		done <- err
 	}()
 	return instance, ready, done
 }

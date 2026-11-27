@@ -101,7 +101,7 @@ func TestRemovedWorkerCannotStartNewESIMSwitch(t *testing.T) {
 	replacement := &Worker{ID: id, Config: port.worker.Config}
 	p.AttachWorkerForTest(replacement)
 
-	if token := onBefore(esim.SwitchOperationEnableProfile, "8944100000000000043"); token != 0 {
+	if token, _ := onBefore(esim.SwitchOperationEnableProfile, "8944100000000000043"); token != 0 {
 		t.Fatalf("stale eSIM manager returned switch token %d", token)
 	}
 	if p.IsESIMSwitching(id) {

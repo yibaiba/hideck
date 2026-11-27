@@ -1,7 +1,6 @@
 package imscore
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -81,7 +80,7 @@ func (s *Service) recoverPortSOnAlternate(failedRegistrar, next string, cause po
 		"previous", failedRegistrar, "next", next,
 		"failure_at", cause.observedAt, "deprioritized_until", cause.deprioritizedUntil)
 	baseline := s.captureDownlinkCheckpoint()
-	ctx, cancel := context.WithTimeout(context.Background(), pcscfInitialRegistrationTimeout)
+	ctx, cancel := s.recoveryRegistrationContext()
 	err := s.registerLocked(ctx)
 	cancel()
 	if err != nil {

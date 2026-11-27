@@ -1352,14 +1352,20 @@ func (p *Pool) handleConfirmedSIMRemoval(owner workerLifecycleOwner, source stri
 	p.clearDesiredVoWiFiRecoverState(deviceID)
 	p.stopNativeVoLTE(deviceID, "sim_removed")
 	_ = p.stopModemVoice(deviceID)
-	if !p.IsVoWiFiActive(deviceID) && !p.voWiFiHost().Starting(deviceID) && p.GetVoWiFiAppForDevice(deviceID) == nil {
-		return
-	}
-	logger.Warn("检测到 SIM 已拔出，自动停止 VoWiFi", "device", deviceID, "source", source)
 	if !p.workerLifecycleOwnerCurrent(owner) {
 		return
 	}
-	if err := p.voWiFiHost().Disable(baseCtx, deviceID, "sim_removed", false); err != nil {
+	// Bounded: this runs under the device and policy transition locks.
+	stopCtx, cancel := context.WithTimeout(baseCtx, voWiFiStopWaitTimeout)
+	defer cancel()
+	var err error
+	if p.GetVoWiFiAppForDevice(deviceID) != nil {
+		logger.Warn("检测到 SIM 已拔出，自动停止 VoWiFi", "device", deviceID, "source", source)
+		err = p.voWiFiHost().Disable(stopCtx, deviceID, "sim_removed", false)
+	} else {
+		err = p.voWiFiHost().StopOrDrain(stopCtx, deviceID, "sim_removed", false)
+	}
+	if err != nil && !vowifihost.IsCleanupOnlyError(err) {
 		logger.Warn("SIM 拔出后停止 VoWiFi 失败", "device", deviceID, "source", source, "err", err)
 	}
 }
@@ -1522,7 +1528,14 @@ func (p *Pool) removeWorkerForPolicyTransition(deviceID string) error {
 		return err
 	}
 	// Cancel and drain startup before removing the hardware it still owns.
-	if err := p.voWiFiHost().Disable(p.ctx, deviceID, "remove_worker", false); err != nil {
+	stopCtx, cancel := p.voWiFiStopContext()
+	err := p.voWiFiHost().Disable(stopCtx, deviceID, "remove_worker", false)
+	cancel()
+	if vowifihost.IsCleanupOnlyError(err) {
+		logger.Error("移除设备：旧 VoWiFi 任务已退出但本地清理失败，继续移除", "device", deviceID, "err", err)
+		err = nil
+	}
+	if err != nil {
 		return err
 	}
 	p.cancelWorkerLifecycleTimers(deviceID)
@@ -2120,11 +2133,19 @@ func (p *Pool) RebuildWorker(deviceID string) error {
 	// 先停止 VoWiFi（如有），并让任何正在启动中的旧实例失效。
 	p.voWiFiHost().InvalidateRuntime(deviceID, "rebuild_worker")
 	if err := p.DisableVoWiFi(deviceID); err != nil {
+		if vowifihost.IsOldTaskRunning(err) {
+			// The old VoWiFi task still uses the modem: rebuilding now would
+			// let the new Worker operate it at the same time.
+			return fmt.Errorf("RebuildWorker 中止，旧 VoWiFi 任务未退出: %w", err)
+		}
 		logger.Warn("RebuildWorker 停止旧 VoWiFi 失败", "device", deviceID, "err", err)
 	}
 
 	// 移除旧 Worker
 	if err := p.RemoveWorker(deviceID); err != nil {
+		if vowifihost.IsOldTaskRunning(err) {
+			return fmt.Errorf("RebuildWorker 中止，旧 VoWiFi 任务未退出: %w", err)
+		}
 		logger.Warn("RebuildWorker 移除旧 Worker 失败", "device", deviceID, "err", err)
 	}
 	time.Sleep(1 * time.Second) // 等待资源释放
@@ -2345,7 +2366,7 @@ func configureWorkerAPDUArbiter(w *Worker, qmiTransport esim.QMIAPDUTransport) {
 func newESIMManagerForWorker(
 	w *Worker,
 	qmiTransport esim.QMIAPDUTransport,
-	onBefore func(esim.SwitchOperation, string) uint64,
+	onBefore func(esim.SwitchOperation, string) (uint64, error),
 	onAfter func(uint64),
 	onFailed func(uint64, error),
 	onDegraded func(uint64, esim.SwitchPhase, error),
@@ -2355,9 +2376,9 @@ func newESIMManagerForWorker(
 		return nil, fmt.Errorf("worker 不能为空")
 	}
 
-	var beforeWithOperation func(esim.SwitchOperation, string) uint64
+	var beforeWithOperation func(esim.SwitchOperation, string) (uint64, error)
 	if onBefore != nil {
-		beforeWithOperation = func(operation esim.SwitchOperation, targetICCID string) uint64 {
+		beforeWithOperation = func(operation esim.SwitchOperation, targetICCID string) (uint64, error) {
 			return onBefore(operation, targetICCID)
 		}
 	}

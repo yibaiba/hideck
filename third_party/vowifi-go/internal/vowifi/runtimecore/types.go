@@ -149,6 +149,8 @@ type SessionResult struct {
 	XCAPNetwork   *netstack.Network
 	Proxy         *ProxyConfig
 	interrupts    chan InterruptOutcome
+	// cleanupErr holds local cleanup failures from defaultStopSession.
+	cleanupErr error
 }
 
 type Snapshot struct {

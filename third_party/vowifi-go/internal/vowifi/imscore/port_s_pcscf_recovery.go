@@ -121,13 +121,18 @@ func (s *Service) startPendingPortSResetFailover() {
 		s.finishPCSCFRecovery()
 		return
 	}
-	go s.recoverPCSCFAfterPortSReset(failed, observedAt)
+	if !s.startPCSCFRecovery(func() { s.recoverPCSCFAfterPortSReset(failed, observedAt) }) {
+		s.finishPCSCFRecovery()
+	}
 }
 
 func (s *Service) recoverPCSCFAfterPortSReset(failedRegistrar string, observedAt time.Time) {
 	defer s.finishPCSCFRecovery()
 	s.registerMu.Lock()
 	defer s.registerMu.Unlock()
+	if s.stopped() {
+		return
+	}
 	s.recoverPCSCFAfterPortSFailureLocked(failedRegistrar, portSFailoverCause{
 		reason: portSPeerResetFailure, observedAt: observedAt,
 	})

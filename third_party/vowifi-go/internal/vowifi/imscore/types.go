@@ -343,6 +343,10 @@ type Service struct {
 	reginfoAOR             string
 
 	stop chan struct{}
+	// pcscfRecoveryWG tracks the 503 P-CSCF recovery goroutine; StopCurrent
+	// waits for it because its registration may still use the SIM for AKA.
+	pcscfRecoveryWG sync.WaitGroup
+	stopOnce        sync.Once
 
 	// RFC 3842 MWI subscription. Independent of the RFC 3680 reg dialog.
 	mwiSubscriptionDialog        registrationSubscriptionDialog

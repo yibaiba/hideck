@@ -34,7 +34,9 @@ func (s *Service) triggerMTReportPCSCFRecovery(reportErr error) {
 	if !s.pcscfRecoveryPending.CompareAndSwap(false, true) {
 		return
 	}
-	go s.recoverPCSCFAfterMTReportReject(registrar, status, penalty.deprioritizedUntil)
+	if !s.startPCSCFRecovery(func() { s.recoverPCSCFAfterMTReportReject(registrar, status, penalty.deprioritizedUntil) }) {
+		s.finishPCSCFRecovery()
+	}
 }
 
 func (s *Service) recoverPCSCFAfterMTReportReject(
@@ -45,6 +47,9 @@ func (s *Service) recoverPCSCFAfterMTReportReject(
 	defer s.finishPCSCFRecovery()
 	s.registerMu.Lock()
 	defer s.registerMu.Unlock()
+	if s.stopped() {
+		return
+	}
 	current := s.currentPortSRecoveryRegistrar()
 	if s.stopped() {
 		return

@@ -297,7 +297,7 @@ type Manager struct {
 	discoveredEUICCs            []EUICCInfo
 	sf                          *singleflight.Group
 
-	onBeforeSwitch       func(SwitchOperation, string) uint64              // 切卡前执行的回调，返回本次 switch token
+	onBeforeSwitch       func(SwitchOperation, string) (uint64, error)     // 切卡前执行的回调，返回本次 switch token
 	onAfterSwitch        func(SwitchOperation, uint64)                     // 切卡后网络就绪后执行的回调
 	onSwitchFailed       func(SwitchOperation, uint64, error)              // 切卡失败后执行的回调
 	onSwitchDegraded     func(SwitchOperation, uint64, SwitchPhase, error) // 切卡已接受但后处理降级回调
@@ -352,7 +352,7 @@ type ManagerOptions struct {
 	Backend              backendpkg.DeviceBackend
 	QMITransport         QMIAPDUTransport
 	IMEIProvider         func(ctx context.Context) (string, error)
-	OnBeforeSwitch       func(SwitchOperation, string) uint64
+	OnBeforeSwitch       func(SwitchOperation, string) (uint64, error)
 	OnAfterSwitch        func(SwitchOperation, uint64)
 	OnSwitchFailed       func(SwitchOperation, uint64, error)
 	OnSwitchDegraded     func(SwitchOperation, uint64, SwitchPhase, error)
@@ -566,7 +566,7 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 }
 
 type ChannelFactorySwitchCallbacks struct {
-	OnBeforeSwitch   func(SwitchOperation, string) uint64
+	OnBeforeSwitch   func(SwitchOperation, string) (uint64, error)
 	OnAfterSwitch    func(SwitchOperation, uint64)
 	OnSwitchFailed   func(SwitchOperation, uint64, error)
 	OnSwitchDegraded func(SwitchOperation, uint64, SwitchPhase, error)
@@ -624,11 +624,11 @@ func NewManagerWithChannelFactory(
 	onBefore func(),
 	onAfter func(),
 ) *Manager {
-	var beforeWithToken func(SwitchOperation, string) uint64
+	var beforeWithToken func(SwitchOperation, string) (uint64, error)
 	if onBefore != nil {
-		beforeWithToken = func(SwitchOperation, string) uint64 {
+		beforeWithToken = func(SwitchOperation, string) (uint64, error) {
 			onBefore()
-			return 0
+			return 0, nil
 		}
 	}
 	var afterWithToken func(SwitchOperation, uint64)
@@ -2709,10 +2709,9 @@ func (m *Manager) SwitchProfileWithResult(ctx context.Context, targetICCID strin
 	defer releaseOwnership()
 	m.drainSwitchSignals()
 
-	// 1. 查找 ICCID 所属的 eUICC
+	// 1. 前端已知 AID 时只做本地解析
 	var targetAID []byte
 	if aidHex != "" {
-		// 前端已知 AID，直接 decode
 		targetAID, err = hex.DecodeString(aidHex)
 		if err != nil {
 			return result, NewSwitchProfileError(
@@ -2722,10 +2721,27 @@ func (m *Manager) SwitchProfileWithResult(ctx context.Context, targetICCID strin
 			)
 		}
 		logger.Info("使用前端传入的 AID", "device", m.deviceID, "AID", aidHex)
-	} else {
-		// 回退：遍历查找
+	}
+
+	// 切卡前的回调断开 VoWiFi 并等旧任务退出。之后才访问 SIM：查 AID、打开
+	// LPA 通道都会发 APDU，PC/SC 断开通道时还会复位卡。
+	if m.onBeforeSwitch != nil {
+		var beforeErr error
+		switchToken, beforeErr = m.onBeforeSwitch(operation, targetICCID)
+		switchStarted = true
+		if beforeErr != nil {
+			result.SwitchToken = switchToken
+			switchFailureErr = beforeErr
+			return result, fmt.Errorf("切卡前准备失败，未切换 profile: %w", beforeErr)
+		}
+	}
+	result.SwitchToken = switchToken
+
+	// 2. 未知 AID 时遍历查找 ICCID 所属的 eUICC
+	if targetAID == nil {
 		targetAID, err = m.findAIDForICCID(targetICCID)
 		if err != nil {
+			switchFailureErr = err
 			code := SwitchProfileErrorInternal
 			if IsDeleteProfileNotFound(err) {
 				code = SwitchProfileErrorProfileNotFound
@@ -2734,9 +2750,10 @@ func (m *Manager) SwitchProfileWithResult(ctx context.Context, targetICCID strin
 		}
 	}
 
-	// 2. 用对应 AID 创建 LPA client
+	// 3. 用对应 AID 创建 LPA client
 	client, err := m.createLPAWithAID(targetAID)
 	if err != nil {
+		switchFailureErr = err
 		return result, err
 	}
 	clientClosed := false
@@ -2751,12 +2768,6 @@ func (m *Manager) SwitchProfileWithResult(ctx context.Context, targetICCID strin
 		"target", targetICCID,
 		"AID", fmt.Sprintf("%X", targetAID))
 
-	// 触发切卡前的回调（通常用于主动断开 VoWiFi 防冲突）
-	if m.onBeforeSwitch != nil {
-		switchToken = m.onBeforeSwitch(operation, targetICCID)
-		switchStarted = true
-	}
-	result.SwitchToken = switchToken
 	result.Phase = SwitchPhaseAPDUSwitching
 	m.emitSwitchPhase(operation, switchToken, SwitchPhaseAPDUSwitching)
 
@@ -2887,9 +2898,23 @@ func (m *Manager) DisableProfile(ctx context.Context, targetICCID string, aidHex
 				err,
 			)
 		}
-	} else {
+	}
+
+	// 先断开 VoWiFi 并等旧任务退出，再访问 SIM（同 SwitchProfileWithResult）。
+	if m.onBeforeSwitch != nil {
+		var beforeErr error
+		switchToken, beforeErr = m.onBeforeSwitch(operation, "")
+		disableStarted = true
+		if beforeErr != nil {
+			switchFailureErr = beforeErr
+			return fmt.Errorf("禁用 profile 前准备失败，未禁用: %w", beforeErr)
+		}
+	}
+
+	if targetAID == nil {
 		targetAID, err = m.findAIDForICCID(targetICCID)
 		if err != nil {
+			switchFailureErr = err
 			code := DisableProfileErrorInternal
 			if IsDeleteProfileNotFound(err) {
 				code = DisableProfileErrorProfileNotFound
@@ -2900,6 +2925,7 @@ func (m *Manager) DisableProfile(ctx context.Context, targetICCID string, aidHex
 
 	client, err := m.createLPAWithAID(targetAID)
 	if err != nil {
+		switchFailureErr = err
 		return err
 	}
 	clientClosed := false
@@ -2914,10 +2940,6 @@ func (m *Manager) DisableProfile(ctx context.Context, targetICCID string, aidHex
 		"ICCID", targetICCID,
 		"AID", fmt.Sprintf("%X", targetAID))
 
-	if m.onBeforeSwitch != nil {
-		switchToken = m.onBeforeSwitch(operation, "")
-		disableStarted = true
-	}
 	m.emitSwitchPhase(operation, switchToken, SwitchPhaseAPDUSwitching)
 
 	switchBarrier, err := m.beginSwitchAPDUBarrier(ctx)

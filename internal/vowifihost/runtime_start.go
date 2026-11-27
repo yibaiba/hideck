@@ -10,6 +10,7 @@ import (
 	"github.com/iniwex5/vowifi-go/runtimehost/eventhost"
 	"github.com/iniwex5/vowifi-go/runtimehost/messaging"
 	"github.com/iniwex5/vowifi-go/runtimehost/voicehost"
+	"github.com/yibaiba/hideck/pkg/logger"
 )
 
 type runtimeStartFunc func(context.Context, runtimehost.StartRequest) (*runtimehost.Instance, error)
@@ -141,17 +142,26 @@ func (m *Manager) StartRuntime(ctx context.Context, req RuntimeStartRequest) (Ru
 	}
 
 	if ctx.Err() != nil || !m.ClaimStarted(deviceID, req.Epoch, inst) {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = inst.Stop(stopCtx)
-		cancel()
+		// The stale instance is not registered, so no later teardown can wait
+		// for it: hold this lifecycle command until its runner has exited.
+		if err := inst.Stop(context.Background()); err != nil {
+			logger.Warn("VoWiFi 过期实例停止时出错", "device", deviceID, "err", err)
+		}
 		return RuntimeStartResult{Instance: inst, Stale: true}, nil
 	}
 	stateMu := m.stateLock(deviceID)
 	stateMu.Lock()
-	defer stateMu.Unlock()
 	if !m.ShouldRun(deviceID, req.Epoch) || !m.IsCurrentInstance(deviceID, inst) {
+		// Claimed but already stale: unregister it and stop it, so it does not
+		// keep running unnoticed.
+		m.RuntimeStore().DeleteInstance(deviceID, inst)
+		stateMu.Unlock()
+		if err := inst.Stop(context.Background()); err != nil {
+			logger.Warn("VoWiFi 过期实例停止时出错", "device", deviceID, "err", err)
+		}
 		return RuntimeStartResult{Instance: inst, Stale: true}, nil
 	}
+	defer stateMu.Unlock()
 	readiness.Observe(runtimehost.Event{
 		Session: inst, TraceID: req.TraceID, State: inst.State(),
 	})

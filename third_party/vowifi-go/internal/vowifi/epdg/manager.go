@@ -47,6 +47,14 @@ func (m *Manager) Stop(deviceID string) error {
 	return m.mgr.Stop(deviceID)
 }
 
+func (m *Manager) StopAndWait(ctx context.Context, deviceID string) error {
+	return m.mgr.StopAndWait(ctx, deviceID)
+}
+
+func (m *Manager) StopAsync(deviceID string) (func(context.Context) error, error) {
+	return m.mgr.StopAsync(deviceID)
+}
+
 func (m *Manager) StopSlot(deviceID, slot string) error {
 	return m.mgr.StopSlot(deviceID, slot)
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/iniwex5/vowifi-go/engine/swu"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/epdg"
 	"github.com/iniwex5/vowifi-go/internal/vowifi/logging"
+	"go.uber.org/zap"
 )
 
 const epdgEstablishmentTimeout = 45 * time.Second
@@ -63,11 +64,29 @@ func startAndWait(
 	if err == nil {
 		return session, snapshot, nil
 	}
-	stopErr := manager.Stop(deviceID)
+	stopErr := stopEPDGAndWait(manager, deviceID)
 	if stopErr != nil && !strings.Contains(stopErr.Error(), "session id") {
+		if errors.Is(stopErr, swu.ErrSessionCleanup) {
+			zap.S().Warnw("failed SWu attempt left a local cleanup failure",
+				"device", strings.TrimSpace(deviceID), "error", stopErr)
+		}
 		err = errors.Join(err, stopErr)
 	}
 	return nil, swu.SessionSnapshot{}, err
+}
+
+// stopEPDGAndWait returns only after the SWu session goroutine has exited, so
+// a cancelled start no longer uses the SIM when the runner returns. The wait is
+// unbounded here; Instance.Stop bounds and reports it on the host side.
+func stopEPDGAndWait(manager epdgSessionManager, deviceID string) error {
+	if waiter, ok := manager.(interface {
+		StopAndWait(context.Context, string) error
+	}); ok {
+		return waiter.StopAndWait(context.Background(), deviceID)
+	}
+	zap.S().Warnw("SWu session manager cannot wait for session exit; stopping without waiting",
+		"device", strings.TrimSpace(deviceID))
+	return manager.Stop(deviceID)
 }
 
 func shouldRetryDeviceIdentity(config *swu.Config, err error) bool {
