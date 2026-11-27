@@ -18,6 +18,11 @@ import (
 // stop within voWiFiStopWaitTimeout; VoWiFi has been stopped and is not restored.
 var ErrSwitchVoWiFiNotStopped = errors.New("已请求停止 VoWiFi，但旧任务尚未确认退出，未切换 profile")
 
+// ErrSwitchRadioNotReleased aborts a switch to a Lebara UK target (or one that
+// could not be classified) whose radio could not be turned off first: with the
+// radio on, the new profile could attach and move the card to another IMSI.
+var ErrSwitchRadioNotReleased = errors.New("切入 Lebara UK 或无法识别的目标前关闭射频失败")
+
 var postSwitchSIMAuthRecoveryDelays = []time.Duration{
 	500 * time.Millisecond,
 	500 * time.Millisecond,
@@ -323,25 +328,56 @@ func (p *Pool) applyNetworkPreferenceForSwitchSnapshot(worker *Worker, snapshot 
 	return worker.StopNetwork()
 }
 
-func releaseRadioBeforeSwitch(deviceID string, worker *Worker) {
+func releaseRadioBeforeSwitch(deviceID string, worker *Worker) error {
 	if worker == nil || worker.Backend == nil || resolvedBackendMode(worker.Config) == backend.BackendPCSC {
-		return
+		return nil
 	}
 	controller, ok := worker.Backend.(backend.OperatingModeController)
 	if !ok {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := controller.SetOperatingMode(ctx, backend.ModeLowPower); err != nil {
-		logger.Warn("eSIM 切卡前释放 radio 失败，继续切卡",
-			"device", deviceID,
-			"err", err)
-		return
+	err := controller.SetOperatingMode(ctx, backend.ModeLowPower)
+	cancel()
+	if err != nil {
+		// The mode is read back only to report it. A failed release stays a
+		// failure even when the mode reads back as off: the QMI backend passes
+		// a reset in progress (ModeReset, 4) through unchanged, the same value
+		// it maps persistent flight (ModePersistLow, 6) to.
+		readCtx, cancelRead := context.WithTimeout(context.Background(), 2*time.Second)
+		mode, readErr := controller.GetOperatingMode(readCtx)
+		cancelRead()
+		if readErr != nil {
+			return fmt.Errorf("%w（读回射频模式失败: %v）", err, readErr)
+		}
+		return fmt.Errorf("%w（读回射频模式 %d）", err, mode)
 	}
 	logger.Info("eSIM 切卡前已释放 radio",
 		"device", deviceID,
 		"mode", backend.ModeLowPower)
+	return nil
+}
+
+// releaseRadioForSwitchTarget turns the radio off before the profile changes.
+// Only a Lebara UK target (or an unclassified one) aborts the switch when that
+// fails; the RadioCycle release of other cards keeps going as before.
+func (p *Pool) releaseRadioForSwitchTarget(worker *Worker, snapshot esimSwitchContext) error {
+	if snapshot.TargetLebaraCandidate || snapshot.TargetClassifyFailed {
+		if err := p.holdRadioOffForLebaraSwitchTarget(worker); err != nil {
+			logger.Error("切入受保护目标前关闭射频失败，中止切卡",
+				"device", worker.ID, "switch_token", snapshot.SwitchToken, "target_iccid", snapshot.TargetICCID,
+				"target_lebara_uk", snapshot.TargetLebaraCandidate, "target_classify_failed", snapshot.TargetClassifyFailed,
+				"err", err)
+			return fmt.Errorf("%w: %w", ErrSwitchRadioNotReleased, err)
+		}
+		return nil
+	}
+	if worker.Config.ESIMSwitch.RadioCycle {
+		if err := releaseRadioBeforeSwitch(worker.ID, worker); err != nil {
+			logger.Warn("eSIM 切卡前释放 radio 失败，继续切卡", "device", worker.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 func (p *Pool) bringRadioOnlineAfterSwitch(deviceID string, worker *Worker, snapshot esimSwitchContext, attachTimeout time.Duration) {
@@ -407,13 +443,15 @@ func (p *Pool) handleESIMSwitchBeforeSnapshot(deviceID string, snapshot esimSwit
 	return token
 }
 
-// prepareESIMSwitch returns an error when the old VoWiFi task has not stopped;
-// the switch is then aborted before any radio, data or profile change.
+// prepareESIMSwitch returns an error when the old VoWiFi task has not stopped
+// (the switch is then aborted before any radio, data or profile change), or
+// when the radio could not be turned off for a Lebara UK target or one that
+// could not be classified (the switch is then aborted before any profile
+// change and the failure path restores the snapshot).
 func (p *Pool) prepareESIMSwitch(deviceID string, snapshot esimSwitchContext) (uint64, error) {
 	if snapshot.SwitchToken == 0 {
 		return 0, nil
 	}
-	holdTargetRadio := snapshot.TargetLebaraCandidate || snapshot.TargetClassifyFailed
 	// Stop the old VoWiFi task first: until it has exited, nothing about the
 	// SIM, its identity or the radio changes, so an abort leaves nothing to undo.
 	if snapshot.VoWiFiActiveBefore {
@@ -448,10 +486,8 @@ func (p *Pool) prepareESIMSwitch(deviceID string, snapshot esimSwitchContext) (u
 		}
 	}
 	if worker := p.GetWorker(deviceID); worker != nil && worker.QMICore != nil {
-		if holdTargetRadio {
-			p.holdRadioOffForLebaraSwitchTarget(worker)
-		} else if worker.Config.ESIMSwitch.RadioCycle {
-			releaseRadioBeforeSwitch(deviceID, worker)
+		if err := p.releaseRadioForSwitchTarget(worker, snapshot); err != nil {
+			return snapshot.SwitchToken, err
 		}
 		worker.QMICore.ReleaseAPDULeasesForSwitchTeardown()
 		// 切卡前主动清空 DeviceSnapshot 中缓存的 ICCID/IMSI，
@@ -460,18 +496,16 @@ func (p *Pool) prepareESIMSwitch(deviceID string, snapshot esimSwitchContext) (u
 			snap.ResetIdentities(false)
 		}
 	} else if worker := p.GetWorker(deviceID); worker != nil {
-		if holdTargetRadio {
-			p.holdRadioOffForLebaraSwitchTarget(worker)
-		} else if worker.Config.ESIMSwitch.RadioCycle {
-			releaseRadioBeforeSwitch(deviceID, worker)
+		if err := p.releaseRadioForSwitchTarget(worker, snapshot); err != nil {
+			return snapshot.SwitchToken, err
 		}
 	}
 	return snapshot.SwitchToken, nil
 }
 
-func (p *Pool) holdRadioOffForLebaraSwitchTarget(worker *Worker) {
+func (p *Pool) holdRadioOffForLebaraSwitchTarget(worker *Worker) error {
 	if worker == nil {
-		return
+		return nil
 	}
 	worker.setCellularRadioSuppressed(true)
 	if nc := worker.NetworkController(); nc != nil && nc.IsConnected() {
@@ -479,7 +513,7 @@ func (p *Pool) holdRadioOffForLebaraSwitchTarget(worker *Worker) {
 			logger.Warn("切换 Lebara UK 前关闭数据连接失败", "device", worker.ID, "err", err)
 		}
 	}
-	releaseRadioBeforeSwitch(worker.ID, worker)
+	return releaseRadioBeforeSwitch(worker.ID, worker)
 }
 
 func (p *Pool) refreshPostSwitchIdentity(deviceID string, worker *Worker, snapshot esimSwitchContext) (bool, error) {
