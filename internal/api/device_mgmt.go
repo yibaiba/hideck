@@ -2074,6 +2074,9 @@ func isEsimBusyError(err error) bool {
 }
 
 func esimDisableHTTPStatus(err error) int {
+	if errors.Is(err, device.ErrSwitchVoWiFiNotStopped) {
+		return http.StatusConflict
+	}
 	switch esim.ClassifyDisableProfileError(err) {
 	case esim.DisableProfileErrorInvalidICCID, esim.DisableProfileErrorInvalidAIDHex:
 		return http.StatusBadRequest
@@ -2089,6 +2092,9 @@ func esimDisableHTTPStatus(err error) int {
 }
 
 func esimSwitchHTTPStatus(err error) int {
+	if errors.Is(err, device.ErrSwitchVoWiFiNotStopped) {
+		return http.StatusConflict
+	}
 	switch esim.ClassifySwitchProfileError(err) {
 	case esim.SwitchProfileErrorInvalidICCID, esim.SwitchProfileErrorInvalidAIDHex:
 		return http.StatusBadRequest

@@ -2366,7 +2366,7 @@ func configureWorkerAPDUArbiter(w *Worker, qmiTransport esim.QMIAPDUTransport) {
 func newESIMManagerForWorker(
 	w *Worker,
 	qmiTransport esim.QMIAPDUTransport,
-	onBefore func(esim.SwitchOperation, string) uint64,
+	onBefore func(esim.SwitchOperation, string) (uint64, error),
 	onAfter func(uint64),
 	onFailed func(uint64, error),
 	onDegraded func(uint64, esim.SwitchPhase, error),
@@ -2376,9 +2376,9 @@ func newESIMManagerForWorker(
 		return nil, fmt.Errorf("worker 不能为空")
 	}
 
-	var beforeWithOperation func(esim.SwitchOperation, string) uint64
+	var beforeWithOperation func(esim.SwitchOperation, string) (uint64, error)
 	if onBefore != nil {
-		beforeWithOperation = func(operation esim.SwitchOperation, targetICCID string) uint64 {
+		beforeWithOperation = func(operation esim.SwitchOperation, targetICCID string) (uint64, error) {
 			return onBefore(operation, targetICCID)
 		}
 	}
